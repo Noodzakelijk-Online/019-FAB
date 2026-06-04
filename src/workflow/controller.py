@@ -240,11 +240,15 @@ class WorkflowController:
         try:
             self._safe_state(document_id, "validation_pending", "Starting validation and budget checks")
             validation_result = self.validation_manager.validate_receipt(doc_data)
+            doc_data["validation_result"] = validation_result
             if not validation_result.get("is_valid"):
                 reason = validation_result.get("reason", "Validation failed")
                 self._safe_state(document_id, "validation_failed", reason)
                 self._require_manual_review(document_id, "validation_failed", reason)
                 return None
+
+            if validation_result.get("warnings"):
+                self.database.add_audit_log("document", document_id, "validation_warnings", None, validation_result, "Validation warnings present")
 
             budget_check_result = self.budget_manager.check_budget(doc_data)
             if not budget_check_result.get("is_within_budget", True):
@@ -306,10 +310,17 @@ class WorkflowController:
             bank_transactions = self.banking_api.fetch_transactions(self.config.get("banking_api_credentials"))
             reconciliation_results = self.reconciliation_manager.reconcile(bank_transactions, list(processed_documents))
             for result in reconciliation_results:
+                self.database.add_reconciliation_result(result)
                 if not result.get("matched"):
                     review_id = result.get("id") or result.get("transaction", {}).get("id") or result.get("bank_transaction", {}).get("id") or "unknown_reconciliation_item"
                     self.logger.warning("Unmatched transaction/document: %s", result)
                     self.database.add_manual_review_item(review_id, "unmatched_reconciliation", str(result))
+            for alert in self.reconciliation_manager.detect_missing_receipts(bank_transactions, list(processed_documents)):
+                self.database.add_missing_receipt_alert(alert)
+                transaction_id = alert.get("transaction", {}).get("id") or "unknown_transaction"
+                self.database.add_manual_review_item(transaction_id, "missing_receipt", str(alert), severity="high")
+            for conflict in self.reconciliation_manager.detect_conflicts(reconciliation_results):
+                self.database.add_manual_review_item(None, "reconciliation_conflict", str(conflict), severity="high")
         except Exception as exc:
             self.logger.error("Error during reconciliation: %s", exc)
             self.error_recovery.handle_error(exc, "reconciliation_workflow")
