@@ -1,60 +1,46 @@
 from google.cloud import vision
-import os
 from typing import Dict, Any
 
 from src.document_processors.base import BaseProcessor
+from src.document_processors.financial_field_extractor import FinancialFieldExtractor
+
 
 class VisionProcessor(BaseProcessor):
-    """Processes documents using Google Cloud Vision API for OCR and data extraction."""
+    """Processes documents using Google Cloud Vision API for OCR and field extraction."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set
-        # or pass credentials directly if preferred.
         self.client = vision.ImageAnnotatorClient()
+        self.extractor = FinancialFieldExtractor()
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
-        with open(document_path, "rb") as image_file:
-            content = image_file.read()
+        try:
+            with open(document_path, "rb") as image_file:
+                content = image_file.read()
 
-        image = vision.Image(content=content)
+            image = vision.Image(content=content)
+            response = self.client.document_text_detection(image=image)
+            if getattr(response, "error", None) and response.error.message:
+                raise RuntimeError(response.error.message)
 
-        response = self.client.document_text_detection(image=image)
-        full_text = response.full_text_annotation.text
+            full_text = response.full_text_annotation.text if response.full_text_annotation else ""
+            extraction = self.extractor.extract(full_text)
+            language = "en"
+            pages = response.full_text_annotation.pages if response.full_text_annotation else []
+            if pages and pages[0].property.detected_languages:
+                language = pages[0].property.detected_languages[0].language_code
 
-        # Basic extraction (can be enhanced with more sophisticated parsing)
-        extracted_data = self._extract_data_from_text(full_text)
-
-        return {
-            "ocr_text": full_text,
-            "extracted_data": extracted_data,
-            "language": response.full_text_annotation.pages[0].property.detected_languages[0].language_code if response.full_text_annotation.pages and response.full_text_annotation.pages[0].property.detected_languages else "en" # Default to English
-        }
+            return {
+                "ocr_text": full_text,
+                "extracted_data": extraction["extracted_data"],
+                "field_confidences": extraction["field_confidences"],
+                "language": language,
+                "ocr_confidence": 0.85 if full_text else 0.0,
+            }
+        except Exception as exc:
+            print(f"Error processing document with Google Vision: {exc}")
+            return {"ocr_text": "", "extracted_data": {}, "field_confidences": {}, "language": "", "ocr_confidence": 0.0}
 
     def _extract_data_from_text(self, text: str) -> Dict[str, Any]:
-        """Placeholder for extracting structured data from the OCR text."""
-        # This is a very basic example. Real-world extraction would involve regex, NLP, etc.
-        data = {
-            "vendor_name": None,
-            "transaction_date": None,
-            "total_amount": None,
-            "currency": None,
-            "vat_amount": None,
-            "line_items": []
-        }
-
-        # Example: Simple regex for amount (highly simplified)
-        import re
-        amount_match = re.search(r"Total[:\]?\s*([€$£]?\s*\d+[.,]\d{2})", text, re.IGNORECASE)
-        if amount_match:
-            data["total_amount"] = amount_match.group(1).replace(",", ".").replace("€", "").strip()
-            try:
-                data["total_amount"] = float(data["total_amount"])
-            except ValueError:
-                pass # Keep as string if conversion fails
-
-        # More sophisticated parsing would go here
-
-        return data
-
-
+        """Backward-compatible helper for older tests/callers."""
+        return self.extractor.extract(text).get("extracted_data", {})
