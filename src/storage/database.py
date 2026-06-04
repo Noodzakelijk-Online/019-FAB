@@ -30,8 +30,7 @@ class Database:
 
     def initialize(self) -> None:
         with self.connect() as connection:
-            cursor = connection.cursor()
-            cursor.executescript(
+            connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
@@ -143,6 +142,39 @@ class Database:
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS bank_transactions (
+                    id TEXT PRIMARY KEY,
+                    source TEXT,
+                    transaction_date TEXT,
+                    amount REAL,
+                    currency TEXT,
+                    description TEXT,
+                    counterparty TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS reconciliation_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    result_type TEXT NOT NULL,
+                    transaction_id TEXT,
+                    document_id TEXT,
+                    matched INTEGER NOT NULL DEFAULT 0,
+                    match_score REAL NOT NULL DEFAULT 0,
+                    match_reason_json TEXT NOT NULL DEFAULT '[]',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS missing_receipt_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transaction_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    alert_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
                 """
             )
 
@@ -201,57 +233,72 @@ class Database:
                 "UPDATE documents SET current_state = ?, updated_at = ? WHERE id = ?",
                 (new_state, self.now(), document_id),
             )
-            self._insert_audit_log(
-                connection,
-                "document",
-                document_id,
-                "state_transition",
-                {"state": previous_state},
-                {"state": new_state},
-                reason,
-                actor,
-            )
+            self._insert_audit_log(connection, "document", document_id, "state_transition", {"state": previous_state}, {"state": new_state}, reason, actor)
 
     def add_manual_review_item(self, document_id: str, reason: str, details: str = "", severity: str = "normal") -> None:
         with self.connect() as connection:
             connection.execute(
-                """
-                INSERT INTO manual_review_items (document_id, reason, details, severity, status, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?)
-                """,
+                "INSERT INTO manual_review_items (document_id, reason, details, severity, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
                 (document_id, reason, details, severity, self.now()),
             )
             self._insert_audit_log(connection, "document", document_id, "manual_review_required", None, {"reason": reason, "details": details}, reason, "system")
 
-    def add_audit_log(
-        self,
-        entity_type: str,
-        entity_id: str,
-        action: str,
-        before: Any = None,
-        after: Any = None,
-        reason: str = "",
-        actor: str = "system",
-    ) -> None:
+    def add_reconciliation_result(self, result: Dict[str, Any]) -> None:
+        transaction = result.get("bank_transaction", {}) or result.get("transaction", {}) or {}
+        document = result.get("document", {}) or {}
+        transaction_id = transaction.get("id")
+        document_id = document.get("document_id")
+        with self.connect() as connection:
+            if transaction_id:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO bank_transactions (id, source, transaction_date, amount, currency, description, counterparty, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        transaction_id,
+                        transaction.get("source", "bank_import"),
+                        transaction.get("date") or transaction.get("transaction_date"),
+                        transaction.get("amount"),
+                        transaction.get("currency"),
+                        transaction.get("description"),
+                        transaction.get("counterparty"),
+                        self.json_dumps(transaction),
+                        self.now(),
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO reconciliation_results (result_type, transaction_id, document_id, matched, match_score, match_reason_json, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.get("type"),
+                    transaction_id,
+                    document_id,
+                    1 if result.get("matched") else 0,
+                    result.get("match_score", 0.0),
+                    self.json_dumps(result.get("match_reason", [])),
+                    self.json_dumps(result),
+                    self.now(),
+                ),
+            )
+
+    def add_missing_receipt_alert(self, alert: Dict[str, Any]) -> None:
+        transaction = alert.get("transaction", {}) or {}
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO missing_receipt_alerts (transaction_id, status, alert_json, created_at) VALUES (?, 'open', ?, ?)",
+                (transaction.get("id"), self.json_dumps(alert), self.now()),
+            )
+
+    def add_audit_log(self, entity_type: str, entity_id: str, action: str, before: Any = None, after: Any = None, reason: str = "", actor: str = "system") -> None:
         with self.connect() as connection:
             self._insert_audit_log(connection, entity_type, entity_id, action, before, after, reason, actor)
 
-    def _insert_audit_log(
-        self,
-        connection: sqlite3.Connection,
-        entity_type: str,
-        entity_id: Optional[str],
-        action: str,
-        before: Any,
-        after: Any,
-        reason: str,
-        actor: str,
-    ) -> None:
+    def _insert_audit_log(self, connection: sqlite3.Connection, entity_type: str, entity_id: Optional[str], action: str, before: Any, after: Any, reason: str, actor: str) -> None:
         connection.execute(
-            """
-            INSERT INTO audit_log (entity_type, entity_id, action, before_json, after_json, reason, actor, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            "INSERT INTO audit_log (entity_type, entity_id, action, before_json, after_json, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (entity_type, entity_id, action, self.json_dumps(before), self.json_dumps(after), reason, actor, self.now()),
         )
 
