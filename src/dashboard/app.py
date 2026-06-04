@@ -4,9 +4,11 @@ from typing import Any, Dict
 from flask import Flask, abort, jsonify, request
 
 from src.backup.backup_manager import BackupManager
+from src.data_entry.posting_approval import PostingApprovalService
 from src.exceptions.exception_memory import ExceptionMemory
 from src.learning.correction_learning import CorrectionLearningService
 from src.missing_receipts.follow_up_manager import MissingReceiptFollowUpManager
+from src.reports.reporting_service import ReportingService
 from src.storage.database import Database
 from src.storage.schema_extender import SchemaExtender
 
@@ -20,6 +22,8 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     exception_memory = ExceptionMemory(config)
     follow_up_manager = MissingReceiptFollowUpManager(config)
     correction_learning = CorrectionLearningService(config)
+    reporting_service = ReportingService(config)
+    posting_approval = PostingApprovalService(config)
     dashboard_token = config.get("dashboard_access_token")
 
     def require_auth(func):
@@ -27,7 +31,7 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
         def wrapper(*args, **kwargs):
             if not dashboard_token:
                 abort(503, description="Dashboard token is not configured.")
-            provided = request.headers.get("X-FAB-Token")
+            provided = request.headers.get("X-FAB-Token") or request.args.get("token")
             if provided != dashboard_token:
                 abort(401, description="Invalid or missing FAB dashboard token.")
             return func(*args, **kwargs)
@@ -37,27 +41,41 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     def health():
         return jsonify({"status": "ok", "service": "FAB local dashboard"})
 
+    @app.get("/ui")
+    @require_auth
+    def operator_ui():
+        token = request.args.get("token", "")
+        summary = reporting_service.summary()
+        html = f"""
+        <!doctype html>
+        <html><head><title>FAB Operator Dashboard</title>
+        <style>
+        body {{ font-family: Arial, sans-serif; background:#111; color:#eee; margin: 24px; }}
+        a {{ color:#9ad; }} code {{ background:#222; padding:2px 4px; }}
+        .card {{ background:#1c1c1c; border:1px solid #333; border-radius:8px; padding:16px; margin:12px 0; }}
+        table {{ border-collapse: collapse; width: 100%; }} th,td {{ border:1px solid #333; padding:8px; }}
+        </style></head><body>
+        <h1>FAB Operator Dashboard</h1>
+        <div class='card'><h2>Summary</h2><pre>{summary}</pre></div>
+        <div class='card'><h2>Key Links</h2>
+          <p><a href='/documents?token={token}'>Documents</a></p>
+          <p><a href='/manual-review?token={token}'>Manual Review</a></p>
+          <p><a href='/posting-attempts?token={token}'>Posting Attempts</a></p>
+          <p><a href='/reports/summary?token={token}'>Reports Summary</a></p>
+          <p><a href='/missing-receipts?token={token}'>Missing Receipts</a></p>
+          <p><a href='/outreach-reminders?token={token}'>Outreach Reminders</a></p>
+          <p><a href='/backups?token={token}'>Backups</a></p>
+        </div>
+        <div class='card'><h2>Security</h2><p>This UI is token-protected. Do not expose the token publicly when using ngrok.</p></div>
+        </body></html>
+        """
+        return html
+
     @app.get("/")
     @require_auth
     def index():
-        counts = database.fetch_all("SELECT current_state, COUNT(*) AS count FROM documents GROUP BY current_state ORDER BY current_state")
-        pending_reviews = database.fetch_all("SELECT COUNT(*) AS count FROM manual_review_items WHERE status = 'pending'")[0]["count"]
-        open_missing_receipts = database.fetch_all("SELECT COUNT(*) AS count FROM missing_receipt_alerts WHERE status = 'open'")[0]["count"]
-        open_followups = database.fetch_all("SELECT COUNT(*) AS count FROM outreach_reminders WHERE status = 'open'")[0]["count"]
-        return jsonify({
-            "application": "FAB",
-            "mode": "local-ngrok-compatible",
-            "document_state_counts": counts,
-            "pending_manual_reviews": pending_reviews,
-            "open_missing_receipts": open_missing_receipts,
-            "open_followups": open_followups,
-            "endpoints": [
-                "/documents", "/manual-review", "/audit-log", "/posting-attempts",
-                "/reconciliation-results", "/missing-receipts", "/bank-transactions",
-                "/exceptions", "/outreach-reminders", "/vendors", "/category-decisions",
-                "/category-rules", "/document-corrections", "/backups",
-            ],
-        })
+        summary = reporting_service.summary()
+        return jsonify({"application": "FAB", "mode": "local-ngrok-compatible", "summary": summary})
 
     @app.get("/documents")
     @require_auth
@@ -128,7 +146,20 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     @app.get("/posting-attempts")
     @require_auth
     def posting_attempts():
-        return jsonify(database.fetch_all("SELECT * FROM posting_attempts ORDER BY updated_at DESC LIMIT 200"))
+        status = request.args.get("status")
+        return jsonify(posting_approval.list_attempts(status))
+
+    @app.post("/posting-attempts/<int:attempt_id>/approve")
+    @require_auth
+    def approve_posting_attempt(attempt_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(posting_approval.approve_attempt(attempt_id, reason=payload.get("reason", "Approved from dashboard")))
+
+    @app.post("/posting-attempts/<int:attempt_id>/reject")
+    @require_auth
+    def reject_posting_attempt(attempt_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(posting_approval.reject_attempt(attempt_id, reason=payload.get("reason", "Rejected from dashboard")))
 
     @app.get("/reconciliation-results")
     @require_auth
@@ -215,14 +246,37 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     @require_auth
     def create_category_rule():
         payload = request.get_json(silent=True) or {}
-        return jsonify(correction_learning.create_category_rule(
-            payload.get("rule_name"), payload.get("category"), payload.get("pattern"), payload.get("rule_type", "text_contains")
-        ))
+        return jsonify(correction_learning.create_category_rule(payload.get("rule_name"), payload.get("category"), payload.get("pattern"), payload.get("rule_type", "text_contains")))
 
     @app.get("/document-corrections")
     @require_auth
     def document_corrections():
         return jsonify(database.fetch_all("SELECT * FROM document_corrections ORDER BY created_at DESC LIMIT 300"))
+
+    @app.get("/reports/summary")
+    @require_auth
+    def report_summary():
+        return jsonify(reporting_service.summary())
+
+    @app.get("/reports/expense-by-vendor")
+    @require_auth
+    def report_expense_by_vendor():
+        return jsonify(reporting_service.expense_by_vendor())
+
+    @app.get("/reports/expense-by-category")
+    @require_auth
+    def report_expense_by_category():
+        return jsonify(reporting_service.expense_by_category())
+
+    @app.post("/exports/<table_name>")
+    @require_auth
+    def export_table(table_name: str):
+        return jsonify(reporting_service.export_table_csv(table_name))
+
+    @app.post("/exports/all")
+    @require_auth
+    def export_all():
+        return jsonify(reporting_service.export_all_core_csv())
 
     @app.get("/backups")
     @require_auth
