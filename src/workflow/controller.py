@@ -5,6 +5,7 @@ from src.document_fetchers.gmail_fetcher import GmailFetcher
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
 from src.document_fetchers.photos_fetcher import PhotosFetcher
+from src.document_fetchers.local_folder_fetcher import LocalFolderFetcher
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.categorizers.hybrid_categorizer import HybridCategorizer
 from src.data_entry.mijngeldzaken_handler import MijngeldzakenHandler
@@ -60,11 +61,12 @@ class WorkflowController:
         self.performance_optimizer = PerformanceOptimizer(config)
 
     def _build_enabled_fetchers(self, config: Dict[str, Any]):
-        enabled_sources = config.get("enabled_fetchers", "drive")
+        enabled_sources = config.get("enabled_fetchers", "local_folder")
         if isinstance(enabled_sources, str):
             enabled_sources = [source.strip() for source in enabled_sources.split(",") if source.strip()]
 
         fetcher_factories = {
+            "local_folder": LocalFolderFetcher,
             "gmail": GmailFetcher,
             "drive": DriveFetcher,
             "freshdesk": FreshdeskFetcher,
@@ -123,7 +125,9 @@ class WorkflowController:
                 documents = fetcher.fetch_documents()
                 for doc in documents:
                     self.database.upsert_document(doc, state="received")
-                    self.database.set_document_state(doc["id"], "stored", "Document fetched and stored")
+                    current = self.database.fetch_one("SELECT current_state FROM documents WHERE id = ?", (doc["id"],))
+                    if current and current.get("current_state") == "received":
+                        self.database.set_document_state(doc["id"], "stored", "Document fetched and stored")
                 all_documents.extend(documents)
                 self.logger.info("Fetched %s documents from %s.", len(documents), source)
             except Exception as exc:
@@ -136,14 +140,15 @@ class WorkflowController:
         document_id = doc.get("id")
         original_filename = doc.get("original_filename", "unknown")
         try:
-            self.database.set_document_state(document_id, "ocr_pending", "Starting OCR/document processing")
+            self._safe_state(document_id, "ocr_pending", "Starting OCR/document processing")
             self.logger.info("Processing document: %s", original_filename)
             processed_data = self.processor_pipeline.process_document(doc["local_path"])
             processed_data["document_id"] = document_id
             processed_data["source_document"] = doc
             self._persist_ocr_and_fields(processed_data)
-            self.database.set_document_state(document_id, "ocr_completed", "OCR/document processing completed")
-            self.database.set_document_state(document_id, "extraction_completed", "Initial extraction completed")
+            self._safe_state(document_id, "ocr_completed", "OCR/document processing completed")
+            self._safe_state(document_id, "extraction_pending", "Starting extraction review")
+            self._safe_state(document_id, "extraction_completed", "Initial extraction completed")
 
             safety_result = self.safety_engine.evaluate_extraction(processed_data)
             processed_data["extraction_safety_result"] = safety_result
@@ -154,7 +159,7 @@ class WorkflowController:
         except Exception as exc:
             self.logger.error("Error processing %s: %s", original_filename, exc)
             self.error_recovery.handle_error(exc, f"process_{document_id}", document_id=document_id)
-            self.database.set_document_state(document_id, "ocr_failed", str(exc))
+            self._safe_state(document_id, "ocr_failed", str(exc))
             self._require_manual_review(document_id, "processing_failed", str(exc))
             return None
 
@@ -192,16 +197,17 @@ class WorkflowController:
     def _categorize_document(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
         document_id = processed_data.get("document_id")
         try:
-            self.database.set_document_state(document_id, "vendor_matching_pending", "Starting vendor/category matching")
+            self._safe_state(document_id, "vendor_matching_pending", "Starting vendor/category matching")
             self.logger.info("Categorizing document: %s", document_id)
             category_result = self.categorizer.categorize(processed_data)
             processed_data.update(category_result)
             if category_result.get("category") in {None, "Uncategorized", "Manual Review"}:
-                self.database.set_document_state(document_id, "category_uncertain", "Categorization did not produce a safe category")
+                self._safe_state(document_id, "category_uncertain", "Categorization did not produce a safe category")
                 self._require_manual_review(document_id, "category_uncertain", str(category_result))
                 return None
-            self.database.set_document_state(document_id, "vendor_matched", "Vendor/category matching completed")
-            self.database.set_document_state(document_id, "categorized", f"Category: {category_result.get('category')}")
+            self._safe_state(document_id, "vendor_matched", "Vendor/category matching completed")
+            self._safe_state(document_id, "categorization_pending", "Preparing category decision")
+            self._safe_state(document_id, "categorized", f"Category: {category_result.get('category')}")
             return processed_data
         except Exception as exc:
             self.logger.error("Error categorizing %s: %s", document_id, exc)
@@ -211,12 +217,12 @@ class WorkflowController:
 
     def _check_duplicate(self, doc_data: Dict[str, Any]) -> bool:
         document_id = doc_data.get("document_id")
-        self.database.set_document_state(document_id, "duplicate_check_pending", "Checking duplicate fingerprints")
+        self._safe_state(document_id, "duplicate_check_pending", "Checking duplicate fingerprints")
         existing = self.database.fetch_all("SELECT document_id, fingerprint AS duplicate_fingerprint FROM duplicate_fingerprints WHERE document_id != ?", (document_id,))
         duplicate_result = self.duplicate_detector.is_duplicate(doc_data, existing)
         doc_data["duplicate_result"] = duplicate_result
         if duplicate_result.get("is_duplicate"):
-            self.database.set_document_state(document_id, "suspected_duplicate", str(duplicate_result))
+            self._safe_state(document_id, "suspected_duplicate", str(duplicate_result))
             self._require_manual_review(document_id, "suspected_duplicate", str(duplicate_result), severity="high")
             return False
 
@@ -226,17 +232,17 @@ class WorkflowController:
                 "INSERT OR IGNORE INTO duplicate_fingerprints (fingerprint, document_id, created_at) VALUES (?, ?, ?)",
                 (fingerprint, document_id, self.database.now()),
             )
-        self.database.set_document_state(document_id, "duplicate_clear", "No duplicate detected")
+        self._safe_state(document_id, "duplicate_clear", "No duplicate detected")
         return True
 
     def _validate_and_budget(self, doc_data: Dict[str, Any]) -> Dict[str, Any]:
         document_id = doc_data.get("document_id")
         try:
-            self.database.set_document_state(document_id, "validation_pending", "Starting validation and budget checks")
+            self._safe_state(document_id, "validation_pending", "Starting validation and budget checks")
             validation_result = self.validation_manager.validate_receipt(doc_data)
             if not validation_result.get("is_valid"):
                 reason = validation_result.get("reason", "Validation failed")
-                self.database.set_document_state(document_id, "validation_failed", reason)
+                self._safe_state(document_id, "validation_failed", reason)
                 self._require_manual_review(document_id, "validation_failed", reason)
                 return None
 
@@ -246,7 +252,7 @@ class WorkflowController:
                 self._require_manual_review(document_id, "budget_exceeded", message)
                 return None
 
-            self.database.set_document_state(document_id, "validated", "Validation and budget checks passed")
+            self._safe_state(document_id, "validated", "Validation and budget checks passed")
             return doc_data
         except Exception as exc:
             self.logger.error("Error during validation/budget check for %s: %s", document_id, exc)
@@ -256,22 +262,22 @@ class WorkflowController:
 
     def _route_document(self, doc_data: Dict[str, Any]) -> Dict[str, Any]:
         document_id = doc_data.get("document_id")
-        self.database.set_document_state(document_id, "routing_pending", "Resolving bookkeeping route")
+        self._safe_state(document_id, "routing_pending", "Resolving bookkeeping route")
         route_result = self.router.route(doc_data)
         doc_data.update(route_result)
         if not route_result.get("target_system"):
             self._require_manual_review(document_id, "no_target_system", str(route_result))
             return None
-        self.database.set_document_state(document_id, "routed", str(route_result))
+        self._safe_state(document_id, "routed", str(route_result))
         return doc_data
 
     def _create_dry_run_or_post(self, doc_data: Dict[str, Any]) -> None:
         document_id = doc_data.get("document_id")
         target_system = doc_data.get("target_system")
         target_account = doc_data.get("target_account")
-        self.database.set_document_state(document_id, "dry_run_pending", "Creating dry-run posting payload")
+        self._safe_state(document_id, "dry_run_pending", "Creating dry-run posting payload")
         dry_run = self.safe_posting.create_dry_run(doc_data, target_system, target_account)
-        self.database.set_document_state(document_id, "dry_run_completed", str(dry_run))
+        self._safe_state(document_id, "dry_run_completed", str(dry_run))
 
         safety_result = dry_run.get("safety_result", {})
         if not safety_result.get("may_post"):
@@ -282,16 +288,16 @@ class WorkflowController:
             self._require_manual_review(document_id, "approval_required_before_live_posting", "Dry-run created; live posting is disabled by default.")
             return
 
-        self.database.set_document_state(document_id, "approved_for_posting", "Safety checks passed and live posting enabled")
-        self.database.set_document_state(document_id, "posting_pending", f"Posting to {target_system}")
+        self._safe_state(document_id, "approved_for_posting", "Safety checks passed and live posting enabled")
+        self._safe_state(document_id, "posting_pending", f"Posting to {target_system}")
         handler = self.data_entry_handlers[target_system]
         entry_result = handler.enter_data(doc_data)
         if entry_result.get("status") == "success":
-            self.database.set_document_state(document_id, "posted", str(entry_result))
+            self._safe_state(document_id, "posted", str(entry_result))
             self.learning_manager.provide_feedback(document_id, doc_data.get("category"), True)
         else:
             message = entry_result.get("message", "Data entry failed")
-            self.database.set_document_state(document_id, "posting_failed", message)
+            self._safe_state(document_id, "posting_failed", message)
             self._require_manual_review(document_id, "data_entry_failed", message, severity="high")
 
     def _run_reconciliation(self, processed_documents: Iterable[Dict[str, Any]]) -> None:
@@ -319,8 +325,14 @@ class WorkflowController:
 
     def _require_manual_review(self, document_id: str, reason: str, details: str = "", severity: str = "normal") -> None:
         self.database.add_manual_review_item(document_id, reason, details, severity=severity)
-        try:
-            self.database.set_document_state(document_id, "manual_review_required", reason)
-        except Exception:
-            pass
+        self._safe_state(document_id, "manual_review_required", reason)
         self.manual_review_interface.add_to_review_queue(document_id, reason, details)
+
+    def _safe_state(self, document_id: str, new_state: str, reason: str = "") -> None:
+        if not document_id:
+            return
+        try:
+            self.database.set_document_state(document_id, new_state, reason)
+        except Exception as exc:
+            self.logger.warning("Could not transition document %s to %s: %s", document_id, new_state, exc)
+            self.database.add_audit_log("document", document_id, "state_transition_warning", None, {"attempted_state": new_state}, str(exc))
