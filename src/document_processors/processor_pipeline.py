@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import Dict, Any
 
 from src.document_processors.base import BaseProcessor
 from src.document_processors.enhanced_processor import EnhancedProcessor
@@ -7,8 +7,9 @@ from src.document_processors.tesseract_processor import TesseractProcessor
 from src.document_processors.template_matching_processor import TemplateMatchingProcessor
 from src.document_processors.line_item_extractor import LineItemExtractor
 
+
 class ProcessorPipeline(BaseProcessor):
-    """Orchestrates a pipeline of document processors."""
+    """Orchestrates OCR, extraction, template matching, and line-item extraction."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -16,12 +17,9 @@ class ProcessorPipeline(BaseProcessor):
         self._initialize_pipeline()
 
     def _initialize_pipeline(self):
-        # Example pipeline configuration. This should ideally be configurable via config.ini
-        # or passed dynamically.
         if self.config.get("enable_enhanced_preprocessing", True):
             self.pipeline_steps.append(EnhancedProcessor(self.config))
-        
-        # Determine primary OCR method
+
         ocr_method = self.config.get("primary_ocr_method", "vision")
         if ocr_method == "vision":
             self.pipeline_steps.append(VisionProcessor(self.config))
@@ -32,7 +30,7 @@ class ProcessorPipeline(BaseProcessor):
 
         if self.config.get("enable_template_matching", True):
             self.pipeline_steps.append(TemplateMatchingProcessor(self.config))
-        
+
         if self.config.get("enable_line_item_extraction", True):
             self.pipeline_steps.append(LineItemExtractor(self.config))
 
@@ -41,36 +39,55 @@ class ProcessorPipeline(BaseProcessor):
             "document_path": document_path,
             "ocr_text": "",
             "extracted_data": {},
-            "language": ""
+            "field_confidences": {},
+            "language": "",
+            "ocr_confidence": 0.0,
         }
-
         current_path = document_path
 
         for step in self.pipeline_steps:
             if isinstance(step, EnhancedProcessor):
-                # EnhancedProcessor returns a processed image path
                 result = step.process_document(current_path)
                 if result.get("processed_image_path"):
                     current_path = result["processed_image_path"]
-            elif isinstance(step, (VisionProcessor, TesseractProcessor)):
-                # OCR processors take the current path and return text and extracted data
+                continue
+
+            if isinstance(step, (VisionProcessor, TesseractProcessor)):
                 result = step.process_document(current_path)
                 processed_data["ocr_text"] = result.get("ocr_text", "")
-                processed_data["extracted_data"].update(result.get("extracted_data", {}))
+                self._merge_extracted_data(processed_data, result)
                 processed_data["language"] = result.get("language", "")
-            elif isinstance(step, (TemplateMatchingProcessor, LineItemExtractor)):
-                # These processors need the OCR text from previous steps
+                processed_data["ocr_confidence"] = result.get("ocr_confidence", 0.0)
+                continue
+
+            if isinstance(step, (TemplateMatchingProcessor, LineItemExtractor)):
                 result = step.process_document(current_path, processed_data["ocr_text"])
-                processed_data["extracted_data"].update(result.get("extracted_data", {}))
-            else:
-                # Generic processing step
-                result = step.process_document(current_path)
-                processed_data["extracted_data"].update(result.get("extracted_data", {}))
-                if result.get("ocr_text"):
-                    processed_data["ocr_text"] = result["ocr_text"]
-                if result.get("language"):
-                    processed_data["language"] = result["language"]
+                self._merge_extracted_data(processed_data, result)
+                continue
+
+            result = step.process_document(current_path)
+            self._merge_extracted_data(processed_data, result)
+            if result.get("ocr_text"):
+                processed_data["ocr_text"] = result["ocr_text"]
+            if result.get("language"):
+                processed_data["language"] = result["language"]
 
         return processed_data
 
+    def _merge_extracted_data(self, processed_data: Dict[str, Any], result: Dict[str, Any]) -> None:
+        incoming_data = result.get("extracted_data", {}) or {}
+        incoming_confidences = result.get("field_confidences", {}) or {}
 
+        for key, value in incoming_data.items():
+            if self._is_empty(value):
+                continue
+            existing_confidence = processed_data["field_confidences"].get(key, 0.0)
+            incoming_confidence = incoming_confidences.get(key, 0.5)
+            existing_value = processed_data["extracted_data"].get(key)
+            if self._is_empty(existing_value) or incoming_confidence >= existing_confidence:
+                processed_data["extracted_data"][key] = value
+                processed_data["field_confidences"][key] = incoming_confidence
+
+    @staticmethod
+    def _is_empty(value: Any) -> bool:
+        return value is None or value == "" or value == [] or value == {}
