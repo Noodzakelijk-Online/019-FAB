@@ -1,18 +1,17 @@
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
+google-cloud-vision
 requests
 Pillow
 opencv-python-headless # For image processing in some processors
 scikit-learn # For ML categorizer
+joblib # For ML model persistence
 playwright # For MijngeldzakenHandler
 langdetect # For BilingualProcessor
 pandas # For DataMigration and FinancialAnalyzer
 openpyxl # For reading .xlsx files with pandas
-python-csv # For CSV operations
 Flask # For MobileDocumentCapture and ManualReviewInterface (if web-based)
 functions-framework # For Google Cloud Functions
 google-cloud-storage # For Google Cloud Functions
 cryptography # For SecurityManager
-
-
