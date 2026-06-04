@@ -175,6 +175,20 @@ class Database:
                     created_at TEXT NOT NULL,
                     resolved_at TEXT
                 );
+
+                CREATE TABLE IF NOT EXISTS outreach_reminders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transaction_id TEXT NOT NULL,
+                    vendor_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    message_template TEXT NOT NULL,
+                    reminder_count INTEGER NOT NULL DEFAULT 0,
+                    last_sent_at TEXT,
+                    next_reminder_at TEXT,
+                    stopped_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
