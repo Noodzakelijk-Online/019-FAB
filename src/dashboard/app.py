@@ -3,6 +3,7 @@ from typing import Any, Dict
 
 from flask import Flask, abort, jsonify, request
 
+from src.backup.backup_manager import BackupManager
 from src.exceptions.exception_memory import ExceptionMemory
 from src.learning.correction_learning import CorrectionLearningService
 from src.missing_receipts.follow_up_manager import MissingReceiptFollowUpManager
@@ -15,6 +16,7 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     app = Flask(__name__)
     database = Database(config)
     SchemaExtender(config).ensure_learning_schema()
+    backup_manager = BackupManager(config)
     exception_memory = ExceptionMemory(config)
     follow_up_manager = MissingReceiptFollowUpManager(config)
     correction_learning = CorrectionLearningService(config)
@@ -53,7 +55,7 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
                 "/documents", "/manual-review", "/audit-log", "/posting-attempts",
                 "/reconciliation-results", "/missing-receipts", "/bank-transactions",
                 "/exceptions", "/outreach-reminders", "/vendors", "/category-decisions",
-                "/category-rules", "/document-corrections",
+                "/category-rules", "/document-corrections", "/backups",
             ],
         })
 
@@ -221,5 +223,33 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     @require_auth
     def document_corrections():
         return jsonify(database.fetch_all("SELECT * FROM document_corrections ORDER BY created_at DESC LIMIT 300"))
+
+    @app.get("/backups")
+    @require_auth
+    def list_backups():
+        return jsonify(backup_manager.list_backups())
+
+    @app.post("/backups")
+    @require_auth
+    def create_backup():
+        payload = request.get_json(silent=True) or {}
+        paths = payload.get("paths")
+        backup_config = payload.get("backup_config", {"type": "zip"})
+        result = backup_manager.perform_backup(paths, backup_config)
+        database.add_audit_log("backup", result.get("path", "unknown"), "backup_created", None, result, result.get("status", "unknown"), "user")
+        return jsonify(result)
+
+    @app.post("/backups/restore")
+    @require_auth
+    def restore_backup():
+        payload = request.get_json(silent=True) or {}
+        backup_path = payload.get("backup_path")
+        restore_dir = payload.get("restore_dir", "restore_preview")
+        allow_overwrite = bool(payload.get("allow_overwrite", False))
+        if not backup_path:
+            abort(400, description="backup_path is required")
+        result = backup_manager.restore_backup(backup_path, restore_dir, allow_overwrite=allow_overwrite)
+        database.add_audit_log("backup", backup_path, "backup_restore_requested", None, result, result.get("status", "unknown"), "user")
+        return jsonify(result)
 
     return app
