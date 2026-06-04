@@ -3,6 +3,8 @@ from typing import Any, Dict
 
 from flask import Flask, abort, jsonify, request
 
+from src.exceptions.exception_memory import ExceptionMemory
+from src.missing_receipts.follow_up_manager import MissingReceiptFollowUpManager
 from src.storage.database import Database
 
 
@@ -10,6 +12,8 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     config = config or {}
     app = Flask(__name__)
     database = Database(config)
+    exception_memory = ExceptionMemory(config)
+    follow_up_manager = MissingReceiptFollowUpManager(config)
     dashboard_token = config.get("dashboard_access_token")
 
     def require_auth(func):
@@ -39,6 +43,9 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
         open_missing_receipts = database.fetch_all(
             "SELECT COUNT(*) AS count FROM missing_receipt_alerts WHERE status = 'open'"
         )[0]["count"]
+        open_followups = database.fetch_all(
+            "SELECT COUNT(*) AS count FROM outreach_reminders WHERE status = 'open'"
+        )[0]["count"]
         return jsonify(
             {
                 "application": "FAB",
@@ -46,6 +53,7 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
                 "document_state_counts": counts,
                 "pending_manual_reviews": pending_reviews,
                 "open_missing_receipts": open_missing_receipts,
+                "open_followups": open_followups,
                 "endpoints": [
                     "/documents",
                     "/manual-review",
@@ -54,6 +62,8 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
                     "/reconciliation-results",
                     "/missing-receipts",
                     "/bank-transactions",
+                    "/exceptions",
+                    "/outreach-reminders",
                 ],
             }
         )
@@ -134,5 +144,61 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     @require_auth
     def bank_transactions():
         return jsonify(database.fetch_all("SELECT * FROM bank_transactions ORDER BY transaction_date DESC LIMIT 300"))
+
+    @app.get("/exceptions")
+    @require_auth
+    def exceptions():
+        active = request.args.get("active", "1")
+        return jsonify(database.fetch_all(
+            "SELECT * FROM exceptions WHERE active = ? ORDER BY created_at DESC LIMIT 300",
+            (int(active),),
+        ))
+
+    @app.post("/exceptions")
+    @require_auth
+    def approve_exception():
+        payload = request.get_json(silent=True) or {}
+        exception_type = payload.get("exception_type")
+        context = payload.get("context") or {}
+        explanation = payload.get("explanation")
+        if not exception_type or not explanation:
+            abort(400, description="exception_type and explanation are required")
+        return jsonify(exception_memory.approve_exception(exception_type, context, explanation))
+
+    @app.post("/exceptions/<fingerprint>/deactivate")
+    @require_auth
+    def deactivate_exception(fingerprint: str):
+        payload = request.get_json(silent=True) or {}
+        reason = payload.get("reason", "Exception deactivated from dashboard")
+        status = "deactivated" if exception_memory.deactivate_exception(fingerprint, reason) else "not_found"
+        return jsonify({"status": status})
+
+    @app.get("/outreach-reminders")
+    @require_auth
+    def outreach_reminders():
+        status = request.args.get("status", "open")
+        return jsonify(database.fetch_all(
+            "SELECT * FROM outreach_reminders WHERE status = ? ORDER BY updated_at DESC LIMIT 300",
+            (status,),
+        ))
+
+    @app.post("/outreach-reminders/<transaction_id>/complete")
+    @require_auth
+    def complete_outreach(transaction_id: str):
+        payload = request.get_json(silent=True) or {}
+        reason = payload.get("reason", "Receipt received and processed")
+        return jsonify({"completed": follow_up_manager.mark_completed(transaction_id, reason)})
+
+    @app.post("/outreach-reminders/<transaction_id>/stop")
+    @require_auth
+    def stop_outreach(transaction_id: str):
+        payload = request.get_json(silent=True) or {}
+        reason = payload.get("reason", "Stopped from dashboard")
+        return jsonify({"stopped": follow_up_manager.stop_follow_up(transaction_id, reason)})
+
+    @app.get("/outreach-reminders/due")
+    @require_auth
+    def due_outreach():
+        return jsonify(follow_up_manager.reminders_due())
 
     return app
