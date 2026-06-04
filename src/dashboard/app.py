@@ -36,13 +36,25 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
         pending_reviews = database.fetch_all(
             "SELECT COUNT(*) AS count FROM manual_review_items WHERE status = 'pending'"
         )[0]["count"]
+        open_missing_receipts = database.fetch_all(
+            "SELECT COUNT(*) AS count FROM missing_receipt_alerts WHERE status = 'open'"
+        )[0]["count"]
         return jsonify(
             {
                 "application": "FAB",
                 "mode": "local-ngrok-compatible",
                 "document_state_counts": counts,
                 "pending_manual_reviews": pending_reviews,
-                "endpoints": ["/documents", "/manual-review", "/audit-log", "/posting-attempts"],
+                "open_missing_receipts": open_missing_receipts,
+                "endpoints": [
+                    "/documents",
+                    "/manual-review",
+                    "/audit-log",
+                    "/posting-attempts",
+                    "/reconciliation-results",
+                    "/missing-receipts",
+                    "/bank-transactions",
+                ],
             }
         )
 
@@ -67,6 +79,7 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
                 "manual_reviews": database.fetch_all("SELECT * FROM manual_review_items WHERE document_id = ? ORDER BY created_at DESC", (document_id,)),
                 "audit_log": database.fetch_all("SELECT * FROM audit_log WHERE entity_id = ? ORDER BY created_at DESC LIMIT 100", (document_id,)),
                 "posting_attempts": database.fetch_all("SELECT * FROM posting_attempts WHERE document_id = ? ORDER BY created_at DESC", (document_id,)),
+                "reconciliation_results": database.fetch_all("SELECT * FROM reconciliation_results WHERE document_id = ? ORDER BY created_at DESC", (document_id,)),
             }
         )
 
@@ -102,5 +115,24 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
     @require_auth
     def posting_attempts():
         return jsonify(database.fetch_all("SELECT * FROM posting_attempts ORDER BY updated_at DESC LIMIT 200"))
+
+    @app.get("/reconciliation-results")
+    @require_auth
+    def reconciliation_results():
+        return jsonify(database.fetch_all("SELECT * FROM reconciliation_results ORDER BY created_at DESC LIMIT 300"))
+
+    @app.get("/missing-receipts")
+    @require_auth
+    def missing_receipts():
+        status = request.args.get("status", "open")
+        return jsonify(database.fetch_all(
+            "SELECT * FROM missing_receipt_alerts WHERE status = ? ORDER BY created_at DESC LIMIT 200",
+            (status,),
+        ))
+
+    @app.get("/bank-transactions")
+    @require_auth
+    def bank_transactions():
+        return jsonify(database.fetch_all("SELECT * FROM bank_transactions ORDER BY transaction_date DESC LIMIT 300"))
 
     return app
