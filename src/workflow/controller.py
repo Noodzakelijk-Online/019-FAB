@@ -26,6 +26,8 @@ from src.routing.bookkeeping_router import BookkeepingRouter
 from src.storage.database import Database
 from src.document_handling.duplicate_detector import DuplicateDetector
 from src.workflow.safety_engine import SafetyEngine
+from src.exceptions.exception_memory import ExceptionMemory
+from src.missing_receipts.follow_up_manager import MissingReceiptFollowUpManager
 
 
 class WorkflowController:
@@ -38,6 +40,8 @@ class WorkflowController:
         self.duplicate_detector = DuplicateDetector(config)
         self.safety_engine = SafetyEngine(config)
         self.safe_posting = SafePostingService(config)
+        self.exception_memory = ExceptionMemory(config)
+        self.missing_receipt_follow_up = MissingReceiptFollowUpManager(config)
         self.live_posting_enabled = bool(self.config.get("live_posting_enabled", False))
 
         self.fetchers = self._build_enabled_fetchers(config)
@@ -222,9 +226,13 @@ class WorkflowController:
         duplicate_result = self.duplicate_detector.is_duplicate(doc_data, existing)
         doc_data["duplicate_result"] = duplicate_result
         if duplicate_result.get("is_duplicate"):
-            self._safe_state(document_id, "suspected_duplicate", str(duplicate_result))
-            self._require_manual_review(document_id, "suspected_duplicate", str(duplicate_result), severity="high")
-            return False
+            context = {"document_id": document_id, "duplicate_result": duplicate_result}
+            if self.exception_memory.is_approved("suspected_duplicate", context):
+                self.database.add_audit_log("document", document_id, "approved_duplicate_exception_applied", None, context, "Exception memory allowed duplicate warning to be bypassed")
+            else:
+                self._safe_state(document_id, "suspected_duplicate", str(duplicate_result))
+                self._require_manual_review(document_id, "suspected_duplicate", str(duplicate_result), severity="high")
+                return False
 
         fingerprint = duplicate_result.get("duplicate_fingerprint") or self.duplicate_detector.build_fingerprint(doc_data)
         with self.database.connect() as connection:
@@ -232,7 +240,7 @@ class WorkflowController:
                 "INSERT OR IGNORE INTO duplicate_fingerprints (fingerprint, document_id, created_at) VALUES (?, ?, ?)",
                 (fingerprint, document_id, self.database.now()),
             )
-        self._safe_state(document_id, "duplicate_clear", "No duplicate detected")
+        self._safe_state(document_id, "duplicate_clear", "No duplicate detected or approved exception exists")
         return True
 
     def _validate_and_budget(self, doc_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -242,10 +250,14 @@ class WorkflowController:
             validation_result = self.validation_manager.validate_receipt(doc_data)
             doc_data["validation_result"] = validation_result
             if not validation_result.get("is_valid"):
-                reason = validation_result.get("reason", "Validation failed")
-                self._safe_state(document_id, "validation_failed", reason)
-                self._require_manual_review(document_id, "validation_failed", reason)
-                return None
+                context = {"document_id": document_id, "validation_result": validation_result}
+                if self.exception_memory.is_approved("validation_failed", context):
+                    self.database.add_audit_log("document", document_id, "approved_validation_exception_applied", None, context, "Exception memory allowed validation warning to be bypassed")
+                else:
+                    reason = validation_result.get("reason", "Validation failed")
+                    self._safe_state(document_id, "validation_failed", reason)
+                    self._require_manual_review(document_id, "validation_failed", reason)
+                    return None
 
             if validation_result.get("warnings"):
                 self.database.add_audit_log("document", document_id, "validation_warnings", None, validation_result, "Validation warnings present")
@@ -253,10 +265,12 @@ class WorkflowController:
             budget_check_result = self.budget_manager.check_budget(doc_data)
             if not budget_check_result.get("is_within_budget", True):
                 message = budget_check_result.get("message", "Budget check failed")
-                self._require_manual_review(document_id, "budget_exceeded", message)
-                return None
+                context = {"document_id": document_id, "budget_check_result": budget_check_result}
+                if not self.exception_memory.is_approved("budget_exceeded", context):
+                    self._require_manual_review(document_id, "budget_exceeded", message)
+                    return None
 
-            self._safe_state(document_id, "validated", "Validation and budget checks passed")
+            self._safe_state(document_id, "validated", "Validation and budget checks passed or approved exception exists")
             return doc_data
         except Exception as exc:
             self.logger.error("Error during validation/budget check for %s: %s", document_id, exc)
@@ -285,8 +299,10 @@ class WorkflowController:
 
         safety_result = dry_run.get("safety_result", {})
         if not safety_result.get("may_post"):
-            self._require_manual_review(document_id, "posting_not_safe", str(safety_result), severity="high")
-            return
+            context = {"document_id": document_id, "safety_result": safety_result}
+            if not self.exception_memory.is_approved("posting_not_safe", context):
+                self._require_manual_review(document_id, "posting_not_safe", str(safety_result), severity="high")
+                return
 
         if not self.live_posting_enabled:
             self._require_manual_review(document_id, "approval_required_before_live_posting", "Dry-run created; live posting is disabled by default.")
@@ -308,22 +324,56 @@ class WorkflowController:
         try:
             self.logger.info("Starting automated reconciliation...")
             bank_transactions = self.banking_api.fetch_transactions(self.config.get("banking_api_credentials"))
-            reconciliation_results = self.reconciliation_manager.reconcile(bank_transactions, list(processed_documents))
+            processed_document_list = list(processed_documents)
+            reconciliation_results = self.reconciliation_manager.reconcile(bank_transactions, processed_document_list)
             for result in reconciliation_results:
                 self.database.add_reconciliation_result(result)
                 if not result.get("matched"):
+                    context = self._reconciliation_exception_context(result)
+                    if self.exception_memory.is_approved(result.get("type", "unmatched_reconciliation"), context):
+                        self.database.add_audit_log("reconciliation", context.get("fingerprint_source"), "approved_reconciliation_exception_applied", None, context, "Exception memory suppressed repeated reconciliation warning")
+                        continue
                     review_id = result.get("id") or result.get("transaction", {}).get("id") or result.get("bank_transaction", {}).get("id") or "unknown_reconciliation_item"
                     self.logger.warning("Unmatched transaction/document: %s", result)
                     self.database.add_manual_review_item(review_id, "unmatched_reconciliation", str(result))
-            for alert in self.reconciliation_manager.detect_missing_receipts(bank_transactions, list(processed_documents)):
+
+            for alert in self.reconciliation_manager.detect_missing_receipts(bank_transactions, processed_document_list):
+                context = self._missing_receipt_exception_context(alert)
+                if self.exception_memory.is_approved("missing_receipt", context):
+                    self.database.add_audit_log("missing_receipt", context.get("transaction_id"), "approved_missing_receipt_exception_applied", None, context, "Exception memory suppressed missing receipt alert")
+                    continue
                 self.database.add_missing_receipt_alert(alert)
+                follow_up = self.missing_receipt_follow_up.create_or_update_follow_up(alert)
                 transaction_id = alert.get("transaction", {}).get("id") or "unknown_transaction"
-                self.database.add_manual_review_item(transaction_id, "missing_receipt", str(alert), severity="high")
+                self.database.add_manual_review_item(transaction_id, "missing_receipt", str({"alert": alert, "follow_up": follow_up}), severity="high")
+
             for conflict in self.reconciliation_manager.detect_conflicts(reconciliation_results):
-                self.database.add_manual_review_item(None, "reconciliation_conflict", str(conflict), severity="high")
+                context = {"conflict": conflict}
+                if not self.exception_memory.is_approved("reconciliation_conflict", context):
+                    self.database.add_manual_review_item(None, "reconciliation_conflict", str(conflict), severity="high")
         except Exception as exc:
             self.logger.error("Error during reconciliation: %s", exc)
             self.error_recovery.handle_error(exc, "reconciliation_workflow")
+
+    def _reconciliation_exception_context(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        transaction = result.get("bank_transaction", {}) or result.get("transaction", {}) or {}
+        document = result.get("document", {}) or {}
+        return {
+            "fingerprint_source": f"{result.get('type')}|{transaction.get('id')}|{document.get('document_id')}",
+            "type": result.get("type"),
+            "transaction_id": transaction.get("id"),
+            "document_id": document.get("document_id"),
+            "match_score": result.get("match_score"),
+        }
+
+    def _missing_receipt_exception_context(self, alert: Dict[str, Any]) -> Dict[str, Any]:
+        transaction = alert.get("transaction", {}) or {}
+        return {
+            "transaction_id": transaction.get("id"),
+            "date": transaction.get("date") or transaction.get("transaction_date"),
+            "amount": transaction.get("amount"),
+            "description": transaction.get("description"),
+        }
 
     def _run_backup(self) -> None:
         try:
