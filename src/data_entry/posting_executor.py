@@ -4,16 +4,19 @@ from src.data_entry.mijngeldzaken_handler import MijngeldzakenHandler
 from src.data_entry.posting_approval import PostingApprovalService
 from src.data_entry.waveapps_business_handler import WaveappsBusinessHandler
 from src.data_entry.waveapps_personal_handler import WaveappsPersonalHandler
+from src.queue.retry_manager import RetryManager
 from src.storage.database import Database
 
 
 class PostingExecutor:
-    """Executes approved posting attempts against the configured bookkeeping handlers."""
+    """Executes approved posting attempts against configured bookkeeping handlers."""
 
     def __init__(self, config: Dict[str, Any], handlers: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.database = Database(config)
         self.approval_service = PostingApprovalService(config)
+        self.retry_manager = RetryManager(config)
+        self.retry_manager.ensure_schema()
         self.execute_approved_postings = bool(self.config.get("execute_approved_postings", False))
         self.handlers = handlers or {
             "mijngeldzaken": MijngeldzakenHandler(config),
@@ -23,11 +26,7 @@ class PostingExecutor:
 
     def process_approved_attempts(self, force: bool = False, limit: int = 20) -> Dict[str, Any]:
         if not self.execute_approved_postings and not force:
-            return {
-                "status": "skipped",
-                "reason": "execute_approved_postings is disabled",
-                "processed": [],
-            }
+            return {"status": "skipped", "reason": "execute_approved_postings is disabled", "processed": []}
 
         attempts = self.database.fetch_all(
             "SELECT * FROM posting_attempts WHERE status = 'approved' ORDER BY updated_at ASC LIMIT ?",
@@ -38,26 +37,32 @@ class PostingExecutor:
             processed.append(self.execute_attempt(int(attempt["id"]), force=True))
         return {"status": "completed", "processed": processed, "count": len(processed)}
 
+    def process_due_retries(self, limit: int = 20) -> Dict[str, Any]:
+        due = self.retry_manager.due_items()[:limit]
+        processed = []
+        for item in due:
+            if item.get("entity_type") == "posting_attempt" and item.get("operation") == "execute_posting":
+                processed.append(self.execute_attempt(int(item["entity_id"]), force=True))
+        return {"status": "completed", "processed": processed, "count": len(processed)}
+
     def execute_attempt(self, attempt_id: int, force: bool = False) -> Dict[str, Any]:
         if not self.execute_approved_postings and not force:
             return {"status": "skipped", "reason": "execute_approved_postings is disabled", "attempt_id": attempt_id}
 
-        attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
-        if not attempt:
-            return {"status": "not_found", "attempt_id": attempt_id}
-        if attempt["status"] != "approved" and not force:
-            return {"status": "not_approved", "attempt_id": attempt_id, "current_status": attempt["status"]}
+        claimed = self._claim_attempt(attempt_id, force=force)
+        if claimed.get("status") != "claimed":
+            return claimed
 
+        attempt = claimed["attempt"]
         payload = self.approval_service.payload_for_attempt(attempt_id) or {}
         target_system = payload.get("target_system") or attempt.get("target_system")
         handler = self.handlers.get(target_system)
         if not handler:
             result = {"status": "failure", "message": f"No handler configured for target system: {target_system}"}
-            self.approval_service.mark_failed(attempt_id, result)
+            self._handle_failure(attempt_id, payload, result)
             return {"attempt_id": attempt_id, **result}
 
         categorized_data = self._payload_to_categorized_data(payload, attempt)
-        self._mark_attempt_status(attempt_id, "posting_in_progress")
         self.database.add_audit_log(
             "posting_attempt",
             str(attempt_id),
@@ -76,14 +81,45 @@ class PostingExecutor:
         if result.get("status") == "success":
             external_id = result.get("external_id") or result.get("id")
             self.approval_service.mark_executed(attempt_id, external_id=external_id, result=result)
+            self.retry_manager.mark_complete("posting_attempt", str(attempt_id), "execute_posting")
             self._mark_document_posted(categorized_data.get("document_id"), result)
             return {"attempt_id": attempt_id, "status": "posted", "result": result}
 
-        self.approval_service.mark_failed(attempt_id, result)
+        self._handle_failure(attempt_id, payload, result)
         document_id = categorized_data.get("document_id")
         if document_id:
             self.database.add_manual_review_item(document_id, "posting_execution_failed", str(result), severity="high")
         return {"attempt_id": attempt_id, "status": "posting_failed", "result": result}
+
+    def _claim_attempt(self, attempt_id: int, force: bool = False) -> Dict[str, Any]:
+        with self.database.connect() as connection:
+            attempt = connection.execute("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,)).fetchone()
+            if not attempt:
+                return {"status": "not_found", "attempt_id": attempt_id}
+            allowed_statuses = {"approved"}
+            if force:
+                allowed_statuses.update({"posting_failed", "posting_in_progress"})
+            if attempt["status"] not in allowed_statuses:
+                return {"status": "not_approved", "attempt_id": attempt_id, "current_status": attempt["status"]}
+            cursor = connection.execute(
+                "UPDATE posting_attempts SET status = 'posting_in_progress', updated_at = ? WHERE id = ? AND status = ?",
+                (self.database.now(), attempt_id, attempt["status"]),
+            )
+            if cursor.rowcount != 1:
+                return {"status": "already_claimed", "attempt_id": attempt_id}
+            return {"status": "claimed", "attempt": dict(attempt)}
+
+    def _handle_failure(self, attempt_id: int, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+        self.approval_service.mark_failed(attempt_id, result)
+        retry = self.retry_manager.schedule_retry(
+            "posting_attempt",
+            str(attempt_id),
+            "execute_posting",
+            result.get("message", "Posting failed"),
+            payload,
+        )
+        if retry.get("status") == "dead_lettered":
+            self.database.add_manual_review_item(str(attempt_id), "posting_dead_lettered", str(result), severity="high")
 
     def _payload_to_categorized_data(self, payload: Dict[str, Any], attempt: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -96,13 +132,6 @@ class PostingExecutor:
             "posting_attempt_id": attempt.get("id"),
             "idempotency_key": attempt.get("idempotency_key"),
         }
-
-    def _mark_attempt_status(self, attempt_id: int, status: str) -> None:
-        with self.database.connect() as connection:
-            connection.execute(
-                "UPDATE posting_attempts SET status = ?, updated_at = ? WHERE id = ?",
-                (status, self.database.now(), attempt_id),
-            )
 
     def _mark_document_posted(self, document_id: str, result: Dict[str, Any]) -> None:
         if not document_id:
