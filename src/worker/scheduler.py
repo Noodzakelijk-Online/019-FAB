@@ -2,17 +2,19 @@ import signal
 import time
 from typing import Any, Dict
 
+from src.data_entry.posting_executor import PostingExecutor
 from src.storage.database import Database
 from src.workflow.controller import WorkflowController
 
 
 class FabWorker:
-    """Simple local scheduler for repeated FAB workflow runs."""
+    """Simple local scheduler for repeated FAB workflow and approved posting execution."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
         self.interval_seconds = int(self.config.get("worker_interval_seconds", 300))
         self.run_once = bool(self.config.get("worker_run_once", False))
+        self.process_postings = bool(self.config.get("worker_process_approved_postings", True))
         self.database = Database(config)
         self._stop_requested = False
 
@@ -31,6 +33,9 @@ class FabWorker:
             try:
                 self.database.add_audit_log("worker", "local", "cycle_started", None, {"started_at": started_at}, "Worker cycle started", "system")
                 WorkflowController(self.config).run_workflow()
+                if self.process_postings:
+                    posting_result = PostingExecutor(self.config).process_approved_attempts()
+                    self.database.add_audit_log("worker", "local", "approved_posting_cycle", None, posting_result, "Approved posting cycle completed", "system")
                 self.database.add_audit_log("worker", "local", "cycle_completed", {"started_at": started_at}, {"completed_at": self.database.now()}, "Worker cycle completed", "system")
             except Exception as exc:
                 self.database.add_audit_log("worker", "local", "cycle_failed", {"started_at": started_at}, {"error": str(exc)}, str(exc), "system")
