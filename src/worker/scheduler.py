@@ -8,13 +8,14 @@ from src.workflow.controller import WorkflowController
 
 
 class FabWorker:
-    """Simple local scheduler for repeated FAB workflow and approved posting execution."""
+    """Simple local scheduler for repeated FAB workflow, retry handling, and approved posting execution."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
         self.interval_seconds = int(self.config.get("worker_interval_seconds", 300))
         self.run_once = bool(self.config.get("worker_run_once", False))
         self.process_postings = bool(self.config.get("worker_process_approved_postings", True))
+        self.process_retries = bool(self.config.get("worker_process_due_retries", True))
         self.database = Database(config)
         self._stop_requested = False
 
@@ -33,8 +34,12 @@ class FabWorker:
             try:
                 self.database.add_audit_log("worker", "local", "cycle_started", None, {"started_at": started_at}, "Worker cycle started", "system")
                 WorkflowController(self.config).run_workflow()
+                posting_executor = PostingExecutor(self.config)
+                if self.process_retries:
+                    retry_result = posting_executor.process_due_retries()
+                    self.database.add_audit_log("worker", "local", "retry_cycle", None, retry_result, "Retry cycle completed", "system")
                 if self.process_postings:
-                    posting_result = PostingExecutor(self.config).process_approved_attempts()
+                    posting_result = posting_executor.process_approved_attempts()
                     self.database.add_audit_log("worker", "local", "approved_posting_cycle", None, posting_result, "Approved posting cycle completed", "system")
                 self.database.add_audit_log("worker", "local", "cycle_completed", {"started_at": started_at}, {"completed_at": self.database.now()}, "Worker cycle completed", "system")
             except Exception as exc:
