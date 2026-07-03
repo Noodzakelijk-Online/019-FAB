@@ -1,0 +1,197 @@
+import os
+import sqlite3
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+
+from src.operations.local_api import create_app
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_health import LocalOperationsHealth
+from src.operations.local_ledger import LocalOperationsLedger
+
+
+class TestLocalOperationsHealth(unittest.TestCase):
+    def test_clean_ledger_reports_ok(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["issues"], [])
+            self.assertEqual(health["metrics"]["openReviewItems"], 0)
+
+    def test_health_flags_stale_review_failed_document_and_running_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            stale_time = _hours_ago(72)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-health-1",
+                "originalFilename": "stale.pdf",
+                "processingStatus": "needs_review",
+            })
+            review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_check",
+                "status": "pending",
+            })
+            failed_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-health-2",
+                "originalFilename": "failed.pdf",
+                "processingStatus": "failed",
+            })
+            run_id = ledger.create_workflow_run({
+                "status": "running",
+                "triggerSource": "scheduled",
+                "startedAt": _hours_ago(12),
+            })
+            route_id = ledger.create_routing_attempt({
+                "documentId": document_id,
+                "target": "waveapps",
+                "status": "blocked_review",
+                "message": "Open review item",
+            })
+            _set_timestamp(ledger_path, "bookkeeping_documents", document_id, "updated_at", stale_time)
+            _set_timestamp(ledger_path, "review_items", review_id, "created_at", stale_time)
+            _set_timestamp(ledger_path, "bookkeeping_documents", failed_id, "updated_at", stale_time)
+            _set_timestamp(ledger_path, "routing_attempts", route_id, "created_at", stale_time)
+
+            health = LocalOperationsHealth(
+                ledger,
+                {
+                    "operations_review_stale_hours": 24,
+                    "operations_document_stale_hours": 24,
+                    "operations_workflow_stale_hours": 6,
+                },
+            ).summarize()
+
+            self.assertEqual(health["status"], "blocked")
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertIn("stale_review_item", issue_types)
+            self.assertIn("stuck_document", issue_types)
+            self.assertIn("failed_document", issue_types)
+            self.assertIn("routing_block", issue_types)
+            self.assertIn("stale_workflow_run", issue_types)
+            self.assertEqual(health["metrics"]["routingBlocks"], 1)
+            self.assertEqual(health["metrics"]["runningWorkflowRuns"], 1)
+
+    def test_health_flags_stale_and_failed_export_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            stale_time = _hours_ago(80)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-export-health",
+                "originalFilename": "export.pdf",
+                "processingStatus": "processed",
+            })
+            pending_export_id = ledger.upsert_export_attempt({
+                "documentId": document_id,
+                "status": "approval_required",
+                "message": "Pending export approval",
+                "targetSystem": "waveapps",
+            })
+            approved_export_id = ledger.upsert_export_attempt({
+                "documentId": document_id,
+                "status": "approved",
+                "message": "Approved export attempt",
+                "targetSystem": "waveapps",
+            })
+            failed_export_id = ledger.upsert_export_attempt({
+                "documentId": document_id,
+                "status": "failed",
+                "message": "Submission failed",
+                "targetSystem": "waveapps",
+            })
+
+            _set_timestamp(ledger_path, "export_attempts", pending_export_id, "created_at", stale_time)
+            _set_timestamp(ledger_path, "export_attempts", pending_export_id, "updated_at", stale_time)
+            _set_timestamp(ledger_path, "export_attempts", approved_export_id, "created_at", stale_time)
+            _set_timestamp(ledger_path, "export_attempts", approved_export_id, "updated_at", stale_time)
+            _set_timestamp(ledger_path, "export_attempts", failed_export_id, "created_at", stale_time)
+            _set_timestamp(ledger_path, "export_attempts", failed_export_id, "updated_at", stale_time)
+
+            health = LocalOperationsHealth(
+                ledger,
+                {
+                    "operations_export_approval_stale_hours": 24,
+                    "operations_export_approved_stale_hours": 24,
+                },
+            ).summarize()
+
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertIn("stale_export_approval", issue_types)
+            self.assertIn("stale_export_approved", issue_types)
+            self.assertIn("failed_export_attempt", issue_types)
+            self.assertEqual(health["metrics"]["pendingExportApprovals"], 1)
+            self.assertEqual(health["metrics"]["approvedExports"], 1)
+            self.assertEqual(health["metrics"]["failedExports"], 1)
+
+    def test_health_flags_master_ledger_blockers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            transaction_id = ledger.upsert_bank_transaction({
+                "accountIdentifier": "wave-checking",
+                "transactionId": "tx-health-master-ledger",
+                "transactionDate": "2026-06-28",
+                "amount": -42.5,
+                "currency": "EUR",
+                "description": "Missing receipt transaction",
+                "reconciliationStatus": "missing_receipt",
+            })
+            LocalBookkeepingRecordService(ledger, {}).upsert_from_bank_transaction(transaction_id)
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertEqual(health["status"], "attention")
+            self.assertIn("master_ledger_blockers", issue_types)
+            self.assertEqual(health["metrics"]["masterLedgerRows"], 1)
+            self.assertEqual(health["metrics"]["masterLedgerBlockedRows"], 1)
+            self.assertIn("Open the master ledger projection", " ".join(health["nextActions"]))
+
+    def test_api_health_and_dashboard_render_operations_health(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-health-api",
+                "originalFilename": "failed.pdf",
+                "processingStatus": "failed",
+            })
+            _set_timestamp(ledger_path, "bookkeeping_documents", document_id, "updated_at", _hours_ago(48))
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            health = client.get("/api/health").get_json()
+            page = client.get("/")
+
+            self.assertEqual(health["status"], "blocked")
+            self.assertEqual(health["operations"]["metrics"]["failedDocuments"], 1)
+            self.assertEqual(page.status_code, 200)
+            html = page.data.decode("utf-8")
+            self.assertIn("Operations Health", html)
+            self.assertIn("failed_document", html)
+
+
+def _hours_ago(hours: int) -> str:
+    value = datetime.now(timezone.utc) - timedelta(hours=hours)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _set_timestamp(path: str, table: str, record_id: int, column: str, value: str) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(f"UPDATE {table} SET {column} = ? WHERE id = ?", (value, record_id))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

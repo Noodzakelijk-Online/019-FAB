@@ -1,5 +1,7 @@
 from typing import Dict, Any, List
 import datetime
+import json
+import os
 
 class RegulatoryCompliance:
     """Manages regulatory compliance features like tax classification and document retention."""
@@ -12,6 +14,21 @@ class RegulatoryCompliance:
             "zero": 0.00  # 0% BTW
         })
         self.document_retention_years = self.config.get("document_retention_years", 7) # Dutch legal requirement
+        self.compliance_rules = self._load_compliance_rules()
+
+    def _load_compliance_rules(self) -> List[Dict[str, Any]]:
+        rules = self.config.get("compliance_rules", [])
+        rules_file = self.config.get("compliance_rules_file")
+        if rules or not rules_file or not os.path.exists(rules_file):
+            return rules
+
+        try:
+            with open(rules_file, "r") as f:
+                data = json.load(f)
+            return data.get("rules", [])
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Could not load compliance rules from {rules_file}: {exc}")
+            return []
 
     def classify_btw(self, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
         """Classifies the BTW (VAT) rate based on extracted data."""
@@ -42,6 +59,23 @@ class RegulatoryCompliance:
             print(f"Invalid document date format: {document_date}")
             return True # Assume retention if date is unparseable
 
+    def check_compliance(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        rules = self.compliance_rules
+        compliant_rules = []
+
+        for rule in rules:
+            criteria = rule.get("criteria", {})
+            if all(document.get(key) == value for key, value in criteria.items()):
+                compliant_rules.append(rule.get("id"))
+
+        if not rules and document.get("category"):
+            compliant_rules.append("basic_category_present")
+
+        return {
+            "is_compliant": bool(compliant_rules),
+            "compliant_rules": compliant_rules,
+        }
+
     def generate_tax_export(self, categorized_data_list: List[Dict[str, Any]], export_format: str = "csv") -> str:
         """Generates a tax export file (placeholder)."""
         # This would involve aggregating data and formatting it according to tax authority requirements.
@@ -51,7 +85,12 @@ class RegulatoryCompliance:
         with open(export_path, "w") as f:
             f.write("Dummy tax export content\n")
             for data in categorized_data_list:
-                f.write(f"{data.get("extracted_data", {}).get("transaction_date")},{data.get("extracted_data", {}).get("total_amount")},{data.get("category")}\n")
+                extracted_data = data.get("extracted_data", {})
+                f.write(
+                    f"{extracted_data.get('transaction_date')},"
+                    f"{extracted_data.get('total_amount')},"
+                    f"{data.get('category')}\n"
+                )
         return export_path
 
 

@@ -1,9 +1,17 @@
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    from googleapiclient.http import MediaIoBaseDownload
+except ImportError:
+    Credentials = None
+    InstalledAppFlow = None
+    Request = None
+    build = None
+    HttpError = Exception
+    MediaIoBaseDownload = None
 import os
 import io
 from typing import List, Dict, Any
@@ -20,11 +28,18 @@ class DriveFetcher(BaseFetcher):
         super().__init__(config)
         self.creds = None
         self.service = None
-        self._authenticate()
+        self.auth_error = None
+        try:
+            self._authenticate()
+        except ImportError as exc:
+            self.auth_error = exc
 
     def _authenticate(self):
-        token_path = self.config.get("drive_token_path", "token_drive.pickle")
-        credentials_path = self.config.get("drive_credentials_path", "credentials_drive.json")
+        if build is None or InstalledAppFlow is None or Request is None or MediaIoBaseDownload is None:
+            raise ImportError("Google API dependencies are required for Drive fetching.")
+
+        token_path = self.config.get("google_drive_token_file") or self.config.get("drive_token_path", "token_drive.pickle")
+        credentials_path = self.config.get("google_drive_credentials_file") or self.config.get("drive_credentials_path", "credentials_drive.json")
 
         if os.path.exists(token_path):
             with open(token_path, "rb") as token:
@@ -44,22 +59,23 @@ class DriveFetcher(BaseFetcher):
         self.service = build("drive", "v3", credentials=self.creds)
 
     def fetch_documents(self) -> List[Dict[str, Any]]:
-        folder_id = self.config.get("drive_folder_id")
-        if not folder_id:
-            print("Google Drive folder ID not configured.")
+        if self.auth_error:
+            print(f"Drive fetcher unavailable: {self.auth_error}")
             return []
 
-        attachments_dir = self.config.get("attachments_save_dir", "/tmp/drive_attachments")
+        folder_id = self.config.get("drive_folder_id")
+        folder_query = f"'{folder_id}' in parents and trashed = false" if folder_id else "trashed = false"
+
+        attachments_dir = self.config.get("google_drive_download_dir") or self.config.get("attachments_save_dir", "/tmp/drive_attachments")
         os.makedirs(attachments_dir, exist_ok=True)
 
         documents = []
         try:
             # Search for files within the specified folder
-            query = f"'{folder_id}' in parents and trashed = false"
             results = (
                 self.service.files()
                 .list(
-                    q=query,
+                    q=folder_query,
                     fields="nextPageToken, files(id, name, mimeType, createdTime)",
                     spaces="drive",
                 )
@@ -75,7 +91,7 @@ class DriveFetcher(BaseFetcher):
                 file_id = item["id"]
                 file_name = item["name"]
                 mime_type = item["mimeType"]
-                created_time = item["createdTime"]
+                created_time = item.get("createdTime", "")
 
                 # Download the file
                 request = self.service.files().get_media(fileId=file_id)

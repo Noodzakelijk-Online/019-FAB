@@ -1,5 +1,8 @@
 from typing import Dict, Any, List
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 import os
 
 class DataMigration:
@@ -27,7 +30,12 @@ class DataMigration:
 
         file_extension = os.path.splitext(file_path)[1].lower().lstrip(".")
         if file_extension not in self.supported_formats:
-            print(f"Error: Unsupported file format ".{file_extension}". Supported formats are: {", ".join(self.supported_formats)}")
+            supported_formats = ", ".join(self.supported_formats)
+            print(f"Error: Unsupported file format '{file_extension}'. Supported formats are: {supported_formats}")
+            return []
+
+        if pd is None:
+            print("Error: pandas is required for data migration imports.")
             return []
 
         try:

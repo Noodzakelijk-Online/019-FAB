@@ -13,6 +13,7 @@ import HowItWorks from "./pages/HowItWorks";
 import AdminOverview from "./pages/admin/Overview";
 import AdminWaitlist from "./pages/admin/Waitlist";
 import AdminMessages from "./pages/admin/Messages";
+import AdminOperations from "./pages/admin/Operations";
 import Blog from "./pages/Blog";
 import BlogPost from "./pages/BlogPost";
 import AdminBlog from "./pages/admin/Blog";
@@ -45,6 +46,7 @@ function Router() {
       <Route path="/cookies" component={CookiePolicy} />
       {/* Admin routes */}
       <Route path={"/admin"} component={AdminOverview} />
+      <Route path={"/admin/operations"} component={AdminOperations} />
       <Route path={"/admin/waitlist"} component={AdminWaitlist} />
       <Route path={"/admin/messages"} component={AdminMessages} />
       <Route path={"/admin/blog"} component={AdminBlog} />

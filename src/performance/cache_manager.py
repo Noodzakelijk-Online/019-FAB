@@ -38,6 +38,9 @@ class CacheManager:
         if os.path.exists(cache_path):
             os.remove(cache_path)
 
+    def clear(self, key: str):
+        self.invalidate(key)
+
     def clear_all(self):
         for filename in os.listdir(self.cache_dir):
             file_path = os.path.join(self.cache_dir, filename)

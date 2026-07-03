@@ -2,15 +2,8 @@ import configparser
 import os
 from typing import Any, Dict
 
-
 class ConfigLoader:
-    """Loads configuration from an .ini file and APP_ environment variables.
-
-    Most legacy FAB modules expect a flat config dictionary, while the config
-    file is section-based. get_all_config therefore returns both forms:
-    - section dictionaries remain available under their section names;
-    - every option is also exposed at the top level for legacy modules.
-    """
+    """Loads sectioned config while preserving legacy flat config keys."""
 
     def __init__(self, config_file: str = "config/config.ini"):
         self.config_file = config_file
@@ -19,7 +12,7 @@ class ConfigLoader:
     def _load_config(self) -> Dict[str, Any]:
         config_data: Dict[str, Any] = {}
         parser = configparser.ConfigParser()
-
+        
         if os.path.exists(self.config_file):
             parser.read(self.config_file)
             for section in parser.sections():
@@ -28,23 +21,30 @@ class ConfigLoader:
                     parsed_value = self._parse_value(value)
                     config_data[section][key] = parsed_value
                     config_data[key] = parsed_value
-
+        
+        # Override with environment variables (e.g., for sensitive data)
         for key, value in os.environ.items():
-            if not key.startswith("APP_"):
-                continue
-            parts = key[len("APP_"):].lower().split("_", 1)
             parsed_value = self._parse_value(value)
-            if len(parts) == 2:
-                section, option = parts
-                config_data.setdefault(section, {})[option] = parsed_value
-                config_data[option] = parsed_value
-            else:
+            if key.startswith("APP_"):
+                # Example: APP_GMAIL_CLIENT_ID -> gmail.client_id
+                parts = key[len("APP_"):].lower().split("_", 1)
+                if len(parts) == 2:
+                    section, option = parts
+                    if section not in config_data:
+                        config_data[section] = {}
+                    config_data[section][option] = parsed_value
+                    config_data[option] = parsed_value
+                else:
+                    config_data[key.lower()] = parsed_value # For single-level env vars
+            elif key.startswith("FAB_"):
+                # Example: FAB_LOCAL_LEDGER_PATH -> fab_local_ledger_path
                 config_data[key.lower()] = parsed_value
 
+        self._add_flat_aliases(config_data)
         return config_data
 
     @staticmethod
-    def _parse_value(value: str) -> Any:
+    def _parse_value(value: Any) -> Any:
         if not isinstance(value, str):
             return value
         stripped = value.strip()
@@ -57,8 +57,18 @@ class ConfigLoader:
             return None
         return stripped
 
+    def _add_flat_aliases(self, config_data: Dict[str, Any]) -> None:
+        """Expose sectioned values as flat keys for legacy workflow modules."""
+        for section, values in list(config_data.items()):
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                config_data.setdefault(f"{section}_{key}", value)
+                if key.startswith(f"{section}_"):
+                    config_data.setdefault(key, value)
+
     def get(self, section: str, key: str, default: Any = None) -> Any:
-        """Retrieves a configuration value from a section."""
+        """Retrieves a configuration value."""
         return self.config.get(section, {}).get(key, default)
 
     def get_section(self, section: str) -> Dict[str, Any]:
@@ -66,5 +76,7 @@ class ConfigLoader:
         return self.config.get(section, {})
 
     def get_all_config(self) -> Dict[str, Any]:
-        """Returns sectioned and flat configuration values."""
+        """Returns the entire loaded configuration."""
         return self.config
+
+

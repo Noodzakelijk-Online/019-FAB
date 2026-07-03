@@ -4,17 +4,20 @@ import requests
 
 from src.banking.bank_transaction_importer import BankTransactionImporter
 
-
 class BankingAPI:
     """Fetches bank transactions from local exports first, with API fallback support."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
-        self.importer = BankTransactionImporter(config)
-        self.mode = self.config.get("banking_mode", "local_import")
+        self.importer = BankTransactionImporter(self.config)
+        self.mode = self.config.get(
+            "banking_mode",
+            "api" if self.config.get("banking_api_endpoint") else "local_import",
+        )
         self.api_endpoint = self.config.get("banking_api_endpoint")
-        self.client_id = self.config.get("banking_api_client_id")
-        self.client_secret = self.config.get("banking_api_client_secret")
+        credential_config = self.config.get("banking_api_credentials", {})
+        self.client_id = self.config.get("banking_api_client_id") or credential_config.get("client_id")
+        self.client_secret = self.config.get("banking_api_client_secret") or credential_config.get("client_secret")
 
     def _authenticate(self) -> str:
         if self.client_id and self.client_secret:
@@ -28,7 +31,6 @@ class BankingAPI:
             transactions = self._fetch_transactions_from_api(start_date=start_date, end_date=end_date)
         else:
             transactions = []
-
         return self._filter_by_date(transactions, start_date=start_date, end_date=end_date)
 
     def _fetch_transactions_from_api(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
@@ -41,11 +43,16 @@ class BankingAPI:
             response = requests.get(f"{self.api_endpoint}/transactions", headers=headers, params=params)
             response.raise_for_status()
             payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("transactions"), list):
+                return payload["transactions"]
             if isinstance(payload, list):
                 return payload
-            return payload.get("transactions", [])
-        except Exception as exc:
+            return []
+        except requests.exceptions.RequestException as exc:
             print(f"Error fetching banking transactions: {exc}")
+            return []
+        except ValueError as exc:
+            print(f"Authentication error: {exc}")
             return []
 
     def get_account_balance(self, credentials: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -72,3 +79,5 @@ class BankingAPI:
                 continue
             filtered.append(transaction)
         return filtered
+
+

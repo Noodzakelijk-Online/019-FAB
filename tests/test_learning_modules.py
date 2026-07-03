@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import os
 import json
+import tempfile
 
 from src.learning.waveapps_analyzer import WaveappsAnalyzer
 from src.learning.mijngeldzaken_analyzer import MijngeldzakenAnalyzer
@@ -12,16 +13,18 @@ from src.learning.enhanced_learning_system import EnhancedLearningSystem
 class TestLearningModules(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
             "waveapps_business_access_token": "dummy_token",
             "waveapps_business_id": "dummy_business_id",
             "mijngeldzaken_username": "dummy_user",
             "mijngeldzaken_password": "dummy_pass",
-            "mijngeldzaken_export_file_path": "/tmp/mijngeldzaken_export.csv",
-            "feedback_log_file": "/tmp/feedback_log.json",
-            "learned_patterns_file": "/tmp/learned_patterns.json",
-            "ml_model_path": "/tmp/ml_categorizer_model.joblib",
-            "ml_vectorizer_path": "/tmp/tfidf_vectorizer.joblib"
+            "mijngeldzaken_export_file_path": os.path.join(self.temp_dir.name, "mijngeldzaken_export.csv"),
+            "feedback_log_file": os.path.join(self.temp_dir.name, "feedback_log.json"),
+            "learned_patterns_file": os.path.join(self.temp_dir.name, "learned_patterns.json"),
+            "ml_model_path": os.path.join(self.temp_dir.name, "ml_categorizer_model.joblib"),
+            "ml_vectorizer_path": os.path.join(self.temp_dir.name, "tfidf_vectorizer.joblib")
         }
         # Create dummy files for testing
         os.makedirs(os.path.dirname(self.config["feedback_log_file"]), exist_ok=True)

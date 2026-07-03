@@ -60,6 +60,17 @@ vi.mock("./db", () => ({
   getPublishedBlogPosts: vi.fn(),
   getAllBlogPosts: vi.fn(),
   getBlogPostCount: vi.fn(),
+  getBookkeepingOverview: vi.fn().mockResolvedValue({}),
+  createBookkeepingDocument: vi.fn(),
+  addReviewItem: vi.fn(),
+  createWorkflowRun: vi.fn(),
+  updateWorkflowRun: vi.fn(),
+  createRoutingAttempt: vi.fn(),
+  recordAuditEvent: vi.fn(),
+  getReviewQueue: vi.fn().mockResolvedValue([]),
+  getRecentWorkflowRuns: vi.fn().mockResolvedValue([]),
+  getRecentAuditEvents: vi.fn().mockResolvedValue([]),
+  updateReviewItemStatus: vi.fn(),
 }));
 
 // Mock the notification module

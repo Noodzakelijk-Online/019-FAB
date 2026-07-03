@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 class BatchProcessor:
     """Processes items in batches using a thread pool for concurrency."""

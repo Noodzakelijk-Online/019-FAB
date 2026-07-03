@@ -10,7 +10,7 @@ class MobileDocumentCapture:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.upload_dir = self.config.get("mobile_upload_dir", "/tmp/mobile_uploads")
+        self.upload_dir = self.config.get("mobile_capture_upload_dir") or self.config.get("mobile_upload_dir", "/tmp/mobile_uploads")
         os.makedirs(self.upload_dir, exist_ok=True)
         self.app = Flask(__name__)
         self._setup_routes()

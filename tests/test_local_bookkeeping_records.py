@@ -1,0 +1,270 @@
+import os
+import tempfile
+import unittest
+
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_ledger import LocalOperationsLedger
+
+
+class TestLocalBookkeepingRecordService(unittest.TestCase):
+    def test_upsert_from_document_creates_export_ready_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-record-ready",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "vatAmount": 7.38,
+                "confidenceScore": 0.94,
+                "extractedData": {
+                    "currency": "EUR",
+                    "description": "Printer paper",
+                    "line_items": [
+                        {
+                            "description": "Paper",
+                            "quantity": 2,
+                            "unit_price": 17.56,
+                            "amount": 35.12,
+                            "vat_amount": 7.38,
+                            "tax_code": "BTW 21%",
+                            "account_name": "Office Supplies",
+                        }
+                    ],
+                },
+                "metadata": {
+                    "targetSystem": "waveapps_business",
+                    "targetAccount": "Office Supplies",
+                },
+            })
+            service = LocalBookkeepingRecordService(ledger, {})
+
+            first = service.upsert_from_document(document_id)
+            second = service.upsert_from_document(document_id)
+
+            self.assertTrue(first["success"])
+            self.assertEqual(first["recordId"], second["recordId"])
+            record = ledger.get_bookkeeping_record(first["recordId"])
+            self.assertEqual(record["status"], "ready_to_route")
+            self.assertEqual(record["export_status"], "ready")
+            self.assertEqual(record["target_system"], "waveapps_business")
+            self.assertEqual(record["vendor_name"], "Office Shop")
+            self.assertEqual(record["amount"], 42.5)
+            self.assertEqual(record["review_required"], 0)
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(record["line_items"][0]["description"], "Paper")
+            self.assertEqual(record["line_items"][0]["account_name"], "Office Supplies")
+            self.assertEqual(record["line_items"][0]["tax_code"], "BTW 21%")
+            self.assertEqual(record["metadata"]["lineItemCount"], 1)
+            self.assertTrue(record["metadata"]["exportReadiness"]["readyForWaveDraft"])
+            self.assertEqual(ledger.dashboard_metrics()["export_ready_records"], 1)
+            self.assertEqual(ledger.dashboard_metrics()["bookkeeping_record_line_items"], 1)
+
+    def test_missing_document_fields_create_review_required_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-record-review",
+                "originalFilename": "unknown.txt",
+                "processingStatus": "processed",
+                "category": "Manual Review",
+                "confidenceScore": 0.2,
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["status"], "needs_review")
+            self.assertEqual(record["review_required"], 1)
+            self.assertEqual(record["export_status"], "blocked_by_review")
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(record["line_items"][0]["source"], "document_total")
+            self.assertIn("vendorName", record["metadata"]["missingFields"])
+            self.assertIn("amount", record["metadata"]["missingFields"])
+
+    def test_resolve_record_applies_corrections_and_audit_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            record_id = ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "needs_review",
+                "exportStatus": "blocked_by_review",
+                "targetSystem": "waveapps",
+                "vendorName": "Unknown",
+                "category": "Manual Review",
+                "amount": 10,
+                "reviewRequired": True,
+                "metadata": {"source": "test"},
+            })
+            ledger.replace_bookkeeping_record_line_items(record_id, [{
+                "description": "Unclear receipt",
+                "amount": 10,
+                "category": "Manual Review",
+                "accountName": "Manual Review",
+                "source": "document_total",
+            }])
+            service = LocalBookkeepingRecordService(ledger, {})
+
+            result = service.resolve_record(
+                record_id,
+                status="approved",
+                resolution="Corrected normalized record.",
+                corrections={
+                    "vendorName": "Office Shop",
+                    "category": "Office Supplies",
+                    "amount": "42.50",
+                    "vatAmount": "7.38",
+                    "targetAccount": "Office Supplies",
+                },
+                actor="unit-test",
+            )
+            record = ledger.get_bookkeeping_record(record_id)
+            audit = ledger.list_audit_events()[0]
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["externalSubmission"], "not_executed")
+            self.assertEqual(record["status"], "ready_to_route")
+            self.assertEqual(record["export_status"], "ready")
+            self.assertEqual(record["review_required"], 0)
+            self.assertEqual(record["vendor_name"], "Office Shop")
+            self.assertEqual(record["category"], "Office Supplies")
+            self.assertEqual(record["amount"], 42.5)
+            self.assertEqual(record["vat_amount"], 7.38)
+            self.assertEqual(record["line_items"][0]["amount"], 42.5)
+            self.assertEqual(record["line_items"][0]["tax_amount"], 7.38)
+            self.assertEqual(record["line_items"][0]["account_name"], "Office Supplies")
+            self.assertEqual(record["metadata"]["resolutionHistory"][0]["actor"], "unit-test")
+            self.assertEqual(record["metadata"]["resolutionHistory"][0]["fromStatus"], "needs_review")
+            self.assertEqual(record["metadata"]["lastResolution"]["toStatus"], "ready_to_route")
+            self.assertEqual(audit["action"], "local_bookkeeping_records.record.resolve")
+            self.assertEqual(audit["details"]["externalSubmission"], "not_executed")
+
+    def test_upsert_from_bank_transaction_creates_missing_receipt_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            transaction_id = ledger.upsert_bank_transaction({
+                "accountIdentifier": "wave-checking",
+                "transactionId": "tx-missing-record",
+                "transactionDate": "2026-06-28",
+                "amount": -12.5,
+                "currency": "EUR",
+                "description": "Unknown supplier",
+                "reconciliationStatus": "missing_receipt",
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_bank_transaction(transaction_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["source_type"], "bank_transaction")
+            self.assertEqual(record["bank_transaction_id"], transaction_id)
+            self.assertEqual(record["status"], "missing_receipt")
+            self.assertEqual(record["export_status"], "blocked_missing_receipt")
+            self.assertEqual(record["reconciliation_status"], "missing_receipt")
+            self.assertEqual(record["line_items"][0]["source"], "bank_transaction")
+
+    def test_upsert_from_bank_transaction_applies_approved_vendor_rule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            rule_id = ledger.upsert_vendor_category_rule({
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "targetSystem": "waveapps",
+                "confidenceScore": 0.97,
+                "status": "approved",
+            })
+            transaction_id = ledger.upsert_bank_transaction({
+                "accountIdentifier": "wave-checking",
+                "transactionId": "tx-rule-record",
+                "transactionDate": "2026-06-28",
+                "amount": -42.5,
+                "currency": "EUR",
+                "description": "Printer paper",
+                "counterparty": "Office Shop",
+                "reconciliationStatus": "not_started",
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_bank_transaction(transaction_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["category"], "Office Supplies")
+            self.assertEqual(record["target_account"], "Office Supplies")
+            self.assertEqual(record["confidence_score"], 0.97)
+            self.assertEqual(record["metadata"]["appliedVendorCategoryRule"]["ruleId"], rule_id)
+            self.assertEqual(record["line_items"][0]["category"], "Office Supplies")
+            self.assertEqual(record["line_items"][0]["account_name"], "Office Supplies")
+            self.assertEqual(record["line_items"][0]["metadata"]["appliedVendorCategoryRule"]["ruleId"], rule_id)
+            audit_actions = [event["action"] for event in ledger.list_audit_events()]
+            self.assertIn("local_bookkeeping_records.vendor_category_rule.applied", audit_actions)
+
+    def test_upsert_from_bank_transaction_ignores_suggested_vendor_rule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_vendor_category_rule({
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "targetSystem": "waveapps",
+                "status": "suggested",
+            })
+            transaction_id = ledger.upsert_bank_transaction({
+                "accountIdentifier": "wave-checking",
+                "transactionId": "tx-rule-suggested-record",
+                "transactionDate": "2026-06-28",
+                "amount": -42.5,
+                "currency": "EUR",
+                "description": "Printer paper",
+                "counterparty": "Office Shop",
+                "reconciliationStatus": "not_started",
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_bank_transaction(transaction_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertIsNone(record["category"])
+            self.assertIsNone(record["metadata"]["appliedVendorCategoryRule"])
+            self.assertEqual(record["line_items"][0]["account_name"], "wave-checking")
+
+    def test_refresh_bank_transactions_updates_all_records_without_audit_spam(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_vendor_category_rule({
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "targetSystem": "waveapps",
+                "status": "approved",
+            })
+            transaction_id = ledger.upsert_bank_transaction({
+                "accountIdentifier": "wave-checking",
+                "transactionId": "tx-refresh-record",
+                "transactionDate": "2026-06-28",
+                "amount": -42.5,
+                "currency": "EUR",
+                "description": "Printer paper",
+                "counterparty": "Office Shop",
+                "reconciliationStatus": "not_started",
+            })
+            service = LocalBookkeepingRecordService(ledger, {})
+
+            first = service.refresh_bank_transactions()
+            second = service.refresh_bank_transactions()
+            record = ledger.get_bookkeeping_record_by_bank_transaction(transaction_id)
+            rule_audits = [
+                event for event in ledger.list_audit_events(limit=20)
+                if event["action"] == "local_bookkeeping_records.vendor_category_rule.applied"
+            ]
+
+            self.assertEqual(first["updated"], 1)
+            self.assertEqual(first["ruleApplied"], 1)
+            self.assertEqual(second["updated"], 1)
+            self.assertEqual(second["ruleApplied"], 1)
+            self.assertEqual(record["category"], "Office Supplies")
+            self.assertEqual(len(rule_audits), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

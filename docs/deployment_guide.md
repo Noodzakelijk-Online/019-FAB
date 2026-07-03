@@ -53,7 +53,28 @@ Local deployment is suitable for development, testing, and running the solution 
     cp config/config_template.ini config/config.ini
     # Edit config/config.ini
     ```
-    **Security Best Practice**: For sensitive information (API keys, passwords), use environment variables. The `ConfigLoader` will automatically pick up environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`).
+    **Security Best Practice**: For sensitive information (API keys, passwords), use environment variables. The `ConfigLoader` will automatically pick up environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`). Local operations settings also accept direct `FAB_LOCAL_*` variables such as `FAB_LOCAL_LEDGER_PATH`, `FAB_LOCAL_API_HOST`, `FAB_LOCAL_API_PORT`, and `FAB_LOCAL_API_TOKEN`.
+
+    For local-first operation on Windows 11, keep the FAB operations ledger enabled and store it in a private local data folder:
+    ```ini
+    [operations]
+    local_ledger_enabled = true
+    ledger_path = C:\Users\<you>\AppData\Local\FAB\fab_operations.sqlite3
+    api_host = 127.0.0.1
+    api_port = 5001
+    api_token = choose-a-long-random-token-before-using-ngrok
+    local_intake_paths = C:\Users\<you>\Google Drive\sort out
+    local_intake_extensions = pdf,jpg,jpeg,png,heic,tif,tiff,txt,csv
+    backup_dir = C:\Users\<you>\AppData\Local\FAB\backups
+    categorization_review_confidence_threshold = 0.7
+    waveapps_default_account = Uncategorized
+    review_stale_hours = 48
+    document_stale_hours = 24
+    routing_stale_hours = 24
+    workflow_stale_hours = 6
+    enabled = false
+    ```
+    This SQLite ledger records workflow runs, document statuses, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events without requiring the web database/API to be online. Local intake stores file metadata and SHA-256 duplicate fingerprints, not raw document bytes. Do not put this database in a Git-tracked directory when it contains real financial metadata.
 
 5.  **Run the Application:**
 
@@ -61,7 +82,16 @@ Local deployment is suitable for development, testing, and running the solution 
     ```bash
     python src/main.py
     ```
-    For continuous operation, consider using process managers like `systemd` (Linux) or `Supervisor` to keep the script running and restart it on failures.
+    For continuous operation, use Windows Task Scheduler on Windows or process managers like `systemd` (Linux) or `Supervisor` to keep the script running and restart it on failures.
+
+6.  **Run the Local Operations API (optional):**
+
+    The local API exposes the SQLite operations ledger for dashboard/review tooling:
+    ```bash
+    python -m src.operations.local_api
+    ```
+    Open `http://127.0.0.1:5001/` for the local dashboard. It also serves `/api/health`, `/api/settings`, `/api/autonomy/plan`, `/api/autonomy/run`, `/api/dashboard`, `/api/sources`, `/api/extracted-fields`, `/api/bookkeeping-records`, `/api/bookkeeping-records/{id}`, `/api/bookkeeping-records/{id}/line-items`, `/api/bookkeeping-records/refresh`, `/api/wave`, `/api/wave/actions`, `/api/wave/reports`, `/api/wave/reports/plan`, `/api/wave/report-snapshots`, `/api/wave/plan`, `/api/wave/workflows/plan`, `/api/bank-transactions`, `/api/bank-transactions/import`, `/api/intake/rescan`, `/api/documents`, `/api/documents/{id}/process`, `/api/documents/process-imported`, `/api/documents/{id}/route`, `/api/routing`, `/api/routing/prepare-ready`, `/api/routing/{id}/export-attempt`, `/api/export-attempts`, `/api/export-attempts/prepare-ready`, `/api/export-attempts/{id}/approve`, `/api/export-attempts/{id}/result`, `/api/reconciliation`, `/api/reconciliation/run`, `/api/reconciliation/{id}/resolve`, `/api/backups`, `/api/backups/inspect`, `/api/backups/restore`, `/api/review`, `/api/rules`, `/api/corrections`, and `/api/audit`. The Operations Health panel and `/api/health` surface stale review items, stuck documents, failed records, routing blocks, drafts waiting for approval, and stale workflow runs. The Autonomous Cycle panel can safely run local-only intake, processing, Wave draft preparation, reconciliation candidate creation for persisted or supplied bank transactions, and read-only Wave workflow planning. It records a workflow run and audit events, but never submits data into Wave, resolves reviews, restores backups, deletes files, changes credentials, or sends outbound messages. The Folder Intake panel can rescan the configured `local_intake_paths`, process imported documents through OCR/text extraction and categorization, and create duplicate or validation review items instead of silently posting uncertain data. The Bookkeeping Records panel exposes FAB's normalized source-of-truth records across documents and bank rows, including review, export, reconciliation, target system, vendor, category, date, amount, line-item, account, and tax state. The Extracted Fields panel shows field-level evidence, confidence, and provenance for OCR/extraction outputs. Manual corrections update the ledger, normalized record, correction history, and suggested vendor/category rules, and can close reconciliation review items by approving candidate matches or ignoring no-receipt-needed bank exceptions without automatically executing financial exports. The Routing & Export Drafts panel prepares Wave draft operation plans from reviewed documents and stores them as routing attempts; it does not submit data into Wave. The Export Attempts panel prepares approval records from those drafts, requires `APPROVE FAB EXPORT DRAFT` before local approval, and requires `RECORD FAB EXPORT RESULT` before recording the outcome from a separate executor; approval does not execute a Wave write by itself. The Wave Control Center exposes the Wave surface catalog, read-only report registry, account-transactions planning, period-close workflow planning, and persisted Wave report snapshots for report type, date scope, basis, account/contact filters, export format, and operation provenance without executing external Wave writes. The Bank Transactions panel persists Wave account-transactions exports and bank statements from JSON, CSV, CAMT XML, or MT940-style text as idempotent transaction evidence. The Settings panel and `/api/settings` report source readiness, dependencies such as Tesseract and Playwright, storage paths, credential presence without values, and remote exposure safety. The Reconciliation panel can use persisted bank transactions automatically or run a temporary JSON override batch, record candidate matches and missing-receipt evidence, and keep approval auditable instead of silently finalizing records. The Backups panel creates manifest/checksum-protected ledger snapshots and requires the exact phrase `RESTORE FAB LOCAL LEDGER` before replacing the active ledger. Keep the host on `127.0.0.1` for local use. If you expose it through ngrok or bind it to anything other than loopback, configure `api_token`; the API refuses non-loopback exposure without a token.
+    The Sources panel and `/api/sources` list observed folder or connector sources with status, last scan time, counters, and source identifiers. Secret-looking connector metadata is redacted before persistence.
 
 ### 1.3. Running as a System Service (Linux example with systemd)
 

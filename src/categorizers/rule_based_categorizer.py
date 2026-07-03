@@ -13,7 +13,7 @@ class RuleBasedCategorizer(BaseCategorizer):
     def categorize(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
         ocr_text = processed_data.get("ocr_text", "").lower()
         extracted_data = processed_data.get("extracted_data", {})
-        vendor_name = extracted_data.get("vendor_name", "").lower()
+        vendor_name = str(extracted_data.get("vendor_name") or "").lower()
 
         for category, rule_config in self.rules.items():
             keywords = [k.lower() for k in rule_config.get("keywords", [])]

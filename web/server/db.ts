@@ -1,6 +1,27 @@
 import { eq, sql, desc, and, gte, lte } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, waitlist, InsertWaitlistEntry, contactMessages, InsertContactMessage, blogPosts, InsertBlogPost } from "../drizzle/schema";
+import {
+  InsertUser,
+  users,
+  waitlist,
+  InsertWaitlistEntry,
+  contactMessages,
+  InsertContactMessage,
+  blogPosts,
+  InsertBlogPost,
+  bookkeepingDocuments,
+  InsertBookkeepingDocument,
+  reviewItems,
+  InsertReviewItem,
+  workflowRuns,
+  InsertWorkflowRun,
+  routingAttempts,
+  InsertRoutingAttempt,
+  reconciliationMatches,
+  InsertReconciliationMatch,
+  auditEvents,
+  InsertAuditEvent,
+} from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -244,4 +265,225 @@ export async function getBlogPostCount(): Promise<number> {
 
   const result = await db.select({ count: sql<number>`count(*)` }).from(blogPosts);
   return result[0]?.count ?? 0;
+}
+
+// â”€â”€ FAB Bookkeeping Operations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export async function createBookkeepingDocument(document: InsertBookkeepingDocument): Promise<{ id: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  if (document.sourceDocumentId) {
+    await db
+      .insert(bookkeepingDocuments)
+      .values(document)
+      .onDuplicateKeyUpdate({ set: document });
+
+    const registered = await db
+      .select({ id: bookkeepingDocuments.id })
+      .from(bookkeepingDocuments)
+      .where(
+        and(
+          eq(bookkeepingDocuments.source, document.source),
+          eq(bookkeepingDocuments.sourceDocumentId, document.sourceDocumentId)
+        )
+      )
+      .limit(1);
+
+    if (!registered[0]) throw new Error("Bookkeeping document registration failed");
+    return { id: registered[0].id };
+  }
+
+  const result = await db.insert(bookkeepingDocuments).values(document);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function updateBookkeepingDocument(
+  id: number,
+  document: Partial<InsertBookkeepingDocument>
+): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(bookkeepingDocuments).set(document).where(eq(bookkeepingDocuments.id, id));
+}
+
+export async function addReviewItem(item: InsertReviewItem): Promise<{ id: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(reviewItems).values(item);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function createWorkflowRun(run: InsertWorkflowRun): Promise<{ id: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(workflowRuns).values(run);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function updateWorkflowRun(
+  id: number,
+  data: Partial<InsertWorkflowRun>
+): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  await db.update(workflowRuns).set(data).where(eq(workflowRuns.id, id));
+}
+
+export async function createRoutingAttempt(attempt: InsertRoutingAttempt): Promise<{ id: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(routingAttempts).values(attempt);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function createReconciliationMatch(match: InsertReconciliationMatch): Promise<{ id: number }> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const result = await db.insert(reconciliationMatches).values(match);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function getRecentReconciliationMatches(limit = 10) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const rows = await db
+    .select({
+      match: reconciliationMatches,
+      document: bookkeepingDocuments,
+    })
+    .from(reconciliationMatches)
+    .leftJoin(bookkeepingDocuments, eq(reconciliationMatches.documentId, bookkeepingDocuments.id))
+    .orderBy(desc(reconciliationMatches.createdAt))
+    .limit(limit);
+
+  return rows.map((row) => ({
+    ...row.match,
+    document: row.document,
+  }));
+}
+
+export async function recordAuditEvent(event: InsertAuditEvent): Promise<{ id: number | null }> {
+  const db = await getDb();
+  if (!db) return { id: null };
+
+  const result = await db.insert(auditEvents).values(event);
+  return { id: Number(result[0].insertId) };
+}
+
+export async function getRecentAuditEvents(limit = 20) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(limit);
+}
+
+export async function getBookkeepingOverview() {
+  const db = await getDb();
+  if (!db) {
+    return {
+      documents: 0,
+      needsReview: 0,
+      routed: 0,
+      failed: 0,
+      pendingReviews: 0,
+      activeWorkflowRuns: 0,
+    };
+  }
+
+  const [documents] = await db.select({ count: sql<number>`count(*)` }).from(bookkeepingDocuments);
+  const [needsReview] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(bookkeepingDocuments)
+    .where(eq(bookkeepingDocuments.processingStatus, "needs_review"));
+  const [routed] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(bookkeepingDocuments)
+    .where(eq(bookkeepingDocuments.processingStatus, "routed"));
+  const [failed] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(bookkeepingDocuments)
+    .where(eq(bookkeepingDocuments.processingStatus, "failed"));
+  const [pendingReviews] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(reviewItems)
+    .where(eq(reviewItems.status, "pending"));
+  const [activeWorkflowRuns] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(workflowRuns)
+    .where(sql`${workflowRuns.status} in ('queued', 'running')`);
+
+  return {
+    documents: documents?.count ?? 0,
+    needsReview: needsReview?.count ?? 0,
+    routed: routed?.count ?? 0,
+    failed: failed?.count ?? 0,
+    pendingReviews: pendingReviews?.count ?? 0,
+    activeWorkflowRuns: activeWorkflowRuns?.count ?? 0,
+  };
+}
+
+export async function getRecentWorkflowRuns(limit = 10) {
+  const db = await getDb();
+  if (!db) return [];
+
+  return db.select().from(workflowRuns).orderBy(desc(workflowRuns.createdAt)).limit(limit);
+}
+
+export async function getWorkflowRunById(id: number) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const rows = await db.select().from(workflowRuns).where(eq(workflowRuns.id, id)).limit(1);
+  return rows[0] ?? null;
+}
+
+export async function getReviewQueue(opts?: { status?: "pending" | "in_review" | "approved" | "rejected" | "resolved" }) {
+  const db = await getDb();
+  if (!db) return [];
+
+  const baseQuery = db
+    .select({
+      review: reviewItems,
+      document: bookkeepingDocuments,
+    })
+    .from(reviewItems)
+    .leftJoin(bookkeepingDocuments, eq(reviewItems.documentId, bookkeepingDocuments.id));
+
+  const rows = opts?.status
+    ? await baseQuery.where(eq(reviewItems.status, opts.status)).orderBy(desc(reviewItems.createdAt))
+    : await baseQuery.orderBy(desc(reviewItems.createdAt));
+
+  return rows.map((row) => ({
+    ...row.review,
+    document: row.document,
+  }));
+}
+
+export async function updateReviewItemStatus(
+  id: number,
+  status: "pending" | "in_review" | "approved" | "rejected" | "resolved",
+  resolution?: string,
+  actorUserId?: number
+): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const resolvedAt = ["approved", "rejected", "resolved"].includes(status) ? new Date() : null;
+  await db.update(reviewItems).set({ status, resolution: resolution || null, resolvedAt }).where(eq(reviewItems.id, id));
+
+  await recordAuditEvent({
+    actorUserId: actorUserId || null,
+    action: "review_item.update_status",
+    entityType: "review_item",
+    entityId: String(id),
+    details: { status, resolution: resolution || null },
+  });
 }

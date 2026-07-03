@@ -1,207 +1,238 @@
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple
-
+import re
+from typing import Dict, Any, List, Optional, Tuple
+import unicodedata
 
 class AutomatedReconciliation:
-    """Reconciles bank transactions with processed FAB documents using scored matching."""
+    """Automates the reconciliation process between bank statements and processed documents."""
 
     def __init__(self, config: Dict[str, Any]):
-        self.config = config or {}
-        self.match_threshold = float(self.config.get("reconciliation_match_threshold", 0.85))
-        self.possible_match_threshold = float(self.config.get("reconciliation_possible_match_threshold", 0.65))
-        self.amount_tolerance = float(self.config.get("reconciliation_amount_tolerance", 0.02))
-        self.date_tolerance_days = int(self.config.get("reconciliation_date_tolerance_days", 3))
-        self.ignore_positive_transactions = bool(self.config.get("ignore_positive_transactions_for_missing_receipts", True))
+        self.config = config
+        self.match_threshold = float(self.config.get("reconciliation_match_threshold", 0.9))
+        self.amount_tolerance = Decimal(
+            str(
+                self.config.get(
+                    "reconciliation_threshold",
+                    self.config.get("reconciliation_amount_tolerance", 0.01),
+                )
+            )
+        )
+        self.date_tolerance_days = int(self.config.get("reconciliation_date_tolerance_days", 0))
+        self.use_absolute_amounts = self._as_bool(
+            self.config.get("reconciliation_use_absolute_amounts", True)
+        )
+        self.ignore_positive_transactions = self._as_bool(
+            self.config.get("ignore_positive_transactions_for_missing_receipts", True)
+        )
+
+    def _document_id(self, document: Dict[str, Any]) -> str:
+        return document.get("document_id") or document.get("id") or document.get("local_path") or str(id(document))
+
+    def _document_payload(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        return document.get("extracted_data") or document
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() not in {"0", "false", "no", "off", ""}
+        return bool(value)
+
+    @staticmethod
+    def _amount(value: Any) -> Optional[Decimal]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+
+        text = re.sub(r"[^\d,.\-]", "", str(value).strip())
+        if not text or text in {"-", ".", ","}:
+            return None
+
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            parts = text.split(",")
+            text = "".join(parts[:-1]) + "." + parts[-1] if len(parts) > 1 else text
+        elif text.count(".") > 1:
+            parts = text.split(".")
+            text = "".join(parts[:-1]) + "." + parts[-1]
+
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
+
+    @staticmethod
+    def _date(value: Any) -> Optional[date]:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if value is None:
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+
+        for date_format in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(text[:10], date_format).date()
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _normalized_text(value: Any) -> str:
+        normalized = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii")
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", normalized.lower()).split())
+
+    @classmethod
+    def _vendor_text(cls, data: Dict[str, Any]) -> str:
+        for key in ("vendor_name", "merchant", "counterparty", "description", "name"):
+            value = cls._normalized_text(data.get(key))
+            if value:
+                return value
+        return ""
+
+    def _match_score(
+        self,
+        bank_transaction: Dict[str, Any],
+        document: Dict[str, Any],
+    ) -> Optional[Tuple[float, float]]:
+        doc_data = self._document_payload(document)
+        bank_amount = self._amount(bank_transaction.get("amount"))
+        doc_amount = self._amount(doc_data.get("total_amount") or doc_data.get("amount"))
+        if bank_amount is None or doc_amount is None:
+            return None
+
+        comparable_bank_amount = abs(bank_amount) if self.use_absolute_amounts else bank_amount
+        comparable_doc_amount = abs(doc_amount) if self.use_absolute_amounts else doc_amount
+        amount_difference = abs(comparable_bank_amount - comparable_doc_amount)
+        if amount_difference > self.amount_tolerance:
+            return None
+
+        score = 0.6
+        bank_date = self._date(bank_transaction.get("date") or bank_transaction.get("transaction_date"))
+        doc_date = self._date(doc_data.get("transaction_date") or doc_data.get("date"))
+        if bank_date and doc_date:
+            if abs((bank_date - doc_date).days) > self.date_tolerance_days:
+                return None
+            score += 0.3
+
+        bank_vendor = self._vendor_text(bank_transaction)
+        doc_vendor = self._vendor_text(doc_data)
+        if bank_vendor and doc_vendor:
+            score += 0.1 * SequenceMatcher(None, bank_vendor, doc_vendor).ratio()
+
+        return round(score, 4), float(amount_difference)
 
     def reconcile(self, bank_transactions: List[Dict[str, Any]], processed_documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        reconciliation_results: List[Dict[str, Any]] = []
+        """Attempts to match bank transactions with processed documents.
+
+        Args:
+            bank_transactions: A list of dictionaries, each representing a bank transaction.
+            processed_documents: A list of dictionaries, each representing a processed document.
+
+        Returns:
+            A list of reconciliation results, indicating matches or unmatched items.
+        """
+        reconciliation_results = []
         matched_doc_ids = set()
 
-        for transaction in bank_transactions or []:
-            best_doc, best_score, best_reasons = self._best_document_match(transaction, processed_documents, matched_doc_ids)
-            if best_doc and best_score >= self.match_threshold:
-                matched_doc_ids.add(best_doc.get("document_id"))
-                reconciliation_results.append(
-                    {
-                        "type": "match",
-                        "bank_transaction": transaction,
-                        "document": best_doc,
-                        "matched": True,
-                        "match_score": round(best_score, 4),
-                        "match_reason": best_reasons,
-                    }
-                )
-            elif best_doc and best_score >= self.possible_match_threshold:
-                reconciliation_results.append(
-                    {
-                        "type": "possible_match_requires_review",
-                        "bank_transaction": transaction,
-                        "document": best_doc,
-                        "matched": False,
-                        "match_score": round(best_score, 4),
-                        "match_reason": best_reasons,
-                    }
-                )
-            else:
-                reconciliation_results.append(
-                    {
-                        "type": "unmatched_bank_transaction",
-                        "bank_transaction": transaction,
-                        "matched": False,
-                        "match_score": round(best_score, 4),
-                        "match_reason": best_reasons,
-                    }
-                )
+        for bt in bank_transactions:
+            best_match = None
+            for doc in processed_documents:
+                document_id = self._document_id(doc)
+                if document_id in matched_doc_ids:
+                    continue
 
-        for document in processed_documents or []:
-            document_id = document.get("document_id")
-            if document_id and document_id not in matched_doc_ids:
-                reconciliation_results.append(
-                    {
-                        "type": "unmatched_document",
-                        "document": document,
-                        "matched": False,
-                        "match_score": 0.0,
-                        "match_reason": ["No bank transaction matched this document above threshold."],
+                match_result = self._match_score(bt, doc)
+                if match_result is None:
+                    continue
+                confidence_score, amount_difference = match_result
+                if confidence_score < self.match_threshold:
+                    continue
+                if best_match is None or confidence_score > best_match["confidence_score"]:
+                    best_match = {
+                        "document": doc,
+                        "document_id": document_id,
+                        "confidence_score": confidence_score,
+                        "amount_difference": amount_difference,
                     }
-                )
+
+            if best_match:
+                reconciliation_results.append({
+                    "type": "match",
+                    "bank_transaction": bt,
+                    "document": best_match["document"],
+                    "bank_transaction_id": bt.get("id"),
+                    "document_id": best_match["document_id"],
+                    "receipt_id": best_match["document_id"],
+                    "confidence_score": best_match["confidence_score"],
+                    "match_score": best_match["confidence_score"],
+                    "match_reason": ["amount/date/vendor matched within configured tolerance"],
+                    "amount_difference": best_match["amount_difference"],
+                    "matched": True
+                })
+                matched_doc_ids.add(best_match["document_id"])
+            
+            else:
+                reconciliation_results.append({
+                    "type": "unmatched_bank_transaction",
+                    "bank_transaction": bt,
+                    "matched": False,
+                    "match_score": 0.0,
+                    "match_reason": ["No document matched this bank transaction above threshold."],
+                })
+        
+        # Identify unmatched documents
+        for doc in processed_documents:
+            document_id = self._document_id(doc)
+            if document_id not in matched_doc_ids:
+                reconciliation_results.append({
+                    "type": "unmatched_document",
+                    "document": doc,
+                    "document_id": document_id,
+                    "matched": False,
+                    "match_score": 0.0,
+                    "match_reason": ["No bank transaction matched this document above threshold."],
+                })
 
         return reconciliation_results
 
     def detect_missing_receipts(self, bank_transactions: List[Dict[str, Any]], processed_documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        alerts = []
-        for result in self.reconcile(bank_transactions, processed_documents):
-            if result.get("type") != "unmatched_bank_transaction":
-                continue
-            transaction = result.get("bank_transaction", {})
-            amount = self._to_float(transaction.get("amount"))
-            if self.ignore_positive_transactions and amount is not None and amount >= 0:
-                continue
-            alerts.append(
-                {
-                    "transaction": transaction,
+        """Identifies bank transactions that likely require a missing receipt."""
+        # This is a high-level function that would typically be called after reconciliation.
+        # It would look for unmatched bank transactions that are not easily explainable
+        # (e.g., not internal transfers, not payroll, etc.)
+        missing_receipt_alerts = []
+        reconciliation_results = self.reconcile(bank_transactions, processed_documents)
+
+        for result in reconciliation_results:
+            if result["type"] == "unmatched_bank_transaction":
+                amount = self._amount(result.get("bank_transaction", {}).get("amount"))
+                if self.ignore_positive_transactions and amount is not None and amount >= 0:
+                    continue
+                missing_receipt_alerts.append({
+                    "transaction": result["bank_transaction"],
                     "alert_message": "Possible missing receipt for this transaction.",
                     "match_score": result.get("match_score", 0.0),
                     "match_reason": result.get("match_reason", []),
                     "suggested_action": "Request receipt from vendor or mark as exception with explanation.",
-                }
-            )
-        return alerts
+                })
+        return missing_receipt_alerts
 
-    def detect_conflicts(self, reconciliation_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        conflicts = []
-        seen_transactions = {}
-        seen_documents = {}
-        for result in reconciliation_results:
-            if not result.get("matched"):
-                continue
-            transaction_id = result.get("bank_transaction", {}).get("id")
-            document_id = result.get("document", {}).get("document_id")
-            if transaction_id in seen_transactions:
-                conflicts.append({"type": "transaction_matched_multiple_documents", "transaction_id": transaction_id, "results": [seen_transactions[transaction_id], result]})
-            if document_id in seen_documents:
-                conflicts.append({"type": "document_matched_multiple_transactions", "document_id": document_id, "results": [seen_documents[document_id], result]})
-            seen_transactions[transaction_id] = result
-            seen_documents[document_id] = result
-        return conflicts
 
-    def _best_document_match(
-        self,
-        transaction: Dict[str, Any],
-        documents: List[Dict[str, Any]],
-        already_matched_doc_ids: set,
-    ) -> Tuple[Optional[Dict[str, Any]], float, List[str]]:
-        best_doc = None
-        best_score = 0.0
-        best_reasons: List[str] = ["No candidate documents available."]
-        for document in documents or []:
-            if document.get("document_id") in already_matched_doc_ids:
-                continue
-            score, reasons = self.match_score(transaction, document)
-            if score > best_score:
-                best_doc = document
-                best_score = score
-                best_reasons = reasons
-        return best_doc, best_score, best_reasons
-
-    def match_score(self, transaction: Dict[str, Any], document: Dict[str, Any]) -> Tuple[float, List[str]]:
-        extracted = document.get("extracted_data", {}) or {}
-        reasons: List[str] = []
-
-        amount_score = self._amount_score(transaction.get("amount"), extracted.get("total_amount"))
-        reasons.append(f"amount_score={amount_score:.2f}")
-
-        date_score = self._date_score(transaction.get("date"), extracted.get("transaction_date"))
-        reasons.append(f"date_score={date_score:.2f}")
-
-        description = transaction.get("description") or transaction.get("counterparty") or ""
-        vendor = extracted.get("vendor_name") or document.get("vendor_name") or ""
-        description_score = self._string_similarity(description, vendor)
-        reasons.append(f"vendor_description_score={description_score:.2f}")
-
-        reference_score = self._reference_score(transaction, extracted)
-        reasons.append(f"reference_score={reference_score:.2f}")
-
-        score = amount_score * 0.40 + date_score * 0.25 + description_score * 0.25 + reference_score * 0.10
-        return max(0.0, min(1.0, score)), reasons
-
-    def _amount_score(self, transaction_amount: Any, document_amount: Any) -> float:
-        tx_amount = self._to_float(transaction_amount)
-        doc_amount = self._to_float(document_amount)
-        if tx_amount is None or doc_amount is None:
-            return 0.0
-        if abs(abs(tx_amount) - abs(doc_amount)) <= self.amount_tolerance:
-            return 1.0
-        difference = abs(abs(tx_amount) - abs(doc_amount))
-        denominator = max(abs(tx_amount), abs(doc_amount), 1.0)
-        return max(0.0, 1.0 - difference / denominator)
-
-    def _date_score(self, transaction_date: Any, document_date: Any) -> float:
-        tx_date = self._parse_date(transaction_date)
-        doc_date = self._parse_date(document_date)
-        if not tx_date or not doc_date:
-            return 0.0
-        delta_days = abs((tx_date - doc_date).days)
-        if delta_days == 0:
-            return 1.0
-        if delta_days <= self.date_tolerance_days:
-            return max(0.0, 1.0 - (delta_days / (self.date_tolerance_days + 1)))
-        return 0.0
-
-    @staticmethod
-    def _reference_score(transaction: Dict[str, Any], extracted: Dict[str, Any]) -> float:
-        haystack = " ".join(str(transaction.get(key, "")) for key in ["description", "counterparty", "reference", "id"])
-        references = [extracted.get("invoice_number"), extracted.get("receipt_number"), extracted.get("order_number")]
-        for reference in references:
-            if reference and str(reference).lower() in haystack.lower():
-                return 1.0
-        return 0.0
-
-    @staticmethod
-    def _string_similarity(left: Any, right: Any) -> float:
-        left_text = str(left or "").lower().strip()
-        right_text = str(right or "").lower().strip()
-        if not left_text or not right_text:
-            return 0.0
-        return SequenceMatcher(None, left_text, right_text).ratio()
-
-    @staticmethod
-    def _to_float(value: Any) -> Optional[float]:
-        if value is None or value == "":
-            return None
-        try:
-            return float(str(value).replace(",", "."))
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _parse_date(value: Any):
-        if not value:
-            return None
-        for fmt in ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"]:
-            try:
-                return datetime.strptime(str(value), fmt).date()
-            except ValueError:
-                continue
-        return None

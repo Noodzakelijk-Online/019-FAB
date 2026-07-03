@@ -1,5 +1,8 @@
 from typing import Dict, Any, List
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 import datetime
 
 class FinancialAnalyzer:
@@ -7,6 +10,16 @@ class FinancialAnalyzer:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+
+    def generate_report(self, transactions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        total_income = sum(float(item.get("amount", 0)) for item in transactions if float(item.get("amount", 0)) > 0)
+        total_expenses = sum(float(item.get("amount", 0)) for item in transactions if float(item.get("amount", 0)) < 0)
+        return {
+            "total_income": total_income,
+            "total_expenses": total_expenses,
+            "net_cash_flow": total_income + total_expenses,
+            "transaction_count": len(transactions),
+        }
 
     def generate_expense_report(self, transactions: List[Dict[str, Any]], group_by: str = "category") -> Dict[str, Any]:
         """Generates a summary report of expenses.
@@ -21,10 +34,24 @@ class FinancialAnalyzer:
         if not transactions:
             return {"message": "No transactions to report.", "summary": {}}
 
+        if pd is None:
+            summary: Dict[str, float] = {}
+            for transaction in transactions:
+                extracted = transaction.get("extracted_data", {})
+                key = transaction.get(group_by) or extracted.get(group_by)
+                if key is None:
+                    continue
+                amount = float(extracted.get("total_amount") or transaction.get("amount") or 0)
+                summary[str(key)] = summary.get(str(key), 0.0) + amount
+            return {"message": "Expense report generated successfully.", "summary": summary}
+
         df = pd.DataFrame(transactions)
         
         # Ensure 'total_amount' is numeric and handle potential missing values
-        df["total_amount"] = pd.to_numeric(df["extracted_data"].apply(lambda x: x.get("total_amount")), errors=\'coerce\').fillna(0)
+        df["total_amount"] = pd.to_numeric(
+            df["extracted_data"].apply(lambda x: x.get("total_amount")),
+            errors="coerce",
+        ).fillna(0)
         
         # Extract category and vendor from the main dict or extracted_data
         df["category"] = df["category"]
@@ -49,8 +76,14 @@ class FinancialAnalyzer:
         if not transactions:
             return {"message": "No transactions for forecasting.", "forecast": {}}
 
+        if pd is None:
+            return {"message": "pandas is required for cash flow forecasting.", "forecast": {}}
+
         df = pd.DataFrame(transactions)
-        df["total_amount"] = pd.to_numeric(df["extracted_data"].apply(lambda x: x.get("total_amount")), errors=\'coerce\').fillna(0)
+        df["total_amount"] = pd.to_numeric(
+            df["extracted_data"].apply(lambda x: x.get("total_amount")),
+            errors="coerce",
+        ).fillna(0)
         df["transaction_date"] = pd.to_datetime(df["extracted_data"].apply(lambda x: x.get("transaction_date")))
         df = df.dropna(subset=["transaction_date"])
 
@@ -79,8 +112,14 @@ class FinancialAnalyzer:
         if not transactions:
             return {"message": "No transactions for trend analysis.", "trend": {}}
 
+        if pd is None:
+            return {"message": "pandas is required for trend analysis.", "trend": {}}
+
         df = pd.DataFrame(transactions)
-        df["total_amount"] = pd.to_numeric(df["extracted_data"].apply(lambda x: x.get("total_amount")), errors=\'coerce\').fillna(0)
+        df["total_amount"] = pd.to_numeric(
+            df["extracted_data"].apply(lambda x: x.get("total_amount")),
+            errors="coerce",
+        ).fillna(0)
         df["transaction_date"] = pd.to_datetime(df["extracted_data"].apply(lambda x: x.get("transaction_date")))
         df = df.dropna(subset=["transaction_date"])
 

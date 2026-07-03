@@ -31,4 +31,8 @@ class PerformanceOptimizer:
         """Checks if caching is enabled."""
         return self.caching_enabled
 
+    def optimize_processing_pipeline(self, pipeline):
+        """Compatibility hook for pipeline-level optimization."""
+        return pipeline
+
 

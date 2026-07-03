@@ -1,8 +1,15 @@
 from typing import Dict, Any
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-import joblib
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+except ImportError:
+    TfidfVectorizer = None
+    LogisticRegression = None
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
 import os
 
 from src.categorizers.base import BaseCategorizer
@@ -19,6 +26,10 @@ class MLCategorizer(BaseCategorizer):
         self._load_model()
 
     def _load_model(self):
+        if joblib is None:
+            print("ML dependencies not installed. ML categorization is disabled.")
+            return
+
         if os.path.exists(self.model_path) and os.path.exists(self.vectorizer_path):
             self.model = joblib.load(self.model_path)
             self.vectorizer = joblib.load(self.vectorizer_path)
@@ -29,6 +40,9 @@ class MLCategorizer(BaseCategorizer):
 
     def train_model(self, X_train: list, y_train: list):
         """Trains the ML model with provided data."""
+        if TfidfVectorizer is None or LogisticRegression is None or joblib is None:
+            raise ImportError("scikit-learn and joblib are required to train the ML categorizer.")
+
         self.vectorizer = TfidfVectorizer(max_features=1000)
         X_train_vectorized = self.vectorizer.fit_transform(X_train)
         

@@ -1,5 +1,9 @@
 import unittest
 from unittest.mock import MagicMock, patch
+import logging
+import os
+import shutil
+import tempfile
 
 from src.config_loader import ConfigLoader
 from src.workflow.logger import AppLogger
@@ -22,25 +26,33 @@ from src.backup.backup_manager import BackupManager
 class TestComponents(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
-            "log_file": "/tmp/test_app.log",
+            "log_file": os.path.join(self.temp_dir.name, "test_app.log"),
             "security_key": "a_very_secret_key_for_testing_1234567890",
-            "cache_dir": "/tmp/cache",
+            "cache_dir": os.path.join(self.temp_dir.name, "cache"),
             "error_recovery_max_retries": 3,
             "error_recovery_retry_delay_seconds": 1,
-            "compliance_rules_file": "/tmp/compliance_rules.json",
-            "mobile_capture_upload_dir": "/tmp/mobile_uploads",
+            "compliance_rules_file": os.path.join(self.temp_dir.name, "compliance_rules.json"),
+            "mobile_capture_upload_dir": os.path.join(self.temp_dir.name, "mobile_uploads"),
             "reconciliation_threshold": 0.05,
-            "migration_source_db": "sqlite:///tmp/source.db",
-            "migration_target_db": "sqlite:///tmp/target.db",
-            "budget_file": "/tmp/budgets.json",
+            "migration_source_db": f"sqlite:///{os.path.join(self.temp_dir.name, 'source.db')}",
+            "migration_target_db": f"sqlite:///{os.path.join(self.temp_dir.name, 'target.db')}",
+            "budget_file": os.path.join(self.temp_dir.name, "budgets.json"),
             "banking_api_endpoint": "http://banking.api/",
             "banking_api_credentials": {"client_id": "test", "client_secret": "test"},
-            "backup_base_dir": "/tmp/backups",
+            "backup_base_dir": os.path.join(self.temp_dir.name, "backups"),
             "backup_paths": [],
             "backup_config": {"type": "zip"},
-            "manual_review_queue_file": "/tmp/manual_review_queue.json"
+            "manual_review_queue_file": os.path.join(self.temp_dir.name, "manual_review_queue.json")
         }
+
+    def tearDown(self):
+        logger = logging.getLogger("automated_bookkeeping")
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
 
     def test_config_loader(self):
         # Create a dummy config file
@@ -59,7 +71,6 @@ class TestComponents(unittest.TestCase):
         with open(self.config["log_file"], "r") as f:
             content = f.read()
             self.assertIn("Test log message", content)
-        os.remove(self.config["log_file"])
 
     def test_security_manager(self):
         manager = SecurityManager(self.config)
@@ -122,7 +133,11 @@ class TestComponents(unittest.TestCase):
         transactions = [transaction1, transaction2]
         receipt = {"id": "r1", "total_amount": 100.0, "transaction_date": "2025-01-01"}
         
-        matches = reconciliation.reconcile(transactions, [receipt])
+        matches = [
+            result
+            for result in reconciliation.reconcile(transactions, [receipt])
+            if result["type"] == "match"
+        ]
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["receipt_id"], "r1")
 
@@ -145,19 +160,19 @@ class TestComponents(unittest.TestCase):
         
         manager = BudgetManager(self.config)
         status = manager.check_budget("Food", 100)
-        self.assertFalse(status["is_within_budget"])
+        self.assertTrue(status["is_within_budget"])
         self.assertEqual(status["remaining"], 50)
         os.remove(self.config["budget_file"])
 
-    @patch("src.banking.banking_api.requests.post")
-    def test_banking_api(self, mock_post):
+    @patch("src.banking.banking_api.requests.get")
+    def test_banking_api(self, mock_get):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {"transactions": [{"id": "tx1", "amount": 50.0}]}
-        mock_post.return_value = mock_response
+        mock_get.return_value = mock_response
 
         api = BankingAPI(self.config)
-        transactions = api.fetch_transactions("2025-01-01", "2025-01-31")
+        transactions = api.fetch_transactions({}, "2025-01-01", "2025-01-31")
         self.assertEqual(len(transactions), 1)
         self.assertEqual(transactions[0]["amount"], 50.0)
 
@@ -185,19 +200,20 @@ class TestComponents(unittest.TestCase):
     def test_backup_manager(self):
         manager = BackupManager(self.config)
         # Create a dummy file to backup
-        with open("/tmp/test_file.txt", "w") as f:
+        test_file = os.path.join(self.temp_dir.name, "test_file.txt")
+        with open(test_file, "w") as f:
             f.write("This is a test file.")
         
-        backup_result = manager.perform_backup(["/tmp/test_file.txt"], {"type": "zip"})
+        backup_result = manager.perform_backup([test_file], {"type": "zip"})
         self.assertEqual(backup_result["status"], "success")
         self.assertTrue(os.path.exists(backup_result["path"]))
 
-        restore_dir = "/tmp/restore_test"
+        restore_dir = os.path.join(self.temp_dir.name, "restore_test")
         restore_result = manager.restore_backup(backup_result["path"], restore_dir)
         self.assertEqual(restore_result["status"], "success")
         self.assertTrue(os.path.exists(os.path.join(restore_dir, "test_file.txt")))
 
-        os.remove("/tmp/test_file.txt")
+        os.remove(test_file)
         os.remove(backup_result["path"])
         shutil.rmtree(restore_dir)
         shutil.rmtree(self.config["backup_base_dir"])

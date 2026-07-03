@@ -1,0 +1,550 @@
+import os
+import tempfile
+import unittest
+
+from src.operations.local_api import create_app
+from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_bank_transactions import LocalBankTransactionImportService
+from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, LocalExportAttemptService
+from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_readiness import LocalReadinessService
+from src.operations.local_routing import LocalRoutingService
+from src.operations.local_wave_control import LocalWaveControlService
+
+
+class TestLocalAutonomousService(unittest.TestCase):
+    def test_autonomy_plan_exposes_safe_actions_and_review_gates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": intake_dir,
+            })
+            client = app.test_client()
+
+            response = client.get("/api/autonomy/plan")
+            page = client.get("/")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["externalSubmission"], "not_executed")
+            self.assertEqual(payload["status"], "ready")
+            self.assertIn("rescan_intake", payload["runnableActionIds"])
+            self.assertIn("plan_wave_daily_reconciliation", payload["runnableActionIds"])
+            self.assertIn("review_queue", {action["id"] for action in payload["actions"]})
+            self.assertIn("exception_queue", {action["id"] for action in payload["actions"]})
+            self.assertIn("approve_export_attempts", {action["id"] for action in payload["actions"]})
+            self.assertIn("prepare_period_close_pack", {action["id"] for action in payload["actions"]})
+            self.assertIn("prepare_master_ledger_projection", {action["id"] for action in payload["actions"]})
+            self.assertEqual(payload["exceptions"]["total"], 0)
+            self.assertEqual(payload["closeReadiness"]["status"], "blocked")
+            self.assertGreater(payload["counts"]["closeBlockingGates"], 0)
+            self.assertIn("Autonomous Cycle", page.data.decode("utf-8"))
+
+    def test_autonomy_plan_includes_operating_exception_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            record_id = ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "needs_review",
+                "exportStatus": "blocked_by_review",
+                "targetSystem": "waveapps",
+                "vendorName": "Unknown Vendor",
+                "category": "Manual Review",
+                "amount": 10,
+                "currency": "EUR",
+                "reviewRequired": True,
+            })
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_autonomy_ignore_health_blocks": True},
+                intake_paths=[],
+            )
+
+            plan = service.plan(include_wave_plan=False)
+            exception_action = next(action for action in plan["actions"] if action["id"] == "exception_queue")
+
+            self.assertIn("exception_queue", plan["manualActionIds"])
+            self.assertEqual(plan["counts"]["operatingExceptions"], plan["exceptions"]["total"])
+            self.assertGreaterEqual(plan["exceptions"]["total"], 1)
+            self.assertIn("master_ledger_record_review", plan["exceptions"]["byType"])
+            self.assertEqual(exception_action["evidence"]["operatingExceptions"], plan["exceptions"]["total"])
+            self.assertEqual(
+                plan["exceptions"]["topExceptions"][0]["entityId"],
+                record_id,
+            )
+            self.assertEqual(plan["exceptions"]["topExceptions"][0]["entityType"], "bookkeeping_record")
+            self.assertIn(
+                "open_bookkeeping_record",
+                {action["id"] for action in plan["exceptions"]["topExceptions"][0]["actions"]},
+            )
+            self.assertEqual(
+                next(
+                    action for action in plan["exceptions"]["topExceptions"][0]["actions"]
+                    if action["id"] == "open_bookkeeping_record"
+                )["path"],
+                f"/bookkeeping-records/{record_id}",
+            )
+
+    def test_dashboard_autonomy_panel_surfaces_top_operating_exceptions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            record_id = ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "needs_review",
+                "exportStatus": "blocked_by_review",
+                "targetSystem": "waveapps",
+                "vendorName": "Unknown Vendor",
+                "category": "Manual Review",
+                "amount": 10,
+                "currency": "EUR",
+                "reviewRequired": True,
+            })
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_autonomy_ignore_health_blocks": True,
+            })
+
+            html = app.test_client().get("/").data.decode("utf-8")
+
+            self.assertIn("Exceptions", html)
+            self.assertIn("master_ledger_record_review", html)
+            self.assertIn(f"bookkeeping_record #{record_id}", html)
+            self.assertIn(f"/bookkeeping-records/{record_id}", html)
+            self.assertIn("Open record", html)
+            self.assertIn("Open full exception queue", html)
+
+    def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            receipt_path = os.path.join(intake_dir, "receipt.txt")
+            with open(receipt_path, "w", encoding="utf-8") as handle:
+                handle.write("Vendor: Test Vendor\nDate: 2026-06-28\nTotal: EUR 42.50\nOffice supplies\n")
+
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_intake_paths": intake_dir,
+                "fab_local_intake_extensions": "txt",
+                "categorization_rules": {
+                    "Office Supplies": {
+                        "keywords": ["office supplies"],
+                        "vendors": ["test vendor"],
+                    }
+                },
+            })
+            client = app.test_client()
+
+            response = client.post("/api/autonomy/run", json={"includeWavePlan": False})
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            executed_ids = {action["id"] for action in payload["executedActions"]}
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["externalSubmission"], "not_executed")
+            self.assertIn("rescan_intake", executed_ids)
+            self.assertIn("process_imported", executed_ids)
+            self.assertIn("prepare_wave_drafts", executed_ids)
+            self.assertIn("prepare_export_attempts", executed_ids)
+            self.assertIn("prepare_master_ledger_projection", executed_ids)
+            self.assertEqual(payload["masterLedger"]["totalRows"], 1)
+            self.assertEqual(payload["masterLedger"]["readyForApproval"], 1)
+            self.assertEqual(len(payload["masterLedger"]["ledgerChecksum"]), 64)
+            documents = client.get("/api/documents").get_json()["documents"]
+            self.assertEqual(documents[0]["processing_status"], "export_draft_prepared")
+            self.assertEqual(documents[0]["vendor_name"], "Test Vendor")
+            routing = client.get("/api/routing").get_json()["routingAttempts"]
+            self.assertEqual(routing[0]["status"], "draft_prepared")
+            self.assertEqual(routing[0]["metadata"]["externalSubmission"], "not_executed")
+            export_attempts = client.get("/api/export-attempts").get_json()["exportAttempts"]
+            self.assertEqual(len(export_attempts), 1)
+            self.assertEqual(export_attempts[0]["status"], "approval_required")
+            self.assertEqual(export_attempts[0]["external_submission"], "not_executed")
+            audit_actions = [event["action"] for event in client.get("/api/audit").get_json()["auditEvents"]]
+            self.assertIn("local_autonomy.cycle_started", audit_actions)
+            self.assertIn("local_autonomy.cycle_completed", audit_actions)
+            self.assertIn("local_master_ledger.projection_prepared", audit_actions)
+
+    def test_autonomy_surfaces_and_prepares_mijngeldzaken_downstream_routes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "receipt-autonomy-mgz",
+                "originalFilename": "groceries.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Local Supermarket",
+                "category": "Personal",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "extractedData": {
+                    "vendor_name": "Local Supermarket",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 42.5,
+                    "description": "Weekly groceries",
+                },
+                "metadata": {"targetSystem": "mijngeldzaken"},
+            })
+            service = LocalAutonomousService(
+                ledger,
+                {"mijngeldzaken_category_mapping": {"Personal": "Huishouden"}},
+                intake_paths=[],
+            )
+
+            plan = service.plan(include_wave_plan=False)
+            result = service.run_cycle(include_wave_plan=False)
+
+            routing_action = next(action for action in plan["actions"] if action["id"] == "prepare_wave_drafts")
+            self.assertEqual(routing_action["evidence"]["targetBreakdown"]["mijngeldzaken"], 1)
+            self.assertIn("prepare_wave_drafts", plan["runnableActionIds"])
+            self.assertTrue(result["success"])
+            executed_ids = {action["id"] for action in result["executedActions"]}
+            self.assertIn("prepare_wave_drafts", executed_ids)
+            self.assertIn("prepare_export_attempts", executed_ids)
+            self.assertIn("prepare_master_ledger_projection", executed_ids)
+            route_summary = next(action for action in result["executedActions"] if action["id"] == "prepare_wave_drafts")
+            export_summary = next(action for action in result["executedActions"] if action["id"] == "prepare_export_attempts")
+            master_summary = next(action for action in result["executedActions"] if action["id"] == "prepare_master_ledger_projection")
+            self.assertEqual(route_summary["summary"]["targetBreakdown"]["mijngeldzaken"], 1)
+            self.assertEqual(export_summary["summary"]["targetBreakdown"]["mijngeldzaken"], 1)
+            self.assertEqual(master_summary["summary"]["byTargetSystem"]["mijngeldzaken"]["statuses"]["awaiting_approval"], 1)
+            routing_attempt = ledger.list_routing_attempts(status="draft_prepared", limit=1)[0]
+            export_attempt = ledger.list_export_attempts(status="approval_required", limit=1)[0]
+            self.assertEqual(routing_attempt["target"], "mijngeldzaken:transactions")
+            self.assertEqual(export_attempt["target_system"], "mijngeldzaken")
+            self.assertEqual(export_attempt["action_id"], "transaction_import_prepare")
+            self.assertEqual(export_attempt["payload"]["category"], "Huishouden")
+
+    def test_autonomy_regenerates_stale_mijngeldzaken_export_drafts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            config = {"mijngeldzaken_category_mapping": {"Personal": "Huishouden"}}
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "receipt-autonomy-mgz-stale",
+                "originalFilename": "groceries.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Local Supermarket",
+                "category": "Personal",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "extractedData": {
+                    "vendor_name": "Local Supermarket",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 42.5,
+                    "description": "Weekly groceries",
+                },
+                "metadata": {"targetSystem": "mijngeldzaken"},
+            })
+            route = LocalRoutingService(ledger, config).prepare_document_route(document_id)
+            export_service = LocalExportAttemptService(ledger, config)
+            prepared = export_service.prepare_from_routing_attempt(route["routingAttemptId"])
+            approved = export_service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+            original_checksum = approved["exportAttempt"]["metadata"]["masterLedgerChecksum"]
+            ledger.update_document(document_id, {
+                "source": "scanner",
+                "sourceDocumentId": "receipt-autonomy-mgz-stale",
+                "originalFilename": "groceries.txt",
+                "documentType": "receipt",
+                "processingStatus": "export_draft_prepared",
+                "vendorName": "Local Supermarket",
+                "category": "Personal",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 99.99,
+                "extractedData": {
+                    "vendor_name": "Local Supermarket",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 99.99,
+                    "description": "Weekly groceries",
+                },
+                "metadata": {"targetSystem": "mijngeldzaken"},
+            })
+            service = LocalAutonomousService(ledger, config, intake_paths=[])
+
+            plan = service.plan(include_wave_plan=False)
+            result = service.run_cycle(include_wave_plan=False)
+            executed_ids = {action["id"] for action in result["executedActions"]}
+            regenerate_action = next(
+                action for action in result["executedActions"]
+                if action["id"] == "regenerate_stale_export_attempts"
+            )
+            attempt = ledger.get_export_attempt(prepared["exportAttemptId"])
+
+            self.assertIn("regenerate_stale_export_attempts", plan["runnableActionIds"])
+            self.assertEqual(plan["counts"]["staleMasterLedgerDrafts"], 1)
+            self.assertTrue(result["success"])
+            self.assertIn("regenerate_stale_export_attempts", executed_ids)
+            self.assertEqual(regenerate_action["summary"]["regenerated"], 1)
+            self.assertEqual(attempt["status"], "approval_required")
+            self.assertEqual(attempt["external_submission"], "not_executed")
+            self.assertEqual(attempt["payload"]["amount"], 99.99)
+            self.assertNotEqual(attempt["metadata"]["masterLedgerChecksum"], original_checksum)
+            self.assertEqual(result["masterLedger"]["readyForApproval"], 1)
+            self.assertEqual(result["masterLedger"]["blockedRows"], 0)
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=50)]
+            self.assertIn("local_export_attempt.regenerated", audit_actions)
+
+    def test_autonomy_run_records_wave_report_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            result = service.run_cycle(include_wave_plan=True)
+            snapshots = ledger.list_wave_report_snapshots(workflow_id="daily_reconciliation_run")
+
+            self.assertTrue(result["success"])
+            self.assertIn("plan_wave_daily_reconciliation", {action["id"] for action in result["executedActions"]})
+            wave_action = next(action for action in result["executedActions"] if action["id"] == "plan_wave_daily_reconciliation")
+            self.assertEqual(wave_action["summary"]["waveReportControls"]["status"], "ready_for_wave_read")
+            self.assertGreater(len(snapshots), 0)
+            self.assertIn("account-transactions", {snapshot["report_type"] for snapshot in snapshots})
+            self.assertEqual(snapshots[0]["external_submission"], "not_executed")
+
+    def test_autonomy_run_prepares_period_close_pack_when_close_ready(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            _capture_zero_activity_wave_result(ledger)
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            plan = service.plan(include_wave_plan=False)
+            result = service.run_cycle(include_wave_plan=False)
+
+            self.assertEqual(plan["closeReadiness"]["status"], "ready")
+            self.assertIn("prepare_period_close_pack", plan["runnableActionIds"])
+            self.assertTrue(result["success"])
+            self.assertIn("prepare_period_close_pack", {action["id"] for action in result["executedActions"]})
+            close_action = next(action for action in result["executedActions"] if action["id"] == "prepare_period_close_pack")
+            self.assertEqual(close_action["summary"]["status"], "prepared")
+            self.assertTrue(close_action["summary"]["closeReadiness"]["canClose"])
+            self.assertEqual(close_action["summary"]["externalSubmission"], "not_executed")
+            self.assertTrue(os.path.exists(close_action["summary"]["closePackPath"]))
+            self.assertEqual(close_action["summary"]["manifest"]["externalSubmission"], "not_executed")
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
+            self.assertIn("local_close_pack.prepared", audit_actions)
+            self.assertIn("local_autonomy.period_close_pack_prepared", audit_actions)
+
+    def test_autonomy_run_uses_persisted_bank_transactions_for_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "receipt-autonomy-bank",
+                "originalFilename": "receipt.txt",
+                "processingStatus": "processed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+            })
+            LocalBankTransactionImportService(ledger, {}).import_transactions([{
+                "id": "tx-autonomy-bank",
+                "date": "2026-06-28",
+                "amount": -42.5,
+                "description": "Office Shop",
+            }])
+            service = LocalAutonomousService(ledger, {"reconciliation_match_threshold": 0.9}, intake_paths=[])
+
+            result = service.run_cycle(include_wave_plan=False)
+            transaction = ledger.list_bank_transactions()[0]
+
+            self.assertTrue(result["success"])
+            self.assertIn("run_reconciliation", {action["id"] for action in result["executedActions"]})
+            self.assertEqual(transaction["reconciliation_status"], "candidate")
+            self.assertEqual(ledger.list_reconciliation_matches()[0]["status"], "candidate")
+
+    def test_autonomy_run_refreshes_bank_transaction_records_with_approved_rules(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_vendor_category_rule({
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "targetSystem": "waveapps",
+                "status": "approved",
+            })
+            LocalBankTransactionImportService(ledger, {}).import_transactions([{
+                "id": "tx-autonomy-rule",
+                "date": "2026-06-28",
+                "amount": -42.5,
+                "description": "Printer paper",
+                "counterparty": "Office Shop",
+            }])
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            result = service.run_cycle(include_wave_plan=False)
+            records = ledger.list_bookkeeping_records(limit=10)
+
+            self.assertTrue(result["success"])
+            self.assertIn("refresh_bank_records", {action["id"] for action in result["executedActions"]})
+            self.assertIn("run_reconciliation", {action["id"] for action in result["executedActions"]})
+            self.assertIn("prepare_wave_drafts", {action["id"] for action in result["executedActions"]})
+            self.assertEqual(records[0]["source_type"], "bank_transaction")
+            self.assertEqual(records[0]["category"], "Office Supplies")
+            self.assertEqual(records[0]["line_items"][0]["account_name"], "Office Supplies")
+            self.assertEqual(records[0]["metadata"]["appliedVendorCategoryRule"]["category"], "Office Supplies")
+            self.assertEqual(records[0]["status"], "missing_receipt")
+            self.assertEqual(records[0]["export_status"], "blocked_missing_receipt")
+            routing_attempts = ledger.list_routing_attempts(status="draft_prepared", limit=10)
+            export_attempts = ledger.list_export_attempts(status="approval_required", limit=10)
+            self.assertEqual(len(routing_attempts), 0)
+            self.assertEqual(len(export_attempts), 0)
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
+            self.assertIn("local_bookkeeping_records.bank_transactions_refreshed", audit_actions)
+
+    def test_autonomy_can_prepare_bank_record_wave_draft_when_reconciliation_is_not_requested(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_vendor_category_rule({
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "targetSystem": "waveapps",
+                "status": "approved",
+            })
+            LocalBankTransactionImportService(ledger, {}).import_transactions([{
+                "id": "tx-autonomy-bank-draft",
+                "date": "2026-06-28",
+                "amount": -42.5,
+                "description": "Printer paper",
+                "counterparty": "Office Shop",
+            }])
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            result = service.run_cycle(bank_transactions=[], include_wave_plan=False)
+            records = ledger.list_bookkeeping_records(limit=10)
+
+            self.assertTrue(result["success"])
+            self.assertIn("refresh_bank_records", {action["id"] for action in result["executedActions"]})
+            self.assertIn("prepare_wave_drafts", {action["id"] for action in result["executedActions"]})
+            self.assertIn("prepare_export_attempts", {action["id"] for action in result["executedActions"]})
+            self.assertEqual(records[0]["source_type"], "bank_transaction")
+            self.assertEqual(records[0]["export_status"], "awaiting_approval")
+            routing_attempts = ledger.list_routing_attempts(status="draft_prepared", limit=10)
+            export_attempts = ledger.list_export_attempts(status="approval_required", limit=10)
+            self.assertEqual(len(routing_attempts), 1)
+            self.assertEqual(routing_attempts[0]["bookkeeping_record_id"], records[0]["id"])
+            self.assertEqual(routing_attempts[0]["metadata"]["bookkeepingRecordId"], records[0]["id"])
+            self.assertEqual(len(export_attempts), 1)
+            self.assertEqual(export_attempts[0]["bookkeeping_record_id"], records[0]["id"])
+            self.assertIsNone(export_attempts[0]["document_id"])
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
+            self.assertIn("local_routing.bank_record_wave_draft_prepared", audit_actions)
+
+    def test_autonomy_execution_creates_pre_execution_backup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "receipt-autonomy-execute",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            export_service = LocalExportAttemptService(ledger)
+            prepared = export_service.prepare_from_routing_attempt(route["routingAttemptId"])
+            approved = export_service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+            backup_dir = os.path.join(temp_dir, "backups")
+            service = LocalAutonomousService(
+                ledger,
+                {
+                    "fab_autonomy_execute_approved_exports": True,
+                    "fab_local_backup_dir": backup_dir,
+                },
+                intake_paths=[],
+            )
+
+            plan = service.plan(include_wave_plan=False)
+            result = service.run_cycle(include_wave_plan=False)
+
+            self.assertEqual(approved["status"], "approved")
+            self.assertIn("execute_approved_exports", plan["runnableActionIds"])
+            self.assertTrue(result["success"])
+            execution_action = next(
+                action for action in result["executedActions"]
+                if action["id"] == "execute_approved_exports"
+            )
+            backup = execution_action["summary"]["preExecutionBackup"]
+            self.assertEqual(backup["status"], "created")
+            self.assertTrue(os.path.exists(backup["backupPath"]))
+            self.assertEqual(len(backup["ledgerSha256"]), 64)
+            self.assertEqual(backup["externalSubmission"], "not_executed")
+            self.assertEqual(execution_action["summary"]["attempted"], 1)
+            self.assertEqual(
+                ledger.get_export_attempt(prepared["exportAttemptId"])["status"],
+                "queued",
+            )
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=40)]
+            self.assertIn("local_backup.created", audit_actions)
+            self.assertIn("local_autonomy.export_execution_preflight_backup", audit_actions)
+
+    def test_autonomy_blocks_when_remote_exposure_is_unsafe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            readiness = LocalReadinessService(
+                {},
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                api_host="0.0.0.0",
+                api_token_configured=False,
+                intake_paths=[],
+                intake_extensions=[],
+            )
+            service = LocalAutonomousService(
+                ledger,
+                {},
+                readiness=readiness,
+                intake_paths=[],
+                intake_extensions=[],
+            )
+
+            plan = service.plan()
+            result = service.run_cycle()
+
+            self.assertEqual(plan["status"], "blocked")
+            self.assertIn("remote_exposure_without_token", plan["blockedReasons"])
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(
+                ledger.list_audit_events()[0]["action"],
+                "local_autonomy.cycle_blocked",
+            )
+
+def _capture_zero_activity_wave_result(ledger: LocalOperationsLedger):
+    service = LocalWaveControlService()
+    plan = service.plan_workflow({
+        "workflowId": "daily_reconciliation_run",
+        "fromDate": "2026-06-28",
+        "toDate": "2026-06-28",
+        "accountOption": "-1",
+        "contactOption": "0",
+    })
+    service.record_workflow_report_snapshots(ledger, plan)
+    return service.record_report_result(ledger, {
+        "workflowId": "daily_reconciliation_run",
+        "reportType": "account-transactions",
+        "actionId": "report_table_read",
+        "result": {
+            "rowCount": 0,
+            "totalDebits": 0,
+            "totalCredits": 0,
+        },
+    })
+
+
+if __name__ == "__main__":
+    unittest.main()

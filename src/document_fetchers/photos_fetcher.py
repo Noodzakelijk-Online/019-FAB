@@ -1,8 +1,15 @@
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+except ImportError:
+    Credentials = None
+    InstalledAppFlow = None
+    Request = None
+    build = None
+    HttpError = Exception
 import os
 from typing import List, Dict, Any
 import pickle
@@ -22,11 +29,18 @@ class PhotosFetcher(BaseFetcher):
         super().__init__(config)
         self.creds = None
         self.service = None
-        self._authenticate()
+        self.auth_error = None
+        try:
+            self._authenticate()
+        except ImportError as exc:
+            self.auth_error = exc
 
     def _authenticate(self):
-        token_path = self.config.get("photos_token_path", "token_photos.pickle")
-        credentials_path = self.config.get("photos_credentials_path", "credentials_photos.json")
+        if build is None or InstalledAppFlow is None or Request is None:
+            raise ImportError("Google API dependencies are required for Photos fetching.")
+
+        token_path = self.config.get("google_photos_token_file") or self.config.get("photos_token_path", "token_photos.pickle")
+        credentials_path = self.config.get("google_photos_credentials_file") or self.config.get("photos_credentials_path", "credentials_photos.json")
 
         if os.path.exists(token_path):
             with open(token_path, "rb") as token:
@@ -46,14 +60,26 @@ class PhotosFetcher(BaseFetcher):
         self.service = build("photoslibrary", "v1", credentials=self.creds, static_discovery=False)
 
     def fetch_documents(self) -> List[Dict[str, Any]]:
-        attachments_dir = self.config.get("attachments_save_dir", "/tmp/photos_attachments")
+        if self.auth_error:
+            print(f"Photos fetcher unavailable: {self.auth_error}")
+            return []
+
+        attachments_dir = self.config.get("google_photos_download_dir") or self.config.get("attachments_save_dir", "/tmp/photos_attachments")
         os.makedirs(attachments_dir, exist_ok=True)
 
         documents = []
         page_token = None
         try:
             while True:
-                results = self.service.mediaItems().list(pageSize=100, pageToken=page_token).execute()
+                album_name = self.config.get("google_photos_album_name")
+                if album_name:
+                    albums = self.service.albums().list(pageSize=50).execute().get("albums", [])
+                    album = next((item for item in albums if item.get("title") == album_name), None)
+                    if not album:
+                        return []
+                    results = self.service.mediaItems().search(body={"albumId": album["id"], "pageSize": 100, "pageToken": page_token}).execute()
+                else:
+                    results = self.service.mediaItems().list(pageSize=100, pageToken=page_token).execute()
                 items = results.get("mediaItems", [])
 
                 if not items:
@@ -80,10 +106,10 @@ class PhotosFetcher(BaseFetcher):
                             "source": "google_photos",
                             "original_filename": file_name,
                             "local_path": local_path,
-                            "timestamp": item["creationTime"],
+                            "timestamp": item.get("creationTime", ""),
                             "metadata": {
-                                "mime_type": item["mimeType"],
-                                "product_url": item["productUrl"]
+                                "mime_type": item.get("mimeType"),
+                                "product_url": item.get("productUrl")
                             }
                         })
                     except requests.exceptions.RequestException as e:

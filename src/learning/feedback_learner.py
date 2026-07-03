@@ -1,6 +1,7 @@
 from typing import Dict, Any, List
 import json
 import os
+from datetime import datetime, timezone
 
 class FeedbackLearner:
     """Records and manages feedback for the learning system."""
@@ -27,7 +28,7 @@ class FeedbackLearner:
             "document_id": document_id,
             "original_category": original_category,
             "corrected_category": corrected_category,
-            "timestamp": os.fspath(os.path.getmtime(self.feedback_log_file)) # Placeholder for actual timestamp
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
         self.feedback_data.append(feedback_entry)
         self._save_feedback()

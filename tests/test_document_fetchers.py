@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import os
+import shutil
+import tempfile
 
 from src.document_fetchers.gmail_fetcher import GmailFetcher
 from src.document_fetchers.drive_fetcher import DriveFetcher
@@ -10,20 +12,22 @@ from src.document_fetchers.photos_fetcher import PhotosFetcher
 class TestDocumentFetchers(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
-            "gmail_credentials_file": "/tmp/gmail_credentials.json",
-            "gmail_token_file": "/tmp/gmail_token.json",
-            "gmail_attachment_download_dir": "/tmp/gmail_downloads",
-            "google_drive_credentials_file": "/tmp/drive_credentials.json",
-            "google_drive_token_file": "/tmp/drive_token.json",
-            "google_drive_download_dir": "/tmp/drive_downloads",
+            "gmail_credentials_file": os.path.join(self.temp_dir.name, "gmail_credentials.json"),
+            "gmail_token_file": os.path.join(self.temp_dir.name, "gmail_token.json"),
+            "gmail_attachment_download_dir": os.path.join(self.temp_dir.name, "gmail_downloads"),
+            "google_drive_credentials_file": os.path.join(self.temp_dir.name, "drive_credentials.json"),
+            "google_drive_token_file": os.path.join(self.temp_dir.name, "drive_token.json"),
+            "google_drive_download_dir": os.path.join(self.temp_dir.name, "drive_downloads"),
             "freshdesk_api_key": "test_api_key",
             "freshdesk_domain": "test_domain",
-            "freshdesk_download_dir": "/tmp/freshdesk_downloads",
-            "google_photos_credentials_file": "/tmp/photos_credentials.json",
-            "google_photos_token_file": "/tmp/photos_token.json",
+            "freshdesk_download_dir": os.path.join(self.temp_dir.name, "freshdesk_downloads"),
+            "google_photos_credentials_file": os.path.join(self.temp_dir.name, "photos_credentials.json"),
+            "google_photos_token_file": os.path.join(self.temp_dir.name, "photos_token.json"),
             "google_photos_album_name": "Test Album",
-            "google_photos_download_dir": "/tmp/photos_downloads"
+            "google_photos_download_dir": os.path.join(self.temp_dir.name, "photos_downloads")
         }
         # Create dummy credential and token files for all fetchers
         for key in ["gmail", "google_drive", "google_photos"]:
@@ -33,14 +37,20 @@ class TestDocumentFetchers(unittest.TestCase):
                 f.write("{}")
         
         # Create download directories
-        for key in ["gmail", "google_drive", "freshdesk", "google_photos"]:
-            os.makedirs(self.config[f"{key}_download_dir"], exist_ok=True)
+        for key in [
+            "gmail_attachment_download_dir",
+            "google_drive_download_dir",
+            "freshdesk_download_dir",
+            "google_photos_download_dir",
+        ]:
+            os.makedirs(self.config[key], exist_ok=True)
 
     @patch("src.document_fetchers.gmail_fetcher.build")
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.gmail_fetcher.Request")
     @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
     @patch("src.document_fetchers.gmail_fetcher.pickle")
-    def test_gmail_fetcher(self, mock_pickle, mock_exists, mock_InstalledAppFlow, mock_build):
+    def test_gmail_fetcher(self, mock_pickle, mock_exists, mock_Request, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
         mock_pickle.load.return_value = MagicMock()
         
@@ -50,13 +60,18 @@ class TestDocumentFetchers(unittest.TestCase):
         # Mock Gmail API calls
         mock_service.users.return_value.messages.return_value.list.return_value.execute.return_value = {"messages": [{"id": "msg1"}]}
         mock_service.users.return_value.messages.return_value.get.return_value.execute.return_value = {
+            "internalDate": "1735689600000",
             "payload": {
+                "headers": [
+                    {"name": "Subject", "value": "Receipt"},
+                    {"name": "From", "value": "vendor@example.com"},
+                ],
                 "parts": [
                     {"filename": "test.pdf", "body": {"attachmentId": "att1"}, "mimeType": "application/pdf"}
                 ]
             }
         }
-        mock_service.users.return_value.messages.return_value.attachments.return_value.get.return_value.execute.return_value = {"data": "JVBERi0xLjQKJcOkw7zXCl..."}
+        mock_service.users.return_value.messages.return_value.attachments.return_value.get.return_value.execute.return_value = {"data": "JVBERi0xLjQK"}
 
         fetcher = GmailFetcher(self.config)
         documents = fetcher.fetch_documents()
@@ -67,9 +82,11 @@ class TestDocumentFetchers(unittest.TestCase):
 
     @patch("src.document_fetchers.drive_fetcher.build")
     @patch("src.document_fetchers.drive_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
+    @patch("src.document_fetchers.drive_fetcher.Request")
     @patch("src.document_fetchers.drive_fetcher.os.path.exists")
     @patch("src.document_fetchers.drive_fetcher.pickle")
-    def test_drive_fetcher(self, mock_pickle, mock_exists, mock_InstalledAppFlow, mock_build):
+    def test_drive_fetcher(self, mock_pickle, mock_exists, mock_Request, mock_MediaIoBaseDownload, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
         mock_pickle.load.return_value = MagicMock()
 
@@ -83,6 +100,9 @@ class TestDocumentFetchers(unittest.TestCase):
             ]
         }
         mock_service.files.return_value.get_media.return_value.execute.return_value = b"dummy_image_content"
+        downloader = MagicMock()
+        downloader.next_chunk.return_value = (None, True)
+        mock_MediaIoBaseDownload.return_value = downloader
 
         fetcher = DriveFetcher(self.config)
         documents = fetcher.fetch_documents()
@@ -111,10 +131,11 @@ class TestDocumentFetchers(unittest.TestCase):
 
     @patch("src.document_fetchers.photos_fetcher.build")
     @patch("src.document_fetchers.photos_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.photos_fetcher.Request")
     @patch("src.document_fetchers.photos_fetcher.os.path.exists")
     @patch("src.document_fetchers.photos_fetcher.pickle")
     @patch("src.document_fetchers.photos_fetcher.requests.get")
-    def test_photos_fetcher(self, mock_requests_get, mock_pickle, mock_exists, mock_InstalledAppFlow, mock_build):
+    def test_photos_fetcher(self, mock_requests_get, mock_pickle, mock_exists, mock_Request, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
         mock_pickle.load.return_value = MagicMock()
         
@@ -136,6 +157,8 @@ class TestDocumentFetchers(unittest.TestCase):
 
         mock_response = MagicMock()
         mock_response.content = b"dummy_image_content"
+        mock_response.raise_for_status.return_value = None
+        mock_response.iter_content.return_value = [b"dummy_image_content"]
         mock_requests_get.return_value = mock_response
 
         fetcher = PhotosFetcher(self.config)
@@ -153,9 +176,14 @@ class TestDocumentFetchers(unittest.TestCase):
             if os.path.exists(self.config[f"{key}_token_file"]):
                 os.remove(self.config[f"{key}_token_file"])
         
-        for key in ["gmail", "google_drive", "freshdesk", "google_photos"]:
-            if os.path.exists(self.config[f"{key}_download_dir"]):
-                shutil.rmtree(self.config[f"{key}_download_dir}"])
+        for key in [
+            "gmail_attachment_download_dir",
+            "google_drive_download_dir",
+            "freshdesk_download_dir",
+            "google_photos_download_dir",
+        ]:
+            if os.path.exists(self.config[key]):
+                shutil.rmtree(self.config[key])
 
 if __name__ == "__main__":
     unittest.main()

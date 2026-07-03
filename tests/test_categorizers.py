@@ -102,7 +102,7 @@ class TestCategorizers(unittest.TestCase):
         # Test with fallback (both rule-based and ML fail or low confidence)
         processed_data = {"ocr_text": "some random text", "extracted_data": {"vendor_name": "NoMatch"}}
         mock_model.predict.return_value = ["ML_Category"]
-        mock_model.predict_proba.return_value = [[0.8, 0.2]] # 0.2 confidence (below threshold)
+        mock_model.predict_proba.return_value = [[0.3, 0.2]] # 0.3 confidence (below threshold)
         result = categorizer.categorize(processed_data)
         self.assertEqual(result["category"], "Manual Review")
 

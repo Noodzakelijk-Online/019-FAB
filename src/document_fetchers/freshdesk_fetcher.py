@@ -22,7 +22,7 @@ class FreshdeskFetcher(BaseFetcher):
 
     def fetch_documents(self) -> List[Dict[str, Any]]:
         query_params = self.config.get("freshdesk_query_params", {})
-        attachments_dir = self.config.get("attachments_save_dir", "/tmp/freshdesk_attachments")
+        attachments_dir = self.config.get("freshdesk_download_dir") or self.config.get("attachments_save_dir", "/tmp/freshdesk_attachments")
         os.makedirs(attachments_dir, exist_ok=True)
 
         documents = []
@@ -31,15 +31,18 @@ class FreshdeskFetcher(BaseFetcher):
             tickets_url = f"{self.base_url}tickets"
             response = requests.get(tickets_url, auth=self.auth, params=query_params)
             response.raise_for_status()  # Raise an exception for HTTP errors
-            tickets = response.json()
+            payload = response.json()
+            tickets = payload.get("tickets", payload) if isinstance(payload, dict) else payload
 
             for ticket in tickets:
                 ticket_id = ticket["id"]
-                # Fetch conversations (replies) for each ticket to get attachments
-                conversations_url = f"{self.base_url}tickets/{ticket_id}/conversations"
-                conv_response = requests.get(conversations_url, auth=self.auth)
-                conv_response.raise_for_status()
-                conversations = conv_response.json()
+                conversations = [ticket] if ticket.get("attachments") else []
+                if not conversations:
+                    # Fetch conversations (replies) for each ticket to get attachments
+                    conversations_url = f"{self.base_url}tickets/{ticket_id}/conversations"
+                    conv_response = requests.get(conversations_url, auth=self.auth)
+                    conv_response.raise_for_status()
+                    conversations = conv_response.json()
 
                 for conversation in conversations:
                     if "attachments" in conversation:
@@ -54,16 +57,17 @@ class FreshdeskFetcher(BaseFetcher):
                             with open(local_path, "wb") as f:
                                 f.write(attachment_content)
                             
+                            attachment_id = attachment["id"]
                             documents.append({
-                                "id": f"freshdesk_{ticket_id}_{attachment["id"]}",
+                                "id": f"freshdesk_{ticket_id}_{attachment_id}",
                                 "source": "freshdesk",
                                 "original_filename": file_name,
                                 "local_path": local_path,
-                                "timestamp": attachment["created_at"],
+                                "timestamp": attachment.get("created_at", ""),
                                 "metadata": {
                                     "ticket_id": ticket_id,
-                                    "conversation_id": conversation["id"],
-                                    "attachment_id": attachment["id"]
+                                    "conversation_id": conversation.get("id"),
+                                    "attachment_id": attachment_id
                                 }
                             })
         except requests.exceptions.RequestException as e:

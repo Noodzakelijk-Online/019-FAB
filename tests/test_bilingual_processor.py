@@ -1,26 +1,32 @@
 import unittest
 from unittest.mock import MagicMock, patch
+import os
+import tempfile
 
+import src.document_processors.bilingual_processor as bilingual_module
 from src.document_processors.bilingual_processor import BilingualProcessor
 
 class TestBilingualProcessor(unittest.TestCase):
 
     def setUp(self):
+        if bilingual_module.langdetect is None:
+            self.skipTest("langdetect is required for language-specific routing tests")
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
             "tesseract_cmd": "tesseract",
             "dutch_ocr_lang": "nld",
-            "google_vision_credentials_file": "/tmp/vision_credentials.json"
+            "google_vision_credentials_file": os.path.join(self.temp_dir.name, "vision_credentials.json")
         }
         # Create dummy credential file for VisionProcessor
         with open(self.config["google_vision_credentials_file"], "w") as f:
             f.write("{}")
 
         # Create a dummy image file for testing
-        self.dummy_image_path = "/tmp/dummy_bilingual_receipt.png"
-        # Using a simple image creation for testing purposes
-        from PIL import Image
-        img = Image.new("RGB", (100, 50), color = (255, 255, 255))
-        img.save(self.dummy_image_path)
+        self.dummy_image_path = os.path.join(self.temp_dir.name, "dummy_bilingual_receipt.png")
+        with open(self.dummy_image_path, "wb") as f:
+            f.write(b"dummy image")
 
     @patch("src.document_processors.bilingual_processor.pytesseract.image_to_string")
     @patch("src.document_processors.bilingual_processor.langdetect.detect")
@@ -93,13 +99,6 @@ class TestBilingualProcessor(unittest.TestCase):
         MockVisionProcessor.assert_called_once_with(self.config)
         mock_vision_processor_instance.process_document.assert_called_once_with(self.dummy_image_path)
         MockDutchOcrProcessor.assert_not_called()
-
-    def tearDown(self):
-        # Clean up dummy files
-        if os.path.exists(self.config["google_vision_credentials_file"]):
-            os.remove(self.config["google_vision_credentials_file"])
-        if os.path.exists(self.dummy_image_path):
-            os.remove(self.dummy_image_path)
 
 if __name__ == "__main__":
     unittest.main()

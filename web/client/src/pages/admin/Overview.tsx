@@ -1,5 +1,5 @@
 import { trpc } from "@/lib/trpc";
-import { Users, MessageSquare, TrendingUp, Clock, CreditCard, FileText } from "lucide-react";
+import { Users, MessageSquare, CreditCard, FileText, FileSearch } from "lucide-react";
 import AdminLayout from "@/components/AdminLayout";
 
 export default function AdminOverview() {
@@ -8,6 +8,7 @@ export default function AdminOverview() {
   const contactCount = trpc.contact.count.useQuery();
   const contactMessages = trpc.contact.list.useQuery({});
   const blogCount = trpc.blog.count.useQuery();
+  const bookkeepingOverview = trpc.bookkeeping.overview.useQuery();
 
   const newMessages = contactMessages.data?.filter((m) => m.status === "new").length ?? 0;
 
@@ -27,6 +28,13 @@ export default function AdminOverview() {
       icon: MessageSquare,
       color: "bg-sage-light text-sage",
       change: newMessages > 0 ? `${newMessages} unread` : "All read",
+    },
+    {
+      label: "Review Backlog",
+      value: bookkeepingOverview.data?.pendingReviews ?? 0,
+      icon: FileSearch,
+      color: "bg-amber-50 text-amber-700",
+      change: `${bookkeepingOverview.data?.documents ?? 0} documents tracked`,
     },
     {
       label: "Blog Posts",
@@ -56,7 +64,7 @@ export default function AdminOverview() {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        <div className="grid sm:grid-cols-2 xl:grid-cols-5 gap-5">
           {stats.map((stat, i) => (
             <div
               key={i}

@@ -1,5 +1,8 @@
 from typing import Dict, Any
-import langdetect
+try:
+    import langdetect
+except ImportError:
+    langdetect = None
 
 from src.document_processors.base import BaseProcessor
 from src.document_processors.dutch_ocr_processor import DutchOcrProcessor
@@ -27,8 +30,9 @@ class BilingualProcessor(BaseProcessor):
         if temp_text:
             try:
                 # langdetect might need more text for accurate detection
-                detected_language = langdetect.detect(temp_text)
-            except langdetect.lang_detect_exception.LangDetectException:
+                if langdetect is not None:
+                    detected_language = langdetect.detect(temp_text)
+            except Exception:
                 pass # Keep default if detection fails
 
         if detected_language == "nl":

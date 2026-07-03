@@ -10,7 +10,9 @@ class AppLogger:
 
         # Clear existing handlers to prevent duplicate logs
         if self.logger.hasHandlers():
-            self.logger.handlers.clear()
+            for handler in list(self.logger.handlers):
+                self.logger.removeHandler(handler)
+                handler.close()
 
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

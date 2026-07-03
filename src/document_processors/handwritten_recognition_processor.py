@@ -1,8 +1,20 @@
 from typing import Dict, Any
-import cv2
-import numpy as np
-from PIL import Image
-import pytesseract
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+try:
+    import numpy as np
+except ImportError:
+    np = None
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = None
 
 from src.document_processors.base import BaseProcessor
 
@@ -12,11 +24,15 @@ class HandwrittenRecognitionProcessor(BaseProcessor):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.tesseract_cmd = self.config.get("tesseract_cmd", "tesseract")
-        pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+        if pytesseract is not None:
+            pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
         self.psm = self.config.get("handwritten_psm", 6) # Page segmentation mode for Tesseract
         self.ocr_lang = self.config.get("handwritten_ocr_lang", "eng")
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
+        if cv2 is None or np is None or Image is None or pytesseract is None:
+            return {"ocr_text": "", "extracted_data": {}, "language": ""}
+
         try:
             img = cv2.imread(document_path)
             if img is None:

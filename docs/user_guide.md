@@ -65,13 +65,47 @@ cp config/config_template.ini config/config.ini
 
 Now, open `config/config.ini` in a text editor and fill in the required details for each section. Below is a breakdown of the key sections and parameters.
 
-**Security Note**: For sensitive credentials (like API keys, passwords), it is highly recommended to use **environment variables** instead of directly writing them into `config.ini`. The system's `ConfigLoader` is designed to automatically override `config.ini` values with environment variables that are prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`).
+**Security Note**: For sensitive credentials (like API keys, passwords), it is highly recommended to use **environment variables** instead of directly writing them into `config.ini`. The system's `ConfigLoader` is designed to automatically override `config.ini` values with environment variables that are prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`). Local operations settings also accept direct `FAB_LOCAL_*` flat variables such as `FAB_LOCAL_LEDGER_PATH` and `FAB_LOCAL_API_PORT`.
 
 ### 4.1. `[app]` Section
 
 General application settings.
 
 *   `log_file`: Path to the application log file. (e.g., `logs/app.log`)
+
+### 4.1.1. `[operations]` Section
+
+Local operating ledger and optional web operations API settings.
+
+*   `local_ledger_enabled`: Set to `true` to persist workflow runs, document status, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events to local SQLite.
+*   `ledger_path`: Path to the SQLite ledger file. On Windows, prefer a private folder such as `C:\Users\<you>\AppData\Local\FAB\fab_operations.sqlite3`.
+*   `api_host`: Host for the optional local operations API. Use `127.0.0.1` unless you intentionally expose FAB through a protected tunnel.
+*   `api_port`: Port for the optional local operations API. Default: `5001`.
+*   `api_token`: Bearer token required by the optional local operations API and optional web operations API. Configure this before using ngrok or any non-loopback host.
+*   `local_intake_paths`: Comma- or semicolon-separated local folders to scan from the dashboard, such as a Google Drive-synced `sort out` folder.
+*   `local_intake_extensions`: File extensions accepted by local intake. Default document types include PDF, image, text, and CSV files.
+*   `backup_dir`: Folder where the local dashboard/API stores SQLite ledger backups. Keep this outside Git-tracked folders for real financial metadata.
+*   `categorization_review_confidence_threshold`: Minimum category confidence before FAB can keep a processed document out of manual review.
+*   `waveapps_default_account`: Default Wave account name used when preparing local transaction draft payloads.
+*   `review_stale_hours`: Age at which open review items are flagged in Operations Health. Default: `48`.
+*   `document_stale_hours`: Age at which imported, processing, or review documents are flagged as stuck. Default: `24`.
+*   `routing_stale_hours`: Age at which prepared routing drafts are flagged as waiting too long for approval/export. Default: `24`.
+*   `workflow_stale_hours`: Age at which a running workflow is treated as stale. Default: `6`.
+*   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
+*   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
+*   `api_url`: Base URL for the optional web operations API, such as `http://127.0.0.1:3000`.
+*   `timeout_seconds`: Request timeout for the optional web operations API.
+
+The local ledger does not store API tokens or passwords. It can store financial document metadata and OCR text, so keep the file out of Git and protect it like bookkeeping records.
+Run the local API with:
+
+```bash
+python -m src.operations.local_api
+```
+
+Open `http://127.0.0.1:5001/` for the local dashboard. Use the Operations Health panel to see stale review items, stuck documents, failed records, routing blocks, prepared drafts waiting for approval, and stale workflow runs. Use the Autonomous Cycle panel to plan or run the safe local loop: folder intake, imported-document processing, Wave draft preparation, reconciliation candidate creation from persisted or supplied bank transactions, and read-only Wave reconciliation planning. It never submits data to Wave, resolves reviews, changes credentials, restores backups, deletes files, or sends external messages. Use the Folder Intake panel to rescan configured folders into the ledger, then process imported documents through OCR/text extraction, categorization, validation, and review gates. The Bookkeeping Records panel shows FAB's normalized financial records across document and bank sources, including review-required state, export readiness, reconciliation status, target system, vendor, date, category, amount, line-item count, account mapping, and tax mapping. The Extracted Fields panel shows field-level vendor/date/amount/VAT/category evidence, confidence, and provenance for processed documents. Manual Review cards can approve, reject, resolve, and correct vendor/category/date/amount fields; approved corrections update the normalized bookkeeping record and create suggested vendor/category rules for future learning. Reconciliation-related review cards also show linked bank transaction evidence: approving a candidate marks the document, normalized record, and bank transaction reconciled, while resolving or choosing "No receipt needed" closes missing-receipt exceptions without posting to Wave. The Routing & Export Drafts panel prepares Wave draft operation plans for reviewed documents and records them as routing attempts without submitting anything to Wave. The Export Attempts panel turns those routing drafts into approval records, requires `APPROVE FAB EXPORT DRAFT` before local approval, and requires `RECORD FAB EXPORT RESULT` before recording a separate executor result; approval does not submit to Wave by itself. The Wave Control Center models Wave menus, reports, report packs, and operation safety gates so FAB can plan account-transactions, trial balance, sales tax, customer/vendor, and close-pack workflows before a separate approved executor touches Wave. Planned report work is persisted as Wave report snapshots with report type, period/as-of date, cash/accrual basis, account/contact scope, export format, operation id, and workflow provenance so FAB can audit what evidence should be read or exported later. The Bank Transactions panel persists Wave account-transactions exports and bank statements from JSON, CSV, CAMT XML, or MT940-style text, normalizes localized amounts/dates, detects duplicate transaction identities, and exposes unreconciled rows to the autonomous loop. The Reconciliation panel can use imported bank transactions automatically or accept a temporary JSON override batch; it matches them to processed documents, records candidate matches, opens missing-receipt or unmatched-document review items, and requires an audited decision before a document and linked bank transaction are marked reconciled. The Backups panel creates manifest-based SQLite ledger backups, lists backup checksums, and only restores when the exact phrase `RESTORE FAB LOCAL LEDGER` is supplied. The Settings panel and `/api/settings` show source readiness, dependency status, storage paths, credential presence, and remote exposure safety without returning API tokens, passwords, or other secret values. The API also exposes `/api/health`, `/api/settings`, `/api/autonomy/plan`, `/api/autonomy/run`, `/api/dashboard`, `/api/sources`, `/api/extracted-fields`, `/api/bookkeeping-records`, `/api/bookkeeping-records/{id}`, `/api/bookkeeping-records/{id}/line-items`, `/api/bookkeeping-records/refresh`, `/api/wave`, `/api/wave/actions`, `/api/wave/reports`, `/api/wave/reports/plan`, `/api/wave/report-snapshots`, `/api/wave/plan`, `/api/wave/workflows/plan`, `/api/bank-transactions`, `/api/bank-transactions/import`, `/api/intake/rescan`, `/api/documents`, `/api/documents/{id}/process`, `/api/documents/process-imported`, `/api/documents/{id}/route`, `/api/routing`, `/api/routing/prepare-ready`, `/api/routing/{id}/export-attempt`, `/api/export-attempts`, `/api/export-attempts/prepare-ready`, `/api/export-attempts/{id}/approve`, `/api/export-attempts/{id}/result`, `/api/reconciliation`, `/api/reconciliation/run`, `/api/reconciliation/{id}/resolve`, `/api/backups`, `/api/backups/inspect`, `/api/backups/restore`, `/api/review`, `/api/rules`, `/api/corrections`, and `/api/audit`. `/api/health` returns the same operational health summary used by the dashboard plus a compact readiness summary.
+
+The Sources panel and `/api/sources` show observed folder or connector sources, their latest status, last scan time, seen/imported/duplicate counters, and source identifiers. Connector metadata that looks like tokens, passwords, secrets, credentials, authorization headers, or API keys is redacted before it is stored.
 
 ### 4.2. `[gmail]` Section
 
@@ -188,6 +222,9 @@ Settings for banking API integration.
 Settings for automated reconciliation.
 
 *   `reconciliation_threshold`: The maximum allowable difference between transaction amounts for them to be considered a match. (e.g., `0.05` for 5 cents)
+*   `reconciliation_match_threshold`: Minimum combined amount, date, and vendor confidence required for an automatic match. Defaults to `0.9`.
+*   `reconciliation_date_tolerance_days`: Maximum number of days between the bank transaction and document date. Defaults to `0`.
+*   `reconciliation_use_absolute_amounts`: Match negative bank expenses with positive receipt totals. Defaults to `true`.
 
 ### 4.15. `[manual_review]` Section
 
@@ -203,6 +240,8 @@ Settings for backup and restore.
 *   `backup_paths`: Comma-separated list of files/directories to include in backups. (e.g., `data,config/config.ini`)
 *   `backup_config`: JSON string defining backup type. Example: `{"type": "zip"}`
 
+The local operations dashboard has a ledger-specific backup flow under `[operations] backup_dir`. It snapshots the SQLite ledger with a manifest and checksum, records audit events, creates a pre-restore backup, and requires the exact restore phrase before replacing the active ledger.
+
 ### 4.17. `[error_handling]` Section
 
 Settings for error handling and recovery.
@@ -210,6 +249,24 @@ Settings for error handling and recovery.
 *   `error_recovery_max_retries`: Maximum number of retries for failed operations.
 *   `error_recovery_retry_delay_seconds`: Delay between retries in seconds.
 *   `email_notifications_enabled`: `true` or `false`. Enable/disable email notifications for critical errors.
+
+### 4.18. `[workflow]` Section
+
+Settings for autonomous progress tracking and restart safety.
+
+*   `workflow_state_enabled`: Enable persistent source-document checkpoints. Defaults to `true`.
+*   `workflow_state_file`: Path to the atomic JSON checkpoint file. Defaults to `data/workflow_state.json`.
+*   `workflow_checkpoint_autosave`: Persist every terminal document transition immediately. Defaults to `true`. Disable only when batched disk writes are preferable and replay risk after a process crash is acceptable.
+*   `workflow_checkpoint_fail_closed`: Block processing when existing checkpoint JSON is unreadable or structurally invalid. Defaults to `true`. Disable only for a deliberate checkpoint reset after preserving the damaged file.
+*   `workflow_checkpoint_skip_statuses`: Optional comma-separated override for statuses skipped on later runs.
+*   `workflow_known_documents_limit`: Maximum duplicate fingerprints retained in checkpoint state. Defaults to `1000`.
+*   `workflow_run_lock_enabled`: Prevent overlapping workflow runs on the same host. Defaults to `true`.
+*   `workflow_run_lock_file`: Optional lock-file path. Defaults to `<workflow_state_file>.lock`.
+*   `workflow_run_lock_stale_seconds`: Recover abandoned locks older than this duration. Defaults to `21600` (six hours).
+*   `duplicate_similarity_threshold`: Minimum evidence-weighted fuzzy duplicate score. Defaults to `0.9`.
+*   `duplicate_amount_tolerance`: Maximum amount difference for duplicate comparison. Defaults to `0.02`.
+
+Duplicate detection only suppresses documents with sufficient populated accounting evidence. Reused filenames or missing dates alone are not treated as duplicate proof.
 
 ## 5. Running the Application
 

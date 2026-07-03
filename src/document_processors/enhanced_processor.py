@@ -1,7 +1,8 @@
 from typing import Dict, Any
-import cv2
-import numpy as np
-from PIL import Image
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 from src.document_processors.base import BaseProcessor
 
@@ -14,6 +15,9 @@ class EnhancedProcessor(BaseProcessor):
         self.deskew_threshold = self.config.get("deskew_threshold", 0.05)
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
+        if cv2 is None:
+            return {"processed_image_path": document_path, "extracted_data": {}, "ocr_text": "", "language": ""}
+
         try:
             # Load image using OpenCV
             img = cv2.imread(document_path)

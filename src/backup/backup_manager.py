@@ -39,12 +39,16 @@ class BackupManager:
                     if not path or not os.path.exists(path):
                         continue
                     if os.path.isfile(path):
-                        zipf.write(path, os.path.relpath(path, start=os.getcwd()))
+                        zipf.write(path, os.path.basename(path))
                     elif os.path.isdir(path):
+                        root_name = os.path.basename(os.path.normpath(path))
                         for root, _, files in os.walk(path):
                             for file in files:
                                 file_path = os.path.join(root, file)
-                                arcname = os.path.relpath(file_path, start=os.getcwd())
+                                arcname = os.path.join(
+                                    root_name,
+                                    os.path.relpath(file_path, start=path),
+                                )
                                 zipf.write(file_path, arcname)
             return {"status": "success", "path": zip_file_path, "included_paths": paths_to_backup}
         except Exception as exc:

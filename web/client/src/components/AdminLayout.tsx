@@ -10,12 +10,14 @@ import {
   Menu,
   Shield,
   FileText,
+  FileSearch,
 } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { useState } from "react";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Overview", path: "/admin" },
+  { icon: FileSearch, label: "Operations", path: "/admin/operations" },
   { icon: Users, label: "Waitlist", path: "/admin/waitlist" },
   { icon: MessageSquare, label: "Messages", path: "/admin/messages" },
   { icon: FileText, label: "Blog", path: "/admin/blog" },

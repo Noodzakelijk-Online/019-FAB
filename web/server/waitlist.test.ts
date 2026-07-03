@@ -6,6 +6,17 @@ import type { TrpcContext } from "./_core/context";
 vi.mock("./db", () => ({
   addToWaitlist: vi.fn(),
   getWaitlistCount: vi.fn(),
+  getBookkeepingOverview: vi.fn().mockResolvedValue({}),
+  createBookkeepingDocument: vi.fn(),
+  addReviewItem: vi.fn(),
+  createWorkflowRun: vi.fn(),
+  updateWorkflowRun: vi.fn(),
+  createRoutingAttempt: vi.fn(),
+  recordAuditEvent: vi.fn(),
+  getReviewQueue: vi.fn().mockResolvedValue([]),
+  getRecentWorkflowRuns: vi.fn().mockResolvedValue([]),
+  getRecentAuditEvents: vi.fn().mockResolvedValue([]),
+  updateReviewItemStatus: vi.fn(),
 }));
 
 // Mock the notification module

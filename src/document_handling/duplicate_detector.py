@@ -1,7 +1,8 @@
 import hashlib
 import re
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 
 class DuplicateDetector:
@@ -9,8 +10,21 @@ class DuplicateDetector:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
-        self.similarity_threshold = float(self.config.get("duplicate_similarity_threshold", 0.9))
-        self.amount_tolerance = float(self.config.get("duplicate_amount_tolerance", 0.02))
+        self.similarity_threshold = self._bounded_float(
+            self.config.get("duplicate_similarity_threshold", 0.9),
+            0.9,
+            0.0,
+            1.0,
+        )
+        self.amount_tolerance = Decimal(
+            str(
+                self._bounded_float(
+                    self.config.get("duplicate_amount_tolerance", 0.02),
+                    0.02,
+                    0.0,
+                )
+            )
+        )
 
     def build_fingerprint(self, document: Dict[str, Any]) -> str:
         extracted = document.get("extracted_data", document)
@@ -35,8 +49,17 @@ class DuplicateDetector:
         existing_documents: Iterable[Dict[str, Any]],
     ) -> Dict[str, Any]:
         new_fingerprint = self.build_fingerprint(document)
+        new_evidence = self._identity_evidence(document)
         for existing in existing_documents:
-            if new_fingerprint == existing.get("duplicate_fingerprint") or new_fingerprint == self.build_fingerprint(existing):
+            existing_evidence = self._identity_evidence(existing)
+            has_exact_evidence = self._supports_exact_match(new_evidence, existing_evidence)
+            fingerprint_matches = (
+                new_fingerprint == existing.get("duplicate_fingerprint")
+                or new_fingerprint == self.build_fingerprint(existing)
+            )
+            if self._exact_evidence_match(new_evidence, existing_evidence) or (
+                has_exact_evidence and fingerprint_matches
+            ):
                 return {
                     "is_duplicate": True,
                     "confidence_score": 1.0,
@@ -44,8 +67,8 @@ class DuplicateDetector:
                     "matched_document_id": existing.get("document_id") or existing.get("id"),
                 }
 
-            fuzzy_score = self.similarity_score(document, existing)
-            if fuzzy_score >= self.similarity_threshold:
+            fuzzy_score, comparable_fields = self._similarity_details(document, existing)
+            if comparable_fields >= 3 and fuzzy_score >= self.similarity_threshold:
                 return {
                     "is_duplicate": True,
                     "confidence_score": round(fuzzy_score, 4),
@@ -67,27 +90,58 @@ class DuplicateDetector:
         return document
 
     def similarity_score(self, left: Dict[str, Any], right: Dict[str, Any]) -> float:
+        score, _ = self._similarity_details(left, right)
+        return score
+
+    def _similarity_details(
+        self,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+    ) -> Tuple[float, int]:
         left_data = left.get("extracted_data", left)
         right_data = right.get("extracted_data", right)
 
-        vendor_score = self._string_similarity(
+        comparisons = []
+        self._append_text_comparison(
+            comparisons,
             left_data.get("vendor_name") or left.get("vendor_name"),
             right_data.get("vendor_name") or right.get("vendor_name"),
+            0.30,
         )
-        date_score = 1.0 if self._normalize(str(left_data.get("transaction_date", ""))) == self._normalize(str(right_data.get("transaction_date", ""))) else 0.0
-        amount_score = self._amount_similarity(
+        self._append_exact_comparison(
+            comparisons,
+            left_data.get("transaction_date") or left_data.get("date"),
+            right_data.get("transaction_date") or right_data.get("date"),
+            0.25,
+        )
+        self._append_amount_comparison(
+            comparisons,
             left_data.get("total_amount") or left_data.get("amount"),
             right_data.get("total_amount") or right_data.get("amount"),
+            0.30,
         )
-        text_score = self._string_similarity(left.get("ocr_text", ""), right.get("ocr_text", ""))
+        self._append_exact_comparison(
+            comparisons,
+            left_data.get("invoice_number")
+            or left_data.get("receipt_number")
+            or left_data.get("order_number"),
+            right_data.get("invoice_number")
+            or right_data.get("receipt_number")
+            or right_data.get("order_number"),
+            0.35,
+        )
+        self._append_text_comparison(
+            comparisons,
+            left.get("ocr_text"),
+            right.get("ocr_text"),
+            0.15,
+        )
 
-        weighted_score = (
-            vendor_score * 0.30
-            + date_score * 0.25
-            + amount_score * 0.30
-            + text_score * 0.15
-        )
-        return max(0.0, min(1.0, weighted_score))
+        total_weight = sum(weight for _, weight in comparisons)
+        if not total_weight:
+            return 0.0, 0
+        weighted_score = sum(score * weight for score, weight in comparisons) / total_weight
+        return max(0.0, min(1.0, weighted_score)), len(comparisons)
 
     @staticmethod
     def _normalize(value: Optional[Any]) -> str:
@@ -99,20 +153,14 @@ class DuplicateDetector:
 
     @staticmethod
     def _normalize_amount(value: Optional[Any]) -> str:
-        if value is None:
-            return ""
-        try:
-            return f"{float(str(value).replace(',', '.')):.2f}"
-        except (TypeError, ValueError):
-            cleaned = re.sub(r"[^0-9,.]", "", str(value))
-            return cleaned.replace(",", ".")
+        amount = DuplicateDetector._parse_amount(value)
+        return f"{amount:.2f}" if amount is not None else ""
 
     def _amount_similarity(self, left: Optional[Any], right: Optional[Any]) -> float:
-        try:
-            left_amount = float(str(left).replace(",", "."))
-            right_amount = float(str(right).replace(",", "."))
-        except (TypeError, ValueError):
-            return self._string_similarity(left, right)
+        left_amount = self._parse_amount(left)
+        right_amount = self._parse_amount(right)
+        if left_amount is None or right_amount is None:
+            return 0.0
 
         return 1.0 if abs(left_amount - right_amount) <= self.amount_tolerance else 0.0
 
@@ -122,3 +170,120 @@ class DuplicateDetector:
         if not left_norm and not right_norm:
             return 0.0
         return SequenceMatcher(None, left_norm, right_norm).ratio()
+
+    @classmethod
+    def _identity_evidence(cls, document: Dict[str, Any]) -> Dict[str, str]:
+        extracted = document.get("extracted_data", document)
+        return {
+            "vendor": cls._normalize(extracted.get("vendor_name") or document.get("vendor_name")),
+            "date": cls._normalize(extracted.get("transaction_date") or extracted.get("date")),
+            "amount": cls._normalize_amount(extracted.get("total_amount") or extracted.get("amount")),
+            "tax": cls._normalize_amount(extracted.get("vat_amount") or extracted.get("taxes")),
+            "invoice_number": cls._normalize(
+                extracted.get("invoice_number")
+                or extracted.get("receipt_number")
+                or extracted.get("order_number")
+            ),
+        }
+
+    @staticmethod
+    def _supports_exact_match(left: Dict[str, str], right: Dict[str, str]) -> bool:
+        shared = {key for key in left if left[key] and right[key]}
+        return "invoice_number" in shared or {"vendor", "date", "amount"}.issubset(shared)
+
+    @staticmethod
+    def _exact_evidence_match(left: Dict[str, str], right: Dict[str, str]) -> bool:
+        if all(
+            left[key] and left[key] == right[key]
+            for key in ("vendor", "date", "amount")
+        ):
+            return True
+
+        invoice_matches = (
+            left["invoice_number"]
+            and left["invoice_number"] == right["invoice_number"]
+        )
+        if not invoice_matches:
+            return False
+
+        corroborating_matches = sum(
+            1
+            for key in ("vendor", "date", "amount")
+            if left[key] and left[key] == right[key]
+        )
+        return corroborating_matches >= 2
+
+    @staticmethod
+    def _parse_amount(value: Optional[Any]) -> Optional[Decimal]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+
+        text = re.sub(r"[^\d,.\-]", "", str(value).strip())
+        if not text or text in {"-", ".", ","}:
+            return None
+        if "," in text and "." in text:
+            if text.rfind(",") > text.rfind("."):
+                text = text.replace(".", "").replace(",", ".")
+            else:
+                text = text.replace(",", "")
+        elif "," in text:
+            parts = text.split(",")
+            text = "".join(parts[:-1]) + "." + parts[-1]
+        elif text.count(".") > 1:
+            parts = text.split(".")
+            text = "".join(parts[:-1]) + "." + parts[-1]
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
+
+    def _append_text_comparison(
+        self,
+        comparisons: list,
+        left: Optional[Any],
+        right: Optional[Any],
+        weight: float,
+    ):
+        if self._normalize(left) and self._normalize(right):
+            comparisons.append((self._string_similarity(left, right), weight))
+
+    def _append_exact_comparison(
+        self,
+        comparisons: list,
+        left: Optional[Any],
+        right: Optional[Any],
+        weight: float,
+    ):
+        left_normalized = self._normalize(left)
+        right_normalized = self._normalize(right)
+        if left_normalized and right_normalized:
+            comparisons.append((1.0 if left_normalized == right_normalized else 0.0, weight))
+
+    def _append_amount_comparison(
+        self,
+        comparisons: list,
+        left: Optional[Any],
+        right: Optional[Any],
+        weight: float,
+    ):
+        if self._parse_amount(left) is not None and self._parse_amount(right) is not None:
+            comparisons.append((self._amount_similarity(left, right), weight))
+
+    @staticmethod
+    def _bounded_float(
+        value: Any,
+        default: float,
+        minimum: float,
+        maximum: Optional[float] = None,
+    ) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return default
+        if parsed < minimum or (maximum is not None and parsed > maximum):
+            return default
+        return parsed

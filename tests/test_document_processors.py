@@ -1,7 +1,12 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import os
-from PIL import Image
+import shutil
+import tempfile
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from src.document_processors.vision_processor import VisionProcessor
 from src.document_processors.tesseract_processor import TesseractProcessor
@@ -17,14 +22,19 @@ from src.document_processors.bilingual_processor import BilingualProcessor
 class TestDocumentProcessors(unittest.TestCase):
 
     def setUp(self):
+        if Image is None:
+            self.skipTest("Pillow is required for document processor image fixtures")
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
-            "google_vision_credentials_file": "/tmp/vision_credentials.json",
+            "google_vision_credentials_file": os.path.join(self.temp_dir.name, "vision_credentials.json"),
             "tesseract_cmd": "tesseract",
             "tesseract_lang": "eng",
             "dutch_ocr_lang": "nld",
-            "handwritten_model_path": "/tmp/handwritten_model.pth",
-            "template_matching_templates_dir": "/tmp/templates",
-            "vendor_templates_file": "/tmp/vendor_templates.json"
+            "handwritten_model_path": os.path.join(self.temp_dir.name, "handwritten_model.pth"),
+            "template_matching_templates_dir": os.path.join(self.temp_dir.name, "templates"),
+            "vendor_templates_file": os.path.join(self.temp_dir.name, "vendor_templates.json")
         }
         # Create dummy credential file for VisionProcessor
         with open(self.config["google_vision_credentials_file"], "w") as f:
@@ -32,12 +42,12 @@ class TestDocumentProcessors(unittest.TestCase):
         os.makedirs(self.config["template_matching_templates_dir"], exist_ok=True)
 
         # Create a dummy image file for testing
-        self.dummy_image_path = "/tmp/dummy_receipt.png"
+        self.dummy_image_path = os.path.join(self.temp_dir.name, "dummy_receipt.png")
         img = Image.new("RGB", (100, 50), color = (255, 255, 255))
         img.save(self.dummy_image_path)
 
         # Create a dummy PDF file for testing
-        self.dummy_pdf_path = "/tmp/dummy_invoice.pdf"
+        self.dummy_pdf_path = os.path.join(self.temp_dir.name, "dummy_invoice.pdf")
         # This is a very basic way to create a dummy PDF, for real tests, use a library like reportlab
         with open(self.dummy_pdf_path, "w") as f:
             f.write("%PDF-1.4\n1 0 obj<</Type/Page/Contents 2 0 R>>endobj 2 0 obj<</Length 11>>stream\nHello World\nendstream endobj\nxref\n0 3\n0000000000 65535 f\n0000000009 00000 n\n0000000045 00000 n\ntrailer<</Size 3/Root 1 0 R>>startxref\n103\n%%EOF")
@@ -86,7 +96,7 @@ class TestDocumentProcessors(unittest.TestCase):
         self.assertIn("Handwritten Text", result["ocr_text"])
 
     def test_template_matching_processor(self):
-        config = {"template_matching_templates_dir": "/tmp/templates"}
+        config = {"template_matching_templates_dir": os.path.join(self.temp_dir.name, "templates")}
         processor = TemplateMatchingProcessor(config)
         # For a real test, you'd need to create dummy template files and test matching logic
         result = processor.process_document(self.dummy_image_path, ocr_text="Some text with a template pattern")

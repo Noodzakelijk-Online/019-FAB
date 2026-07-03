@@ -1,10 +1,14 @@
+import csv
 import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import pandas as pd
+try:
+    import pandas as pd
+except ModuleNotFoundError:
+    pd = None
 
 
 class BankTransactionImporter:
@@ -51,8 +55,12 @@ class BankTransactionImporter:
     def _read_rows(self, path: Path) -> List[Dict[str, Any]]:
         suffix = path.suffix.lower()
         if suffix == ".csv":
+            if pd is None:
+                return self._read_csv_without_pandas(path)
             dataframe = self._read_csv(path)
         elif suffix in {".xlsx", ".xls"}:
+            if pd is None:
+                return []
             dataframe = pd.read_excel(path)
         else:
             return []
@@ -60,7 +68,7 @@ class BankTransactionImporter:
         dataframe.columns = [self._normalize_column_name(column) for column in dataframe.columns]
         return dataframe.to_dict(orient="records")
 
-    def _read_csv(self, path: Path) -> pd.DataFrame:
+    def _read_csv(self, path: Path):
         for separator in [",", ";", "\t"]:
             try:
                 dataframe = pd.read_csv(path, sep=separator)
@@ -73,6 +81,29 @@ class BankTransactionImporter:
             except Exception:
                 continue
         return pd.read_csv(path)
+
+    def _read_csv_without_pandas(self, path: Path) -> List[Dict[str, Any]]:
+        for encoding in ["utf-8-sig", "latin-1"]:
+            for separator in [",", ";", "\t"]:
+                try:
+                    with open(path, newline="", encoding=encoding) as handle:
+                        reader = csv.DictReader(handle, delimiter=separator)
+                        if not reader.fieldnames or len(reader.fieldnames) <= 1:
+                            continue
+                        return [
+                            {
+                                self._normalize_column_name(key): value
+                                for key, value in row.items()
+                                if key is not None
+                            }
+                            for row in reader
+                            if any(not self._is_empty(value) for value in row.values())
+                        ]
+                except UnicodeDecodeError:
+                    continue
+                except OSError:
+                    return []
+        return []
 
     def _normalize_row(self, row: Dict[str, Any], source_path: Path, row_index: int) -> Optional[Dict[str, Any]]:
         date_value = self._first_present(row, "date")
@@ -123,11 +154,12 @@ class BankTransactionImporter:
     def _is_empty(value: Any) -> bool:
         if value is None:
             return True
-        try:
-            if pd.isna(value):
-                return True
-        except Exception:
-            pass
+        if pd is not None:
+            try:
+                if pd.isna(value):
+                    return True
+            except Exception:
+                pass
         return str(value).strip() == ""
 
     @staticmethod
@@ -163,12 +195,13 @@ class BankTransactionImporter:
                 return datetime.strptime(text, fmt).date().isoformat()
             except ValueError:
                 continue
-        try:
-            parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
-            if not pd.isna(parsed):
-                return parsed.date().isoformat()
-        except Exception:
-            pass
+        if pd is not None:
+            try:
+                parsed = pd.to_datetime(text, dayfirst=True, errors="coerce")
+                if not pd.isna(parsed):
+                    return parsed.date().isoformat()
+            except Exception:
+                pass
         return None
 
     @staticmethod

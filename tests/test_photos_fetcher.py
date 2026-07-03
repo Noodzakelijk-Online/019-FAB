@@ -1,17 +1,21 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import os
+import shutil
+import tempfile
 
 from src.document_fetchers.photos_fetcher import PhotosFetcher
 
 class TestPhotosFetcher(unittest.TestCase):
 
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         self.config = {
-            "google_photos_credentials_file": "/tmp/photos_credentials.json",
-            "google_photos_token_file": "/tmp/photos_token.json",
+            "google_photos_credentials_file": os.path.join(self.temp_dir.name, "photos_credentials.json"),
+            "google_photos_token_file": os.path.join(self.temp_dir.name, "photos_token.json"),
             "google_photos_album_name": "Bookkeeping Receipts",
-            "google_photos_download_dir": "/tmp/photos_downloads"
+            "google_photos_download_dir": os.path.join(self.temp_dir.name, "photos_downloads")
         }
         # Create dummy credential and token files for testing
         with open(self.config["google_photos_credentials_file"], "w") as f:
@@ -22,9 +26,10 @@ class TestPhotosFetcher(unittest.TestCase):
 
     @patch("src.document_fetchers.photos_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.photos_fetcher.build")
+    @patch("src.document_fetchers.photos_fetcher.Request")
     @patch("src.document_fetchers.photos_fetcher.os.path.exists")
     @patch("src.document_fetchers.photos_fetcher.pickle")
-    def test_fetch_documents(self, mock_pickle, mock_exists, mock_build, mock_InstalledAppFlow):
+    def test_fetch_documents(self, mock_pickle, mock_exists, mock_Request, mock_build, mock_InstalledAppFlow):
         mock_exists.return_value = True
         mock_pickle.load.return_value = MagicMock()
         
@@ -52,6 +57,8 @@ class TestPhotosFetcher(unittest.TestCase):
         with patch("src.document_fetchers.photos_fetcher.requests.get") as mock_requests_get:
             mock_response = MagicMock()
             mock_response.content = b"dummy_image_content"
+            mock_response.raise_for_status.return_value = None
+            mock_response.iter_content.return_value = [b"dummy_image_content"]
             mock_requests_get.return_value = mock_response
 
             fetcher = PhotosFetcher(self.config)

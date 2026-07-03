@@ -49,6 +49,19 @@ class EnhancedErrorRecovery:
                         raise # Re-raise the last exception if all retries fail
         return wrapper
 
+    def execute_with_retry(self, action: Callable, operation_name: str) -> bool:
+        """Runs an action with configured retries and returns success state."""
+        for attempt in range(self.max_retries + 1):
+            try:
+                action()
+                return True
+            except Exception as exc:
+                self.logger.warning(f"Attempt {attempt + 1} failed for {operation_name}: {exc}")
+                if attempt >= self.max_retries:
+                    self.handle_error(exc, operation_name)
+                    return False
+                time.sleep(self.retry_delay_seconds * (2 ** attempt))
+
     def _send_email_notification(self, subject: str, body: str):
         if not all([self.smtp_server, self.smtp_port, self.smtp_username, self.smtp_password, self.notification_email_address]):
             self.logger.warning("SMTP credentials or notification email not fully configured. Cannot send email notification.")

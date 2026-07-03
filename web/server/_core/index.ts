@@ -10,6 +10,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { webhookLimiter, relaxedLimiter } from "../lib/rateLimiter";
 import { createLogger } from "../lib/logger";
+import { registerFabOperationsRoutes } from "../fabOperations";
 
 const log = createLogger("Server");
 
@@ -72,6 +73,7 @@ async function startServer() {
 
   // ── OAuth callback ────────────────────────────────────────────
   registerOAuthRoutes(app);
+  registerFabOperationsRoutes(app, relaxedLimiter);
 
   // ── tRPC API with relaxed rate limiting ───────────────────────
   app.use(

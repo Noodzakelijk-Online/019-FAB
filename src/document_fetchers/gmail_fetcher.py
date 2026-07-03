@@ -1,8 +1,15 @@
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+except ImportError:
+    Credentials = None
+    InstalledAppFlow = None
+    Request = None
+    build = None
+    HttpError = Exception
 import os
 import base64
 from typing import List, Dict, Any
@@ -19,11 +26,18 @@ class GmailFetcher(BaseFetcher):
         super().__init__(config)
         self.creds = None
         self.service = None
-        self._authenticate()
+        self.auth_error = None
+        try:
+            self._authenticate()
+        except ImportError as exc:
+            self.auth_error = exc
 
     def _authenticate(self):
-        token_path = self.config.get('gmail_token_path', 'token.pickle')
-        credentials_path = self.config.get('gmail_credentials_path', 'credentials.json')
+        if build is None or InstalledAppFlow is None or Request is None:
+            raise ImportError("Google API dependencies are required for Gmail fetching.")
+
+        token_path = self.config.get("gmail_token_file") or self.config.get('gmail_token_path', 'token.pickle')
+        credentials_path = self.config.get("gmail_credentials_file") or self.config.get('gmail_credentials_path', 'credentials.json')
 
         if os.path.exists(token_path):
             with open(token_path, 'rb') as token:
@@ -42,8 +56,12 @@ class GmailFetcher(BaseFetcher):
         self.service = build('gmail', 'v1', credentials=self.creds)
 
     def fetch_documents(self) -> List[Dict[str, Any]]:
+        if self.auth_error:
+            print(f"Gmail fetcher unavailable: {self.auth_error}")
+            return []
+
         query = self.config.get('gmail_query', 'has:attachment')
-        attachments_dir = self.config.get('attachments_save_dir', '/tmp/gmail_attachments')
+        attachments_dir = self.config.get('gmail_attachment_download_dir') or self.config.get('attachments_save_dir', '/tmp/gmail_attachments')
         os.makedirs(attachments_dir, exist_ok=True)
 
         documents = []
@@ -77,8 +95,8 @@ class GmailFetcher(BaseFetcher):
                             'local_path': local_path,
                             'timestamp': msg['internalDate'],
                             'metadata': {
-                                'subject': next(header['value'] for header in msg['payload']['headers'] if header['name'] == 'Subject'),
-                                'from': next(header['value'] for header in msg['payload']['headers'] if header['name'] == 'From')
+                                'subject': next((header['value'] for header in msg['payload'].get('headers', []) if header['name'] == 'Subject'), ''),
+                                'from': next((header['value'] for header in msg['payload'].get('headers', []) if header['name'] == 'From'), '')
                             }
                         })
         except HttpError as error:

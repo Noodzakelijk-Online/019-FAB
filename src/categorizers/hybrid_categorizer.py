@@ -13,7 +13,10 @@ class HybridCategorizer(BaseCategorizer):
         self.rule_based_categorizer = RuleBasedCategorizer(config)
         self.ml_categorizer = MLCategorizer(config)
         self.fallback_categorizer = FallbackCategorizer(config)
-        self.ml_threshold = self.config.get("ml_confidence_threshold", 0.7)
+        try:
+            self.ml_threshold = float(self.config.get("ml_confidence_threshold", 0.7))
+        except (TypeError, ValueError):
+            self.ml_threshold = 0.7
 
     def categorize(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
         # First, try rule-based categorization

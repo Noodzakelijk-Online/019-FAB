@@ -17,15 +17,15 @@ class VendorManager:
         self.match_threshold = float(self.config.get("vendor_match_threshold", 0.72))
         self.auto_create_vendors = bool(self.config.get("auto_create_vendors", True))
 
-        configured_vendors = self.config.get("vendors", {})
         self.vendors: Dict[str, Dict[str, Any]] = {}
-        for name, profile in configured_vendors.items():
-            self.create_vendor(name, profile or {}, overwrite=True)
-
         self.aliases = {
             self._normalize(alias): canonical
             for alias, canonical in self.config.get("vendor_aliases", {}).items()
         }
+
+        configured_vendors = self.config.get("vendors", {})
+        for name, profile in configured_vendors.items():
+            self.create_vendor(name, profile or {}, overwrite=True)
 
         self.category_history: Dict[str, Counter] = defaultdict(Counter)
         for event in self.config.get("vendor_category_history", []):

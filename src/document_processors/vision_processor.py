@@ -1,46 +1,66 @@
-from google.cloud import vision
+try:
+    from google.cloud import vision
+except ImportError:
+    vision = None
+import os
 from typing import Dict, Any
 
 from src.document_processors.base import BaseProcessor
-from src.document_processors.financial_field_extractor import FinancialFieldExtractor
-
 
 class VisionProcessor(BaseProcessor):
-    """Processes documents using Google Cloud Vision API for OCR and field extraction."""
+    """Processes documents using Google Cloud Vision API for OCR and data extraction."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.client = vision.ImageAnnotatorClient()
-        self.extractor = FinancialFieldExtractor()
+        # Ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set
+        # or pass credentials directly if preferred.
+        self.client = vision.ImageAnnotatorClient() if vision is not None else None
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
-        try:
-            with open(document_path, "rb") as image_file:
-                content = image_file.read()
+        if self.client is None or vision is None:
+            return {"ocr_text": "", "extracted_data": {}, "language": "", "error": "Google Vision is not installed."}
 
-            image = vision.Image(content=content)
-            response = self.client.document_text_detection(image=image)
-            if getattr(response, "error", None) and response.error.message:
-                raise RuntimeError(response.error.message)
+        with open(document_path, "rb") as image_file:
+            content = image_file.read()
 
-            full_text = response.full_text_annotation.text if response.full_text_annotation else ""
-            extraction = self.extractor.extract(full_text)
-            language = "en"
-            pages = response.full_text_annotation.pages if response.full_text_annotation else []
-            if pages and pages[0].property.detected_languages:
-                language = pages[0].property.detected_languages[0].language_code
+        image = vision.Image(content=content)
 
-            return {
-                "ocr_text": full_text,
-                "extracted_data": extraction["extracted_data"],
-                "field_confidences": extraction["field_confidences"],
-                "language": language,
-                "ocr_confidence": 0.85 if full_text else 0.0,
-            }
-        except Exception as exc:
-            print(f"Error processing document with Google Vision: {exc}")
-            return {"ocr_text": "", "extracted_data": {}, "field_confidences": {}, "language": "", "ocr_confidence": 0.0}
+        response = self.client.document_text_detection(image=image)
+        full_text = response.full_text_annotation.text
+
+        # Basic extraction (can be enhanced with more sophisticated parsing)
+        extracted_data = self._extract_data_from_text(full_text)
+
+        return {
+            "ocr_text": full_text,
+            "extracted_data": extracted_data,
+            "language": response.full_text_annotation.pages[0].property.detected_languages[0].language_code if response.full_text_annotation.pages and response.full_text_annotation.pages[0].property.detected_languages else "en" # Default to English
+        }
 
     def _extract_data_from_text(self, text: str) -> Dict[str, Any]:
-        """Backward-compatible helper for older tests/callers."""
-        return self.extractor.extract(text).get("extracted_data", {})
+        """Placeholder for extracting structured data from the OCR text."""
+        # This is a very basic example. Real-world extraction would involve regex, NLP, etc.
+        data = {
+            "vendor_name": None,
+            "transaction_date": None,
+            "total_amount": None,
+            "currency": None,
+            "vat_amount": None,
+            "line_items": []
+        }
+
+        # Example: Simple regex for amount (highly simplified)
+        import re
+        amount_match = re.search(r"Total[:\]?\s*([€$£]?\s*\d+[.,]\d{2})", text, re.IGNORECASE)
+        if amount_match:
+            data["total_amount"] = amount_match.group(1).replace(",", ".").replace("€", "").strip()
+            try:
+                data["total_amount"] = float(data["total_amount"])
+            except ValueError:
+                pass # Keep as string if conversion fails
+
+        # More sophisticated parsing would go here
+
+        return data
+
+

@@ -1,0 +1,1191 @@
+from datetime import date
+from typing import Any, Dict, List, Optional
+
+from src.operations.local_health import LocalOperationsHealth
+from src.operations.local_intake import LocalFolderIntake
+from src.operations.local_bank_transactions import LocalBankTransactionImportService
+from src.operations.local_backup import LocalBackupService
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_close_pack import LocalClosePackService
+from src.operations.local_close_readiness import LocalCloseReadinessService
+from src.operations.local_exceptions import LocalExceptionQueueService
+from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_master_ledger import LocalMasterLedgerService
+from src.operations.local_processing import LocalDocumentProcessor
+from src.operations.local_readiness import LocalReadinessService
+from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_routing import (
+    PREPARED_ROUTING_STATUSES,
+    ROUTABLE_BOOKKEEPING_EXPORT_STATUSES,
+    ROUTABLE_BOOKKEEPING_RECORD_STATUSES,
+    LocalRoutingService,
+    ROUTABLE_DOCUMENT_STATUSES,
+)
+from src.operations.local_exports import LocalExportAttemptService
+from src.operations.local_wave_control import LocalWaveControlService
+
+
+OPEN_REVIEW_STATUSES = ("pending", "in_review")
+IMPORTED_DOCUMENT_STATUSES = ("imported",)
+PENDING_ROUTE_STATUSES = ("draft_prepared", "needs_confirmation", "queued")
+RECONCILIATION_REVIEW_STATUSES = ("candidate", "missing_receipt", "unmatched_document")
+AUTONOMOUS_TRIGGER = "local_autonomous_cycle"
+
+
+class LocalAutonomousService:
+    """Policy-gated local autonomy loop for FAB operations.
+
+    The loop only executes low-risk local work: folder intake, local processing,
+    Wave draft preparation, reconciliation candidate creation, and read-only
+    Wave planning. External posting, review resolution, credential changes,
+    restore, deletion, and customer-facing communication stay outside this
+    executor.
+    """
+
+    def __init__(
+        self,
+        ledger: LocalOperationsLedger,
+        config: Optional[Dict[str, Any]] = None,
+        readiness: Optional[LocalReadinessService] = None,
+        intake_paths: Optional[List[str]] = None,
+        intake_extensions: Optional[List[str]] = None,
+    ):
+        self.ledger = ledger
+        self.config = config or {}
+        self.readiness = readiness
+        self.intake_paths = list(intake_paths or [])
+        self.intake_extensions = list(intake_extensions or [])
+
+    def plan(
+        self,
+        limit: int = 25,
+        bank_transactions: Optional[List[Dict[str, Any]]] = None,
+        include_wave_plan: bool = True,
+    ) -> Dict[str, Any]:
+        limit = _bounded_limit(limit, default=25, maximum=100)
+        readiness = self._readiness_summary()
+        health = LocalOperationsHealth(self.ledger, self.config).summarize()
+        exceptions = LocalExceptionQueueService(self.ledger, self.config).list_exceptions(
+            limit=limit,
+            include_entities=False,
+        )
+        close_readiness = LocalCloseReadinessService(self.ledger, self.config).assess()
+        counts = self._counts(limit)
+        exception_summary = exceptions.get("summary") or {}
+        counts["operatingExceptions"] = int(exception_summary.get("total") or 0)
+        counts["highSeverityExceptions"] = int((exception_summary.get("bySeverity") or {}).get("high") or 0)
+        counts["mediumSeverityExceptions"] = int((exception_summary.get("bySeverity") or {}).get("medium") or 0)
+        counts["lowSeverityExceptions"] = int((exception_summary.get("bySeverity") or {}).get("low") or 0)
+        counts["closeBlockingGates"] = int(close_readiness.get("blockingCount") or 0)
+        counts["closeAttentionGates"] = int(close_readiness.get("attentionCount") or 0)
+        master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
+        counts["masterLedgerRows"] = int(master_ledger.get("summary", {}).get("totalRows") or 0)
+        counts["masterLedgerBlockedRows"] = int(master_ledger.get("summary", {}).get("blockedRows") or 0)
+        counts["masterLedgerReadyForDraft"] = int(master_ledger.get("summary", {}).get("readyForDraft") or 0)
+        counts["masterLedgerReadyForApproval"] = int(master_ledger.get("summary", {}).get("readyForApproval") or 0)
+        counts["masterLedgerReadyForExecution"] = int(master_ledger.get("summary", {}).get("readyForExternalExecution") or 0)
+        stale_rows = _regenerable_stale_master_ledger_rows(master_ledger)
+        counts["staleMasterLedgerDrafts"] = len(stale_rows)
+        counts["staleMasterLedgerTargets"] = _target_breakdown(stale_rows, _master_row_target_system)
+        blocked_reasons = self._blocked_reasons(readiness, health)
+        blocked = bool(blocked_reasons)
+        bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
+
+        actions = [
+            _action(
+                "rescan_intake",
+                "Collect approved local/scanner folders",
+                "collect",
+                "low",
+                "safe_auto",
+                bool(self.intake_paths) and not blocked,
+                "No intake folders are configured." if not self.intake_paths else None,
+                {"intakePaths": self.intake_paths, "allowedExtensions": self.intake_extensions},
+            ),
+            _action(
+                "process_imported",
+                "Process imported documents through OCR, extraction, validation, and review gates",
+                "extract_validate",
+                "low",
+                "safe_auto",
+                counts["importedDocuments"] > 0 and not blocked,
+                "No imported documents are waiting." if counts["importedDocuments"] == 0 else None,
+                {"candidateDocuments": counts["importedDocuments"], "limit": limit},
+            ),
+            _action(
+                "prepare_wave_drafts",
+                "Prepare downstream draft operations for Wave and MijnGeldzaken without external submission",
+                "classify_post",
+                "low",
+                "safe_draft",
+                (counts["routableDocuments"] + counts["routableBookkeepingRecords"]) > 0 and not blocked,
+                "No reviewed/validated documents or bank records are ready for downstream draft preparation."
+                if (counts["routableDocuments"] + counts["routableBookkeepingRecords"]) == 0
+                else None,
+                {
+                    "candidateDocuments": counts["routableDocuments"],
+                    "candidateBookkeepingRecords": counts["routableBookkeepingRecords"],
+                    "targetBreakdown": counts["routableTargets"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "prepare_export_attempts",
+                "Prepare local export-attempt records from prepared routing drafts",
+                "classify_post",
+                "low",
+                "safe_auto",
+                counts["readyForExportAttempts"] > 0 and not blocked,
+                "No prepared routing attempts are ready for export-attempt preparation."
+                if counts["readyForExportAttempts"] == 0
+                else None,
+                {
+                    "candidateRoutingAttempts": counts["readyForExportAttempts"],
+                    "targetBreakdown": counts["readyForExportTargets"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "regenerate_stale_export_attempts",
+                "Regenerate stale MijnGeldzaken master-ledger drafts from current FAB source state",
+                "classify_post",
+                "low",
+                "safe_auto",
+                counts["staleMasterLedgerDrafts"] > 0 and not blocked,
+                "No stale unsubmitted master-ledger drafts need regeneration."
+                if counts["staleMasterLedgerDrafts"] == 0
+                else None,
+                {
+                    "staleMasterLedgerDrafts": counts["staleMasterLedgerDrafts"],
+                    "targetBreakdown": counts["staleMasterLedgerTargets"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "refresh_bank_records",
+                "Refresh bank-transaction bookkeeping records with approved local rules",
+                "classify_post",
+                "low",
+                "safe_auto",
+                counts["bankTransactions"] > 0 and not blocked,
+                "No imported bank transactions are available." if counts["bankTransactions"] == 0 else None,
+                {
+                    "bankTransactions": counts["bankTransactions"],
+                    "unreconciledBankTransactions": counts["unreconciledBankTransactions"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "run_reconciliation",
+                "Create reconciliation candidates from imported or supplied bank transactions",
+                "match_reconcile",
+                "low",
+                "safe_draft",
+                bool(bank_transactions) and not blocked,
+                "No imported or supplied bank transactions are waiting." if not bank_transactions else None,
+                {
+                    "bankTransactions": len(bank_transactions),
+                    "storedBankTransactions": counts["unreconciledBankTransactions"],
+                    "candidateDocuments": counts["reconciliableDocuments"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "prepare_master_ledger_projection",
+                "Prepare a checksum-bound FAB master-ledger projection across Wave and MijnGeldzaken downstream state",
+                "close_report",
+                "low",
+                "read_only",
+                counts["masterLedgerRows"] > 0 and not blocked,
+                "No normalized bookkeeping records are available for a master-ledger projection."
+                if counts["masterLedgerRows"] == 0
+                else None,
+                {
+                    "rows": counts["masterLedgerRows"],
+                    "blockedRows": counts["masterLedgerBlockedRows"],
+                    "readyForDraft": counts["masterLedgerReadyForDraft"],
+                    "readyForApproval": counts["masterLedgerReadyForApproval"],
+                    "readyForExternalExecution": counts["masterLedgerReadyForExecution"],
+                    "ledgerChecksum": master_ledger.get("ledgerChecksum"),
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "plan_wave_daily_reconciliation",
+                "Prepare the read-only Wave daily reconciliation workflow plan",
+                "close_report",
+                "low",
+                "read_only",
+                bool(include_wave_plan) and not blocked,
+                "Wave workflow planning was disabled for this request." if not include_wave_plan else None,
+                {"externalSubmission": "not_executed"},
+            ),
+            _action(
+                "prepare_period_close_pack",
+                "Prepare an audited period-close evidence pack when every close gate is ready",
+                "close_report",
+                "low",
+                "read_only",
+                bool(close_readiness.get("canClose")) and not blocked,
+                _close_pack_blocked_reason(close_readiness) if not close_readiness.get("canClose") else None,
+                {
+                    "status": close_readiness.get("status"),
+                    "blockingCount": close_readiness.get("blockingCount", 0),
+                    "attentionCount": close_readiness.get("attentionCount", 0),
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "exception_queue",
+                "Resolve the exact operating exceptions FAB has identified",
+                "exception_chase",
+                "medium",
+                "review_required",
+                False,
+                "Operating exceptions require review, correction, or an explicitly approved action.",
+                {
+                    "operatingExceptions": counts["operatingExceptions"],
+                    "highSeverity": counts["highSeverityExceptions"],
+                    "mediumSeverity": counts["mediumSeverityExceptions"],
+                    "lowSeverity": counts["lowSeverityExceptions"],
+                    "byType": exception_summary.get("byType") or {},
+                    "externalSubmission": "not_executed",
+                },
+            ),
+            _action(
+                "review_queue",
+                "Human review queue needs decisions before final bookkeeping",
+                "exception_chase",
+                "medium",
+                "review_required",
+                False,
+                "Open review items require human approval, correction, or rejection.",
+                {"openReviewItems": counts["openReviewItems"]},
+            ),
+            _action(
+                "approve_routing_drafts",
+                "Prepared routing drafts are waiting for explicit approval/export",
+                "system_execute",
+                "high",
+                "approval_required",
+                False,
+                "External downstream submission remains outside the autonomous local cycle.",
+                {
+                    "pendingRoutingDrafts": counts["pendingRoutingDrafts"],
+                    "targetBreakdown": counts["pendingRoutingTargets"],
+                },
+            ),
+            _action(
+                "approve_export_attempts",
+                "Prepared export attempts are waiting for local approval before external submission",
+                "system_execute",
+                "high",
+                "approval_required",
+                False,
+                "Export attempts can only be approved from the FAB dashboard and workflow.",
+                {
+                    "pendingExportApprovals": counts["pendingExportApprovals"],
+                    "targetBreakdown": counts["pendingExportApprovalTargets"],
+                },
+            ),
+            _action(
+                "execute_approved_exports",
+                "Execute approved Wave and MijnGeldzaken export attempts when handlers and credentials are enabled.",
+                "system_execute",
+                "high",
+                "safe_auto",
+                bool(self.config.get("fab_autonomy_execute_approved_exports"))
+                and counts["approvedExportAttempts"] > 0
+                and not blocked,
+                "Enable `fab_autonomy_execute_approved_exports` and configure safe handlers/credentials."
+                if not self.config.get("fab_autonomy_execute_approved_exports")
+                else ("No approved export attempts are waiting." if counts["approvedExportAttempts"] == 0 else None),
+                {
+                    "approvedExportAttempts": counts["approvedExportAttempts"],
+                    "targetBreakdown": counts["approvedExportTargets"],
+                },
+            ),
+            _action(
+                "approve_reconciliation",
+                "Reconciliation candidates need audited approval before close",
+                "match_reconcile",
+                "medium",
+                "approval_required",
+                False,
+                "Candidate matches are never finalized by the autonomous local cycle.",
+                {"reconciliationReviewItems": counts["reconciliationReviewItems"]},
+            ),
+        ]
+
+        if blocked:
+            for action in actions:
+                if action["canRun"]:
+                    action["canRun"] = False
+                    action["blockedReason"] = "; ".join(blocked_reasons)
+
+        runnable_actions = [
+            action
+            for action in actions
+            if action["canRun"] and action["mode"] in {"safe_auto", "safe_draft", "read_only"}
+        ]
+        manual_actions = [
+            action
+            for action in actions
+            if action["mode"] in {"review_required", "approval_required"}
+            and (
+                action["evidence"].get("operatingExceptions")
+                or action["evidence"].get("openReviewItems")
+                or action["evidence"].get("pendingRoutingDrafts")
+                or action["evidence"].get("pendingExportApprovals")
+                or action["evidence"].get("reconciliationReviewItems")
+            )
+        ]
+        if blocked:
+            status = "blocked"
+        elif runnable_actions:
+            status = "ready"
+        elif manual_actions:
+            status = "needs_review"
+        else:
+            status = "idle"
+
+        return {
+            "status": status,
+            "canRunAutonomously": status == "ready",
+            "externalSubmission": "not_executed",
+            "blockedReasons": blocked_reasons,
+            "counts": counts,
+            "readiness": _compact_readiness(readiness),
+            "health": _compact_health(health),
+            "exceptions": _compact_exceptions(exceptions),
+            "closeReadiness": _compact_close_readiness(close_readiness),
+            "actions": actions,
+            "runnableActionIds": [action["id"] for action in runnable_actions],
+            "manualActionIds": [action["id"] for action in manual_actions],
+            "nextAction": _next_action(status, runnable_actions, manual_actions, blocked_reasons),
+        }
+
+    def run_cycle(
+        self,
+        limit: int = 25,
+        bank_transactions: Optional[List[Dict[str, Any]]] = None,
+        include_wave_plan: bool = True,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        limit = _bounded_limit(limit, default=25, maximum=100)
+        bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
+        plan = self.plan(limit=limit, bank_transactions=bank_transactions, include_wave_plan=include_wave_plan)
+        if dry_run:
+            return {
+                "success": True,
+                "status": "dry_run",
+                "externalSubmission": "not_executed",
+                "plan": plan,
+                "executedActions": [],
+                "skippedActions": plan["actions"],
+            }
+        if plan["status"] == "blocked":
+            self.ledger.record_audit_event({
+                "action": "local_autonomy.cycle_blocked",
+                "entityType": "autonomous_cycle",
+                "details": {
+                    "blockedReasons": plan["blockedReasons"],
+                    "externalSubmission": "not_executed",
+                },
+            })
+            return {
+                "success": False,
+                "status": "blocked",
+                "externalSubmission": "not_executed",
+                "plan": plan,
+                "executedActions": [],
+                "skippedActions": plan["actions"],
+            }
+
+        workflow_run_id = self.ledger.create_workflow_run({
+            "status": "running",
+            "triggerSource": AUTONOMOUS_TRIGGER,
+            "metadata": {
+                "plan": {
+                    "status": plan["status"],
+                    "runnableActionIds": plan["runnableActionIds"],
+                    "externalSubmission": "not_executed",
+                }
+            },
+        })
+        executed: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        status = "completed"
+        error_message = None
+        self.ledger.record_audit_event({
+            "action": "local_autonomy.cycle_started",
+            "entityType": "workflow_run",
+            "entityId": str(workflow_run_id),
+            "details": {
+                "runnableActionIds": plan["runnableActionIds"],
+                "externalSubmission": "not_executed",
+            },
+        })
+
+        try:
+            if self._can_run(plan, "rescan_intake"):
+                executed.append(self._run_rescan())
+            else:
+                skipped.append(self._skip(plan, "rescan_intake"))
+
+            processing_should_run = self._can_run(plan, "process_imported") or _registered_documents(executed)
+            if processing_should_run:
+                executed.append(self._run_processing(limit))
+            else:
+                skipped.append(self._skip(plan, "process_imported"))
+
+            if self._can_run(plan, "refresh_bank_records"):
+                executed.append(self._run_bank_record_refresh(limit))
+            else:
+                skipped.append(self._skip(plan, "refresh_bank_records"))
+
+            if self._can_run(plan, "run_reconciliation"):
+                executed.append(self._run_reconciliation(bank_transactions, limit))
+            else:
+                skipped.append(self._skip(plan, "run_reconciliation"))
+
+            routing_should_run = (
+                self._can_run(plan, "prepare_wave_drafts")
+                or _processed_documents(executed)
+                or _refreshed_bank_records(executed)
+            )
+            if routing_should_run:
+                executed.append(self._run_routing(limit))
+            else:
+                skipped.append(self._skip(plan, "prepare_wave_drafts"))
+
+            export_attempt_should_run = self._can_run(plan, "prepare_export_attempts") or self._has_prepared_routes()
+            if export_attempt_should_run:
+                executed.append(self._run_export_attempt_preparation(limit))
+            else:
+                skipped.append(self._skip(plan, "prepare_export_attempts"))
+
+            if self._can_run(plan, "regenerate_stale_export_attempts"):
+                executed.append(self._run_stale_export_regeneration(limit))
+            else:
+                skipped.append(self._skip(plan, "regenerate_stale_export_attempts"))
+
+            if self._can_run(plan, "execute_approved_exports"):
+                executed.append(self._run_export_execution(limit))
+            else:
+                skipped.append(self._skip(plan, "execute_approved_exports"))
+
+            if self._can_run(plan, "prepare_master_ledger_projection") or _records_or_exports_changed(executed):
+                executed.append(self._run_master_ledger_projection(limit))
+            else:
+                skipped.append(self._skip(plan, "prepare_master_ledger_projection"))
+
+            if self._can_run(plan, "plan_wave_daily_reconciliation"):
+                executed.append(self._run_wave_plan())
+            else:
+                skipped.append(self._skip(plan, "plan_wave_daily_reconciliation"))
+
+            if self._can_run(plan, "prepare_period_close_pack"):
+                executed.append(self._run_period_close_pack())
+            else:
+                skipped.append(self._skip(plan, "prepare_period_close_pack"))
+        except Exception as exc:
+            status = "failed"
+            error_message = str(exc)
+            self.ledger.record_audit_event({
+                "action": "local_autonomy.cycle_failed",
+                "entityType": "workflow_run",
+                "entityId": str(workflow_run_id),
+                "details": {
+                    "error": error_message,
+                    "externalSubmission": "not_executed",
+                },
+            })
+
+        final_metrics = self.ledger.dashboard_metrics()
+        final_master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
+        final_exceptions = LocalExceptionQueueService(self.ledger, self.config).list_exceptions(
+            limit=limit,
+            include_entities=False,
+        )
+        self.ledger.update_workflow_run(workflow_run_id, {
+            "status": status,
+            "documentsImported": _sum_nested(executed, "summary", "registered"),
+            "documentsProcessed": _sum_nested(executed, "summary", "processed"),
+            "documentsNeedingReview": final_metrics["pending_review"],
+            "errorMessage": error_message,
+            "finishedAt": date.today().isoformat(),
+        })
+        self.ledger.record_audit_event({
+            "action": "local_autonomy.cycle_completed" if status == "completed" else "local_autonomy.cycle_finished_with_error",
+            "entityType": "workflow_run",
+            "entityId": str(workflow_run_id),
+            "details": {
+                "status": status,
+                "executedActionIds": [action["id"] for action in executed],
+                "skippedActionIds": [action["id"] for action in skipped],
+                "externalSubmission": "not_executed",
+                "metrics": final_metrics,
+                "masterLedger": _compact_master_ledger(final_master_ledger),
+                "exceptions": _compact_exceptions(final_exceptions),
+            },
+        })
+        return {
+            "success": status == "completed",
+            "status": status,
+            "workflowRunId": workflow_run_id,
+            "externalSubmission": "not_executed",
+            "plan": plan,
+            "executedActions": executed,
+            "skippedActions": skipped,
+            "finalMetrics": final_metrics,
+            "masterLedger": _compact_master_ledger(final_master_ledger),
+            "exceptions": _compact_exceptions(final_exceptions),
+            "error": error_message,
+        }
+
+    def _readiness_summary(self) -> Dict[str, Any]:
+        if self.readiness:
+            return self.readiness.summarize()
+        return {
+            "status": "attention",
+            "security": {"remoteExposureSafe": True, "apiTokenConfigured": False},
+            "sources": [],
+            "issues": [],
+        }
+
+    def _counts(self, limit: int) -> Dict[str, Any]:
+        metrics = self.ledger.dashboard_metrics()
+        routable_documents = self.ledger.list_documents(status=ROUTABLE_DOCUMENT_STATUSES, limit=limit)
+        routable_records = [
+            record for record in self.ledger.list_bookkeeping_records(
+                status=ROUTABLE_BOOKKEEPING_RECORD_STATUSES,
+                export_status=ROUTABLE_BOOKKEEPING_EXPORT_STATUSES,
+                limit=limit,
+            )
+            if record.get("source_type") == "bank_transaction"
+        ]
+        ready_routing_attempts = self.ledger.list_routing_attempts(status=PREPARED_ROUTING_STATUSES, limit=limit)
+        pending_routing_attempts = self.ledger.list_routing_attempts(status=PENDING_ROUTE_STATUSES, limit=500)
+        pending_export_attempts = self.ledger.list_export_attempts(status=("approval_required", "prepared"), limit=500)
+        approved_export_attempts = self.ledger.list_export_attempts(status="approved", limit=500)
+        return {
+            "importedDocuments": len(self.ledger.list_documents(status=IMPORTED_DOCUMENT_STATUSES, limit=limit)),
+            "routableDocuments": len(routable_documents),
+            "routableBookkeepingRecords": len(routable_records),
+            "routableTargets": _merge_breakdowns(
+                _target_breakdown(routable_documents, _document_target_system),
+                _target_breakdown(routable_records, _record_target_system),
+            ),
+            "readyForExportAttempts": len(ready_routing_attempts),
+            "readyForExportTargets": _target_breakdown(ready_routing_attempts, _routing_target_system),
+            "reconciliableDocuments": metrics["unreconciled_documents"],
+            "bankTransactions": metrics.get("bank_transactions", 0),
+            "unreconciledBankTransactions": metrics.get("unreconciled_bank_transactions", 0),
+            "openReviewItems": len(self.ledger.list_review_items(status=OPEN_REVIEW_STATUSES, limit=500)),
+            "pendingRoutingDrafts": len(pending_routing_attempts),
+            "pendingRoutingTargets": _target_breakdown(pending_routing_attempts, _routing_target_system),
+            "pendingExportApprovals": len(pending_export_attempts),
+            "pendingExportApprovalTargets": _target_breakdown(pending_export_attempts, _export_target_system),
+            "approvedExportAttempts": len(approved_export_attempts),
+            "approvedExportTargets": _target_breakdown(approved_export_attempts, _export_target_system),
+            "reconciliationReviewItems": len(
+                self.ledger.list_reconciliation_matches(status=RECONCILIATION_REVIEW_STATUSES, limit=500)
+            ),
+        }
+
+    def _blocked_reasons(self, readiness: Dict[str, Any], health: Dict[str, Any]) -> List[str]:
+        reasons: List[str] = []
+        security = readiness.get("security") or {}
+        if readiness.get("status") == "blocked":
+            reasons.append("readiness_blocked")
+        if security.get("remoteExposureSafe") is False:
+            reasons.append("remote_exposure_without_token")
+        if health.get("status") == "blocked" and not _truthy_config(
+            self.config,
+            "fab_autonomy_ignore_health_blocks",
+            "operations_autonomy_ignore_health_blocks",
+        ):
+            reasons.append("operations_health_blocked")
+        return reasons
+
+    def _can_run(self, plan: Dict[str, Any], action_id: str) -> bool:
+        return action_id in set(plan.get("runnableActionIds") or [])
+
+    @staticmethod
+    def _skip(plan: Dict[str, Any], action_id: str) -> Dict[str, Any]:
+        for action in plan.get("actions") or []:
+            if action.get("id") == action_id:
+                return {"id": action_id, "status": "skipped", "reason": action.get("blockedReason") or "not_actionable"}
+        return {"id": action_id, "status": "skipped", "reason": "not_planned"}
+
+    def _run_rescan(self) -> Dict[str, Any]:
+        summary = LocalFolderIntake(
+            self.ledger,
+            allowed_extensions=self.intake_extensions,
+        ).rescan(self.intake_paths)
+        return {"id": "rescan_intake", "status": "completed", "summary": summary}
+
+    def _run_processing(self, limit: int) -> Dict[str, Any]:
+        summary = LocalDocumentProcessor(self.ledger, self.config).process_imported(limit=limit)
+        return {"id": "process_imported", "status": "completed", "summary": summary}
+
+    def _run_routing(self, limit: int) -> Dict[str, Any]:
+        service = LocalRoutingService(self.ledger, self.config)
+        document_summary = service.prepare_ready_documents(limit=limit)
+        record_summary = service.prepare_ready_bookkeeping_records(limit=limit)
+        prepared_routes = self.ledger.list_routing_attempts(status=PREPARED_ROUTING_STATUSES, limit=limit)
+        summary = {
+            "documents": document_summary,
+            "bookkeepingRecords": record_summary,
+            "requested": document_summary.get("requested", 0) + record_summary.get("requested", 0),
+            "draftPrepared": document_summary.get("draftPrepared", 0) + record_summary.get("draftPrepared", 0),
+            "alreadyPrepared": document_summary.get("alreadyPrepared", 0) + record_summary.get("alreadyPrepared", 0),
+            "needsReview": document_summary.get("needsReview", 0) + record_summary.get("needsReview", 0),
+            "blocked": document_summary.get("blocked", 0) + record_summary.get("blocked", 0),
+            "targetBreakdown": _target_breakdown(prepared_routes, _routing_target_system),
+        }
+        return {"id": "prepare_wave_drafts", "status": "completed", "summary": summary}
+
+    def _run_export_attempt_preparation(self, limit: int) -> Dict[str, Any]:
+        summary = LocalExportAttemptService(self.ledger, self.config).prepare_ready_exports(limit=limit)
+        prepared_attempts = [
+            result.get("exportAttempt")
+            for result in summary.get("exportAttempts", [])
+            if isinstance(result, dict) and isinstance(result.get("exportAttempt"), dict)
+        ]
+        summary["targetBreakdown"] = _target_breakdown(prepared_attempts, _export_target_system)
+        return {"id": "prepare_export_attempts", "status": "completed", "summary": summary}
+
+    def _run_stale_export_regeneration(self, limit: int) -> Dict[str, Any]:
+        service = LocalExportAttemptService(self.ledger, self.config)
+        projection = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
+        rows = _regenerable_stale_master_ledger_rows(projection)[:limit]
+        results = []
+        for row in rows:
+            result = service.regenerate_attempt(int(row["exportAttemptId"]), actor="local_autonomy")
+            results.append({
+                "exportAttemptId": row.get("exportAttemptId"),
+                "targetSystem": row.get("targetSystem"),
+                "success": result.get("success"),
+                "status": result.get("status"),
+                "masterLedgerChecksum": result.get("masterLedgerChecksum"),
+            })
+        return {
+            "id": "regenerate_stale_export_attempts",
+            "status": "completed",
+            "summary": {
+                "requested": len(rows),
+                "regenerated": sum(1 for result in results if result.get("success")),
+                "failed": sum(1 for result in results if not result.get("success")),
+                "targetBreakdown": _target_breakdown(rows, _master_row_target_system),
+                "attemptSummaries": results,
+                "externalSubmission": "not_executed",
+            },
+        }
+
+    def _run_export_execution(self, limit: int) -> Dict[str, Any]:
+        service = LocalExportAttemptService(self.ledger, self.config)
+        attempts = self.ledger.list_export_attempts(status="approved", limit=limit)
+        pre_execution_backup = None
+        if attempts:
+            pre_execution_backup = LocalBackupService(self.ledger, self.config).create_backup(
+                note="Automatic pre-execution backup before autonomous approved export execution"
+            )
+            self.ledger.record_audit_event({
+                "action": "local_autonomy.export_execution_preflight_backup",
+                "entityType": "autonomous_cycle",
+                "details": {
+                    "attemptCount": len(attempts),
+                    "backupPath": pre_execution_backup.get("backupPath"),
+                    "backupFilename": pre_execution_backup.get("backupFilename"),
+                    "ledgerSha256": (pre_execution_backup.get("manifest") or {}).get("ledgerSha256"),
+                    "externalSubmission": "not_executed",
+                },
+            })
+        export_summaries = []
+        for attempt in attempts:
+            execution = service.execute_attempt(int(attempt["id"]), actor="local_autonomy")
+            export_summaries.append({
+                "exportAttemptId": attempt["id"],
+                "targetSystem": _export_target_system(attempt),
+                "success": execution.get("success"),
+                "status": execution.get("status"),
+                "executionStatus": execution.get("executionStatus"),
+            })
+        return {
+            "id": "execute_approved_exports",
+            "status": "completed",
+            "summary": {
+                "attempted": len(export_summaries),
+                "targetBreakdown": _target_breakdown(attempts, _export_target_system),
+                "attemptSummaries": export_summaries,
+                "preExecutionBackup": _compact_backup(pre_execution_backup),
+            },
+        }
+
+    def _run_master_ledger_projection(self, limit: int) -> Dict[str, Any]:
+        service = LocalMasterLedgerService(self.ledger, self.config)
+        projection = service.project(limit=limit)
+        service.record_projection_audit(projection, actor="local_autonomy")
+        return {
+            "id": "prepare_master_ledger_projection",
+            "status": "completed",
+            "summary": _compact_master_ledger(projection),
+        }
+
+    def _run_bank_record_refresh(self, limit: int) -> Dict[str, Any]:
+        summary = LocalBookkeepingRecordService(self.ledger, self.config).refresh_bank_transactions(limit=limit)
+        return {"id": "refresh_bank_records", "status": "completed", "summary": summary}
+
+    def _has_prepared_routes(self) -> bool:
+        return len(self.ledger.list_routing_attempts(status=PREPARED_ROUTING_STATUSES, limit=1)) > 0
+
+    def _run_reconciliation(self, bank_transactions: List[Dict[str, Any]], limit: int) -> Dict[str, Any]:
+        summary = LocalReconciliationService(self.ledger, self.config).run(bank_transactions, limit=limit)
+        return {"id": "run_reconciliation", "status": "completed", "summary": summary}
+
+    def _reconciliation_transactions(
+        self,
+        bank_transactions: Optional[List[Dict[str, Any]]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        if isinstance(bank_transactions, list):
+            return bank_transactions
+        return LocalBankTransactionImportService(self.ledger, self.config).transactions_for_reconciliation(limit=limit)
+
+    def _run_wave_plan(self) -> Dict[str, Any]:
+        today = date.today().isoformat()
+        wave_control = LocalWaveControlService(self.config)
+        plan = wave_control.plan_workflow({
+            "workflowId": "daily_reconciliation_run",
+            "fromDate": today,
+            "toDate": today,
+        })
+        snapshot_summary = wave_control.record_workflow_report_snapshots(self.ledger, plan)
+        operation_snapshot_summary = wave_control.record_workflow_operation_snapshots(self.ledger, plan)
+        report_controls = wave_control.evaluate_report_controls(
+            self.ledger,
+            workflow_id=(plan.get("workflow_plan") or {}).get("workflow_id") or "daily_reconciliation_run",
+        )
+        self.ledger.record_audit_event({
+            "action": "local_autonomy.wave_daily_plan_prepared",
+            "entityType": "wave_workflow",
+            "entityId": (plan.get("workflow_plan") or {}).get("workflow_id"),
+            "details": {
+                "status": plan.get("status"),
+                "operationCount": plan.get("operationCount"),
+                "waveReportSnapshots": snapshot_summary,
+                "waveOperationSnapshots": operation_snapshot_summary,
+                "waveReportControls": {
+                    "status": report_controls.get("status"),
+                    "requiredReportCount": report_controls.get("requiredReportCount"),
+                    "coveredReportCount": report_controls.get("coveredReportCount"),
+                    "resultGapCount": report_controls.get("resultGapCount"),
+                    "blockingCount": report_controls.get("blockingCount"),
+                },
+                "externalSubmission": "not_executed",
+            },
+        })
+        summary = _compact_wave_plan(plan)
+        summary["waveReportSnapshots"] = snapshot_summary["snapshotCount"]
+        summary["waveOperationSnapshots"] = operation_snapshot_summary["snapshotCount"]
+        summary["waveReportControls"] = {
+            "status": report_controls.get("status"),
+            "requiredReportCount": report_controls.get("requiredReportCount"),
+            "coveredReportCount": report_controls.get("coveredReportCount"),
+            "resultGapCount": report_controls.get("resultGapCount"),
+            "blockingCount": report_controls.get("blockingCount"),
+        }
+        return {"id": "plan_wave_daily_reconciliation", "status": "completed", "summary": summary}
+
+    def _run_period_close_pack(self) -> Dict[str, Any]:
+        close_pack = LocalClosePackService(self.ledger, self.config).prepare(actor="local_autonomy")
+        close_readiness = close_pack.get("closeReadiness") or {}
+        summary = {
+            "success": close_pack.get("success"),
+            "status": close_pack.get("status"),
+            "externalSubmission": close_pack.get("externalSubmission"),
+            "closePackPath": close_pack.get("closePackPath"),
+            "closePackFilename": close_pack.get("closePackFilename"),
+            "sha256": close_pack.get("sha256"),
+            "sizeBytes": close_pack.get("sizeBytes"),
+            "manifest": close_pack.get("manifest"),
+            "closeReadiness": _compact_close_readiness(close_readiness),
+        }
+        self.ledger.record_audit_event({
+            "action": "local_autonomy.period_close_pack_prepared",
+            "entityType": "period_close",
+            "entityId": f"{close_readiness.get('fromDate')}:{close_readiness.get('toDate')}",
+            "details": summary,
+        })
+        return {"id": "prepare_period_close_pack", "status": "completed" if close_pack.get("success") else "blocked", "summary": summary}
+
+
+def _action(
+    action_id: str,
+    label: str,
+    stage: str,
+    risk: str,
+    mode: str,
+    can_run: bool,
+    blocked_reason: Optional[str],
+    evidence: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "id": action_id,
+        "label": label,
+        "stage": stage,
+        "risk": risk,
+        "mode": mode,
+        "canRun": bool(can_run),
+        "blockedReason": blocked_reason,
+        "evidence": evidence or {},
+    }
+
+
+def _compact_readiness(readiness: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "status": readiness.get("status"),
+        "remoteExposureSafe": (readiness.get("security") or {}).get("remoteExposureSafe"),
+        "apiTokenConfigured": (readiness.get("security") or {}).get("apiTokenConfigured"),
+        "readySources": len([source for source in readiness.get("sources") or [] if source.get("status") == "ready"]),
+        "issueCount": len(readiness.get("issues") or []),
+    }
+
+
+def _compact_health(health: Dict[str, Any]) -> Dict[str, Any]:
+    metrics = health.get("metrics") or {}
+    return {
+        "status": health.get("status"),
+        "openReviewItems": metrics.get("openReviewItems", 0),
+        "failedDocuments": metrics.get("failedDocuments", 0),
+        "routingBlocks": metrics.get("routingBlocks", 0),
+        "pendingRoutingDrafts": metrics.get("pendingRoutingDrafts", 0),
+        "pendingExportApprovals": metrics.get("pendingExportApprovals", 0),
+        "approvedExports": metrics.get("approvedExports", 0),
+        "failedExports": metrics.get("failedExports", 0),
+        "masterLedgerRows": metrics.get("masterLedgerRows", 0),
+        "masterLedgerBlockedRows": metrics.get("masterLedgerBlockedRows", 0),
+        "masterLedgerReadyForApproval": metrics.get("masterLedgerReadyForApproval", 0),
+        "masterLedgerReadyForExternalExecution": metrics.get("masterLedgerReadyForExternalExecution", 0),
+        "issueCount": len(health.get("issues") or []),
+    }
+
+
+def _compact_exceptions(exceptions: Dict[str, Any]) -> Dict[str, Any]:
+    summary = exceptions.get("summary") or {}
+    items = exceptions.get("exceptions") or []
+    return {
+        "status": exceptions.get("status"),
+        "externalSubmission": exceptions.get("externalSubmission") or "not_executed",
+        "total": summary.get("total", 0),
+        "bySeverity": summary.get("bySeverity") or {},
+        "byType": summary.get("byType") or {},
+        "topExceptions": [
+            {
+                "id": item.get("id"),
+                "type": item.get("type"),
+                "severity": item.get("severity"),
+                "entityType": item.get("entityType"),
+                "entityId": item.get("entityId"),
+                "message": item.get("message"),
+                "nextAction": item.get("nextAction"),
+                "actions": _compact_exception_actions(item.get("actions") or []),
+            }
+            for item in items[:5]
+        ],
+    }
+
+
+def _compact_exception_actions(actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "id": action.get("id"),
+            "label": _exception_action_label(str(action.get("id") or "open")),
+            "path": action.get("dashboardPath") or action.get("path"),
+            "safety": action.get("safety"),
+        }
+        for action in actions
+        if action.get("method") == "GET" and action.get("safety") == "read_only" and (action.get("dashboardPath") or action.get("path"))
+    ][:3]
+
+
+def _exception_action_label(action_id: str) -> str:
+    labels = {
+        "open_bookkeeping_record": "Open record",
+        "open_document": "Open document",
+        "open_export_attempts": "Open export",
+        "open_master_ledger": "Open master ledger",
+        "open_reconciliation": "Open reconciliation",
+        "open_review_queue": "Open review queue",
+        "open_routing_attempts": "Open routing",
+        "open_autonomy_plan": "Open autonomy plan",
+    }
+    return labels.get(action_id, action_id.replace("_", " ").title())
+
+
+def _compact_close_readiness(close_readiness: Dict[str, Any]) -> Dict[str, Any]:
+    metrics = close_readiness.get("metrics") or {}
+    report_controls = close_readiness.get("reportControls") or {}
+    return {
+        "status": close_readiness.get("status"),
+        "canClose": bool(close_readiness.get("canClose")),
+        "workflowId": close_readiness.get("workflowId"),
+        "fromDate": close_readiness.get("fromDate"),
+        "toDate": close_readiness.get("toDate"),
+        "blockingCount": close_readiness.get("blockingCount", 0),
+        "attentionCount": close_readiness.get("attentionCount", 0),
+        "reportControls": {
+            "status": report_controls.get("status"),
+            "requiredReportCount": report_controls.get("requiredReportCount"),
+            "readyReportCount": report_controls.get("readyReportCount"),
+            "resultGapCount": report_controls.get("resultGapCount"),
+        },
+        "metrics": {
+            "pendingReview": metrics.get("pendingReview", 0),
+            "unreconciledDocuments": metrics.get("unreconciledDocuments", 0),
+            "unreconciledBankTransactions": metrics.get("unreconciledBankTransactions", 0),
+            "exportApprovals": metrics.get("exportApprovals", 0),
+            "failedDocuments": metrics.get("failedDocuments", 0),
+            "routingBlocks": metrics.get("routingBlocks", 0),
+        },
+        "nextActions": close_readiness.get("nextActions") or [],
+    }
+
+
+def _compact_wave_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
+    workflow_plan = plan.get("workflow_plan") or {}
+    return {
+        "status": plan.get("status"),
+        "workflowId": workflow_plan.get("workflow_id"),
+        "operationCount": plan.get("operationCount"),
+        "externalSubmission": plan.get("externalSubmission"),
+        "canRunAutonomously": plan.get("can_run_autonomously"),
+    }
+
+
+def _compact_master_ledger(projection: Dict[str, Any]) -> Dict[str, Any]:
+    summary = projection.get("summary") or {}
+    return {
+        "projectionVersion": projection.get("projectionVersion"),
+        "ledgerChecksum": projection.get("ledgerChecksum"),
+        "externalSubmission": projection.get("externalSubmission"),
+        "targetSystem": projection.get("targetSystem"),
+        "totalRows": summary.get("totalRows", 0),
+        "blockedRows": summary.get("blockedRows", 0),
+        "readyForDraft": summary.get("readyForDraft", 0),
+        "readyForApproval": summary.get("readyForApproval", 0),
+        "readyForExternalExecution": summary.get("readyForExternalExecution", 0),
+        "downstreamStatuses": summary.get("downstreamStatuses") or {},
+        "byTargetSystem": summary.get("byTargetSystem") or {},
+    }
+
+
+def _compact_backup(backup: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not backup:
+        return None
+    manifest = backup.get("manifest") if isinstance(backup.get("manifest"), dict) else {}
+    return {
+        "status": backup.get("status"),
+        "backupPath": backup.get("backupPath"),
+        "backupFilename": backup.get("backupFilename"),
+        "ledgerSha256": manifest.get("ledgerSha256"),
+        "ledgerBytes": manifest.get("ledgerBytes"),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _next_action(status: str, runnable_actions: List[Dict[str, Any]], manual_actions: List[Dict[str, Any]], blocked_reasons: List[str]) -> str:
+    if status == "blocked":
+        return "Resolve blocked safety conditions before running the autonomous local cycle: " + ", ".join(blocked_reasons)
+    if runnable_actions:
+        return "Run the safe local autonomous cycle. It will not submit data externally."
+    if manual_actions:
+        return "Work through the review/approval queue before FAB can continue autonomously."
+    return "No local autonomous work is waiting."
+
+
+def _close_pack_blocked_reason(close_readiness: Dict[str, Any]) -> str:
+    next_actions = close_readiness.get("nextActions") or []
+    if next_actions:
+        return " ".join(str(action) for action in next_actions)
+    return "Close readiness gates are not ready."
+
+
+def _bounded_limit(value: Any, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _truthy_config(config: Dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = config.get(key)
+        if value in (None, ""):
+            continue
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _registered_documents(executed: List[Dict[str, Any]]) -> bool:
+    for action in executed:
+        if action.get("id") == "rescan_intake" and (action.get("summary") or {}).get("registered", 0) > 0:
+            return True
+    return False
+
+
+def _processed_documents(executed: List[Dict[str, Any]]) -> bool:
+    for action in executed:
+        if action.get("id") == "process_imported" and (action.get("summary") or {}).get("processed", 0) > 0:
+            return True
+    return False
+
+
+def _refreshed_bank_records(executed: List[Dict[str, Any]]) -> bool:
+    for action in executed:
+        if action.get("id") == "refresh_bank_records" and (action.get("summary") or {}).get("updated", 0) > 0:
+            return True
+    return False
+
+
+def _records_or_exports_changed(executed: List[Dict[str, Any]]) -> bool:
+    for action in executed:
+        action_id = action.get("id")
+        summary = action.get("summary") or {}
+        if action_id == "process_imported" and summary.get("updatedRecords", 0) > 0:
+            return True
+        if action_id == "refresh_bank_records" and summary.get("updated", 0) > 0:
+            return True
+        if action_id == "prepare_wave_drafts" and summary.get("draftPrepared", 0) > 0:
+            return True
+        if action_id == "prepare_export_attempts" and summary.get("prepared", 0) > 0:
+            return True
+        if action_id == "regenerate_stale_export_attempts" and summary.get("regenerated", 0) > 0:
+            return True
+        if action_id == "execute_approved_exports" and summary.get("attempted", 0) > 0:
+            return True
+    return False
+
+
+def _regenerable_stale_master_ledger_rows(projection: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = []
+    for row in projection.get("rows") or []:
+        if row.get("downstreamStatus") != "stale_master_ledger_draft":
+            continue
+        if not row.get("exportAttemptId"):
+            continue
+        if row.get("externalSubmission") in {"queued", "submitted", "executed"}:
+            continue
+        rows.append(row)
+    return rows
+
+
+def _target_breakdown(items: List[Dict[str, Any]], resolver) -> Dict[str, int]:
+    breakdown: Dict[str, int] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        target = _normalize_target_system(resolver(item))
+        breakdown[target] = breakdown.get(target, 0) + 1
+    return dict(sorted(breakdown.items()))
+
+
+def _merge_breakdowns(*breakdowns: Dict[str, int]) -> Dict[str, int]:
+    merged: Dict[str, int] = {}
+    for breakdown in breakdowns:
+        for target, count in (breakdown or {}).items():
+            merged[target] = merged.get(target, 0) + int(count or 0)
+    return dict(sorted(merged.items()))
+
+
+def _document_target_system(document: Dict[str, Any]) -> str:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    return _first_present(
+        routing.get("targetSystem"),
+        routing.get("target_system"),
+        metadata.get("targetSystem"),
+        metadata.get("target_system"),
+        extracted.get("target_system"),
+        extracted.get("targetSystem"),
+        "waveapps",
+    )
+
+
+def _record_target_system(record: Dict[str, Any]) -> str:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return _first_present(
+        record.get("target_system"),
+        record.get("targetSystem"),
+        metadata.get("targetSystem"),
+        metadata.get("target_system"),
+        "waveapps",
+    )
+
+
+def _routing_target_system(routing_attempt: Dict[str, Any]) -> str:
+    metadata = routing_attempt.get("metadata") if isinstance(routing_attempt.get("metadata"), dict) else {}
+    return _first_present(
+        metadata.get("targetSystem"),
+        metadata.get("target_system"),
+        _target_system_from_route_target(routing_attempt.get("target")),
+        "waveapps",
+    )
+
+
+def _export_target_system(export_attempt: Dict[str, Any]) -> str:
+    metadata = export_attempt.get("metadata") if isinstance(export_attempt.get("metadata"), dict) else {}
+    return _first_present(
+        export_attempt.get("target_system"),
+        export_attempt.get("targetSystem"),
+        metadata.get("targetSystem"),
+        metadata.get("target_system"),
+        _target_system_from_route_target(metadata.get("routingTarget")),
+        "waveapps",
+    )
+
+
+def _master_row_target_system(row: Dict[str, Any]) -> str:
+    return _first_present(row.get("targetSystem"), row.get("target_system"), "unknown")
+
+
+def _target_system_from_route_target(value: Any) -> str:
+    text = str(value or "").strip()
+    if ":" in text:
+        return text.split(":", 1)[0] or "waveapps"
+    return text
+
+
+def _normalize_target_system(value: Any) -> str:
+    text = str(value or "waveapps").strip().lower().replace("_", "-")
+    if text in {"", "none"}:
+        return "waveapps"
+    if text in {"mijngeldzaken-nl", "mijngeldzaken.nl"}:
+        return "mijngeldzaken"
+    if text.startswith("mijngeldzaken:"):
+        return "mijngeldzaken"
+    if text.startswith("waveapps"):
+        return "waveapps"
+    return text
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _sum_nested(actions: List[Dict[str, Any]], parent_key: str, child_key: str) -> int:
+    total = 0
+    for action in actions:
+        value = (action.get(parent_key) or {}).get(child_key)
+        try:
+            total += int(value or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
