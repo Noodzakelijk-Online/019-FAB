@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
+from src.utils.rate_limiter import get_all_rates
 
 
 OPEN_REVIEW_STATUSES = ("pending", "in_review")
@@ -85,6 +86,7 @@ class LocalOperationsHealth:
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
+        rate_limits = get_all_rates()
 
         issues: List[Dict[str, Any]] = []
         if int(master_ledger_summary.get("blockedRows") or 0) > 0:
@@ -234,6 +236,18 @@ class LocalOperationsHealth:
                 {"errorMessage": run.get("error_message")},
             ))
 
+        exhausted_limiters = [name for name, rate in rate_limits.items() if rate.get("quotaExhausted")]
+        if exhausted_limiters:
+            issues.append(_issue(
+                "high",
+                "api_quota_exhausted",
+                "rate_limiter",
+                ",".join(exhausted_limiters),
+                "One or more downstream API quotas are exhausted.",
+                None,
+                {"services": exhausted_limiters},
+            ))
+
         severity_counts = _severity_counts(issues)
         status = "ok"
         if severity_counts["high"]:
@@ -271,7 +285,9 @@ class LocalOperationsHealth:
                 "masterLedgerReadyForExternalExecution": master_ledger_summary.get("readyForExternalExecution", 0),
                 "runningWorkflowRuns": len(running_runs),
                 "failedWorkflowRuns": len(failed_runs),
+                "apiQuotaExhaustedServices": len(exhausted_limiters),
             },
+            "rateLimits": rate_limits,
             "severityCounts": severity_counts,
             "issues": sorted(issues, key=_issue_sort_key),
             "nextActions": _next_actions(issues),
@@ -337,6 +353,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Inspect failed export attempts and retry after fixing the source issue.")
     if "master_ledger_blockers" in issue_types:
         actions.append("Open the master ledger projection and resolve blocked rows before close or downstream execution.")
+    if "api_quota_exhausted" in issue_types:
+        actions.append("Pause affected downstream sync jobs until the service quota window resets.")
     return actions
 
 

@@ -8,9 +8,13 @@ from src.operations.local_api import create_app
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_ledger import LocalOperationsLedger
+from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 
 
 class TestLocalOperationsHealth(unittest.TestCase):
+    def tearDown(self):
+        reset_all_limiters()
+
     def test_clean_ledger_reports_ok(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -177,6 +181,19 @@ class TestLocalOperationsHealth(unittest.TestCase):
             html = page.data.decode("utf-8")
             self.assertIn("Operations Health", html)
             self.assertIn("failed_document", html)
+
+    def test_health_flags_exhausted_downstream_api_quota(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            limiter = set_rate_limiter("waveapps", limiter=RateLimiter(calls_per_day=1, name="WaveApps"))
+            limiter.acquire()
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            self.assertEqual(health["status"], "blocked")
+            self.assertEqual(health["metrics"]["apiQuotaExhaustedServices"], 1)
+            self.assertTrue(health["rateLimits"]["waveapps"]["quotaExhausted"])
+            self.assertIn("api_quota_exhausted", {issue["type"] for issue in health["issues"]})
 
 
 def _hours_ago(hours: int) -> str:
