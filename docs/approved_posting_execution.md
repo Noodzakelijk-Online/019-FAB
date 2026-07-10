@@ -46,6 +46,28 @@ python src\run_approved_postings.py
 
 This runner respects the same config safety flag.
 
+## MijnGeldzaken supervised submission
+
+MijnGeldzaken does not use the Wave API execution path. Once an approved
+posting attempt reaches the handler, FAB writes a durable CSV package to
+`mijngeldzaken_export_dir`, records its SHA-256 checksum, changes the attempt to
+`supervision_required`, and opens a review item. No stored MijnGeldzaken
+username, password, or DigiD credential is used.
+
+After the operator imports the package in a user-owned MijnGeldzaken session,
+record completion through the token-protected dashboard API:
+
+```text
+POST /posting-attempts/{attempt_id}/complete-supervised
+```
+
+The JSON body must include `confirmation` with the exact value
+`CONFIRM EXTERNAL SUBMISSION`. Optional evidence is restricted to
+`submitted_at`, `receipt_reference`, `note`, and `artifact_sha256`. FAB then
+marks the attempt and document as posted, resolves the supervision review item,
+and writes an audit event. This endpoint records the observed result; it does
+not log in to MijnGeldzaken or bypass DigiD.
+
 ## Worker Execution
 
 The background worker also calls the approved-posting executor after each workflow cycle. The executor only processes records with status `approved`.

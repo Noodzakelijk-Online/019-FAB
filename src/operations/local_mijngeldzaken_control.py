@@ -324,9 +324,19 @@ def _workflow_payload(action_id: str, from_date: str, to_date: str, request_payl
 
 
 def _credential_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    legacy_username = _has_config(config, "mijngeldzaken_username", "mijngeldzaken.username")
+    legacy_password = _has_config(config, "mijngeldzaken_password", "mijngeldzaken.password")
     return {
-        "usernameConfigured": _has_config(config, "mijngeldzaken_username", "mijngeldzaken.username"),
-        "passwordConfigured": _has_config(config, "mijngeldzaken_password", "mijngeldzaken.password"),
+        "usernameConfigured": legacy_username,
+        "passwordConfigured": legacy_password,
+        "legacyCredentialsDetected": legacy_username or legacy_password,
+        "legacyCredentialsIgnored": True,
+        "supervisedSessionRequired": True,
+        "exportDirectoryConfigured": bool(
+            config.get("mijngeldzaken_export_dir")
+            or config.get("operations_mijngeldzaken_export_dir")
+            or "data/exports/mijngeldzaken"
+        ),
         "autonomousMode": str(config.get("mijngeldzaken_autonomous_mode") or "prepare"),
         "confirmedActionsEnabled": bool(config.get("mijngeldzaken_allow_confirmed_actions", False)),
         "credentialActionsEnabled": bool(config.get("mijngeldzaken_allow_credential_actions", False)),

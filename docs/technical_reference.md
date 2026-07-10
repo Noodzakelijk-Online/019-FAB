@@ -256,7 +256,8 @@ graph TD
 
 *   **Purpose**: Automates data entry into mijngeldzaken.nl using browser automation (Playwright).
 *   **Dependencies**: `playwright`.
-*   **Configuration**: `mijngeldzaken_username`, `mijngeldzaken_password`, `mijngeldzaken_login_url`, `mijngeldzaken_import_url`, `mijngeldzaken_csv_template`, `mijngeldzaken_category_mapping`.
+*   **Configuration**: `mijngeldzaken_export_dir`, `mijngeldzaken_default_account`, `mijngeldzaken_csv_delimiter`, `mijngeldzaken_csv_template`, `mijngeldzaken_category_mapping`.
+*   **Safety**: FAB does not use stored MijnGeldzaken usernames, passwords, or DigiD credentials. Approved entries become checksum-bound CSV artifacts and pause in `supervision_required` until the operator completes the import in a user-owned session and records the result in FAB.
 
 ### 2.29. `src/data_entry/waveapps_business_handler.py` (`WaveappsBusinessHandler`)
 

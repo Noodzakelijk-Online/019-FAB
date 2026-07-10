@@ -90,7 +90,10 @@ class MijngeldzakenAutonomousOperator:
         if safety == "requires_credentials" and not self.allow_credential_actions:
             return {
                 "status": "blocked_requires_credentials",
-                "message": "MijnGeldzaken action requires user-owned sign-in or stored credential authorization.",
+                "message": (
+                    "MijnGeldzaken action requires a supervised user-owned sign-in. "
+                    "FAB does not use stored MijnGeldzaken passwords."
+                ),
                 "operation": operation,
             }
         if safety == "requires_confirmation" and not (confirmed and self.allow_confirmed_actions):

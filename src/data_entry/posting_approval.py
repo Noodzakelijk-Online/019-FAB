@@ -4,6 +4,9 @@ from typing import Any, Dict, Optional
 from src.storage.database import Database
 
 
+SUPERVISED_COMPLETION_PHRASE = "CONFIRM EXTERNAL SUBMISSION"
+
+
 class PostingApprovalService:
     """Controls human approval/rejection of dry-run posting attempts."""
 
@@ -70,6 +73,67 @@ class PostingApprovalService:
         self.database.add_audit_log("posting_attempt", str(attempt_id), "posting_failed", None, result, result.get("message", "Posting failed"), "system")
         return {"status": "posting_failed", "attempt_id": attempt_id}
 
+    def complete_supervised_attempt(
+        self,
+        attempt_id: int,
+        confirmation: str,
+        completed_by: str = "user",
+        external_id: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+        reason: str = "Supervised external submission completed",
+    ) -> Dict[str, Any]:
+        if confirmation != SUPERVISED_COMPLETION_PHRASE:
+            return {
+                "status": "confirmation_required",
+                "attempt_id": attempt_id,
+                "required_confirmation": SUPERVISED_COMPLETION_PHRASE,
+            }
+        attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
+        if not attempt:
+            return {"status": "not_found", "attempt_id": attempt_id}
+        if attempt["status"] != "supervision_required":
+            return {
+                "status": "not_completable",
+                "attempt_id": attempt_id,
+                "current_status": attempt["status"],
+            }
+
+        safe_evidence = _safe_supervised_evidence(evidence or {})
+        now = self.database.now()
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE posting_attempts SET status = 'posted', external_id = ?, updated_at = ? WHERE id = ?",
+                (external_id, now, attempt_id),
+            )
+            connection.execute(
+                """
+                UPDATE manual_review_items
+                SET status = 'resolved', resolution = ?, resolved_at = ?
+                WHERE document_id = ? AND reason = 'mijngeldzaken_supervision_required' AND status = 'pending'
+                """,
+                (reason, now, attempt["document_id"]),
+            )
+            connection.execute(
+                "UPDATE documents SET current_state = 'posted', updated_at = ? WHERE id = ?",
+                (now, attempt["document_id"]),
+            )
+        result = {
+            "status": "posted",
+            "mode": "supervised_external_submission",
+            "external_id": external_id,
+            "evidence": safe_evidence,
+        }
+        self.database.add_audit_log(
+            "posting_attempt",
+            str(attempt_id),
+            "supervised_submission_completed",
+            attempt,
+            result,
+            reason,
+            completed_by,
+        )
+        return {"status": "posted", "attempt_id": attempt_id, "external_id": external_id}
+
     def payload_for_attempt(self, attempt_id: int) -> Optional[Dict[str, Any]]:
         attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
         if not attempt:
@@ -78,3 +142,8 @@ class PostingApprovalService:
             return json.loads(attempt.get("payload_json") or "{}")
         except json.JSONDecodeError:
             return {}
+
+
+def _safe_supervised_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"submitted_at", "receipt_reference", "note", "artifact_sha256"}
+    return {key: evidence[key] for key in allowed if evidence.get(key) not in (None, "")}

@@ -816,6 +816,48 @@ class WorkflowController:
                             )
                             self._mark_source_document(doc_data, "deferred_data_entry")
                             continue
+                        if entry_result.get("status") == "supervised_action_required":
+                            self.operations_client.create_routing_attempt(
+                                operations_document_id,
+                                self._operations_target(target_system),
+                                "requires_review",
+                                workflow_run_id=workflow_run_id,
+                                message=entry_result["message"],
+                                metadata={"route": route_result, "entry_result": entry_result},
+                            )
+                            self.operations_client.update_document(
+                                operations_document_id,
+                                {
+                                    "exportStatus": "supervision_required",
+                                    "metadata": {
+                                        "supervisedSubmission": {
+                                            "targetSystem": target_system,
+                                            "artifact": entry_result.get("artifact"),
+                                            "externalSubmission": "not_executed",
+                                        }
+                                    },
+                                },
+                                processing_status="awaiting_supervised_submission",
+                            )
+                            self.operations_client.record_audit_event(
+                                "workflow.document.supervised_submission_required",
+                                "bookkeeping_document",
+                                str(operations_document_id or document_id),
+                                {
+                                    "documentId": document_id,
+                                    "targetSystem": target_system,
+                                    "artifact": entry_result.get("artifact"),
+                                    "externalSubmission": "not_executed",
+                                },
+                            )
+                            self._queue_manual_review(
+                                document_id,
+                                "mijngeldzaken_supervision_required",
+                                entry_result["message"],
+                                operations_document_id,
+                            )
+                            self._mark_source_document(doc_data, "needs_supervised_external_submission")
+                            continue
                         route_status = "requires_review" if entry_result.get("requires_manual_review", False) else "failed"
                         self.operations_client.create_routing_attempt(
                             operations_document_id,

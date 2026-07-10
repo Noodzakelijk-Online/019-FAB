@@ -1,8 +1,10 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import csv
+import json
 import os
 import shutil
+import tempfile
 
 from src.data_entry.mijngeldzaken_handler import MijngeldzakenHandler
 from src.data_entry.mijngeldzaken_autonomous_operator import MijngeldzakenAutonomousOperator
@@ -79,36 +81,35 @@ class TestDataEntry(unittest.TestCase):
     def tearDown(self):
         reset_all_limiters()
 
-    @patch("src.data_entry.mijngeldzaken_handler.sync_playwright")
-    def test_mijngeldzaken_handler(self, mock_sync_playwright):
-        mock_playwright = MagicMock()
-        mock_sync_playwright.return_value.__enter__.return_value = mock_playwright
-        mock_browser = MagicMock()
-        mock_playwright.chromium.launch.return_value = mock_browser
-        mock_page = MagicMock()
-        mock_browser.new_page.return_value = mock_page
+    def test_mijngeldzaken_handler_prepares_persistent_supervised_artifact_without_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = dict(self.config)
+            config["mijngeldzaken_export_dir"] = temp_dir
+            handler = MijngeldzakenHandler(config)
 
-        # Mock page interactions
-        mock_page.wait_for_url.return_value = None
-        mock_page.wait_for_selector.return_value = None
-        mock_page.inner_text.return_value = "Upload successful!"
+            result = handler.enter_data(self.dummy_processed_data)
 
-        handler = MijngeldzakenHandler(self.config)
-        result = handler.enter_data(self.dummy_processed_data)
+            self.assertEqual(result["status"], "supervised_action_required")
+            self.assertTrue(result["requires_supervision"])
+            self.assertFalse(result["credentials_used"])
+            self.assertEqual(result["external_submission"], "not_executed")
+            self.assertTrue(os.path.isfile(result["artifact"]["path"]))
+            self.assertEqual(len(result["artifact"]["sha256"]), 64)
+            with open(result["artifact"]["path"], newline="", encoding="utf-8-sig") as csvfile:
+                row = next(csv.DictReader(csvfile, delimiter=";"))
+            self.assertEqual(row["Date"], "2025-01-15")
+            self.assertEqual(row["Description"], "Weekly groceries")
+            self.assertEqual(row["Amount"], "45.5")
+            self.assertEqual(row["Category"], "Huishouden")
+            rendered = json.dumps(result, sort_keys=True)
+            self.assertNotIn("test_user", rendered)
+            self.assertNotIn("test_pass", rendered)
 
-        self.assertEqual(result["status"], "success")
-        self.assertIn("Successfully uploaded", result["message"])
-        mock_page.fill.assert_any_call("input[name=\"username\"]", "test_user")
-        mock_page.fill.assert_any_call("input[name=\"password\"]", "test_pass")
-        mock_page.set_input_files.assert_called_once()
-
-        # Test with missing credentials
-        self.config["mijngeldzaken_username"] = None
-        handler = MijngeldzakenHandler(self.config)
-        result = handler.enter_data(self.dummy_processed_data)
-        self.assertEqual(result["status"], "failure")
-        self.assertIn("credentials not configured", result["message"])
-        self.assertTrue(result["requires_manual_review"])
+            without_credentials = dict(config)
+            without_credentials.pop("mijngeldzaken_username", None)
+            without_credentials.pop("mijngeldzaken_password", None)
+            second = MijngeldzakenHandler(without_credentials).enter_data(self.dummy_processed_data)
+            self.assertEqual(second["status"], "supervised_action_required")
 
     @patch("src.data_entry.waveapps_business_handler.requests.post")
     def test_waveapps_business_handler(self, mock_post):

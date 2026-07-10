@@ -12,6 +12,7 @@ class PostingExecutor:
     """Executes approved posting attempts against configured bookkeeping handlers."""
 
     DEFERRED_HANDLER_STATUSES = {"rate_limited", "quota_exhausted"}
+    SUPERVISED_HANDLER_STATUSES = {"supervised_action_required"}
 
     def __init__(self, config: Dict[str, Any], handlers: Optional[Dict[str, Any]] = None):
         self.config = config or {}
@@ -90,6 +91,9 @@ class PostingExecutor:
         if result.get("status") in self.DEFERRED_HANDLER_STATUSES:
             return self._defer_attempt(attempt_id, payload, categorized_data, result)
 
+        if result.get("status") in self.SUPERVISED_HANDLER_STATUSES:
+            return self._pause_for_supervision(attempt_id, categorized_data, result)
+
         self._handle_failure(attempt_id, payload, result)
         document_id = categorized_data.get("document_id")
         if document_id:
@@ -103,7 +107,7 @@ class PostingExecutor:
                 return {"status": "not_found", "attempt_id": attempt_id}
             allowed_statuses = {"approved"}
             if force:
-                allowed_statuses.update({"posting_failed", "posting_in_progress", "posting_deferred"})
+                allowed_statuses.update({"posting_failed", "posting_in_progress", "posting_deferred", "supervision_required"})
             if attempt["status"] not in allowed_statuses:
                 return {"status": "not_approved", "attempt_id": attempt_id, "current_status": attempt["status"]}
             cursor = connection.execute(
@@ -164,6 +168,56 @@ class PostingExecutor:
             "result": result,
         }
 
+    def _pause_for_supervision(
+        self,
+        attempt_id: int,
+        categorized_data: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        reason = str(result.get("message") or "External submission requires a supervised user session.")
+        public_result = _supervision_result(result)
+        document_id = categorized_data.get("document_id")
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE posting_attempts SET status = 'supervision_required', updated_at = ? WHERE id = ?",
+                (self.database.now(), attempt_id),
+            )
+            if document_id:
+                connection.execute(
+                    "UPDATE documents SET current_state = 'awaiting_supervised_submission', updated_at = ? WHERE id = ?",
+                    (self.database.now(), document_id),
+                )
+
+        details = {
+            "target_system": categorized_data.get("target_system"),
+            "document_id": document_id,
+            "result": public_result,
+        }
+        self.database.add_audit_log(
+            "posting_attempt",
+            str(attempt_id),
+            "execution_paused_for_supervision",
+            None,
+            details,
+            reason,
+            "system",
+        )
+        if document_id and not self.database.fetch_one(
+            "SELECT id FROM manual_review_items WHERE document_id = ? AND reason = ? AND status = 'pending'",
+            (document_id, "mijngeldzaken_supervision_required"),
+        ):
+            self.database.add_manual_review_item(
+                document_id,
+                "mijngeldzaken_supervision_required",
+                self.database.json_dumps(details),
+                severity="normal",
+            )
+        return {
+            "attempt_id": attempt_id,
+            "status": "supervision_required",
+            "result": public_result,
+        }
+
     def _handle_failure(self, attempt_id: int, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
         self.approval_service.mark_failed(attempt_id, result)
         retry = self.retry_manager.schedule_retry(
@@ -206,3 +260,18 @@ def _positive_int(value: Any, default: int) -> int:
         return max(int(float(value)), 1)
     except (TypeError, ValueError):
         return default
+
+
+def _supervision_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: result.get(key)
+        for key in (
+            "status",
+            "message",
+            "artifact",
+            "external_submission",
+            "requires_supervision",
+            "credentials_used",
+        )
+        if result.get(key) is not None
+    }

@@ -441,6 +441,62 @@ class TestWorkflow(unittest.TestCase):
             documentsNeedingReview=0,
         )
 
+    def test_workflow_pauses_mijngeldzaken_submission_for_supervision(self):
+        self._configure_successful_run(
+            category="Personal",
+            entry_result={
+                "status": "supervised_action_required",
+                "message": "MijnGeldzaken CSV prepared for supervised import.",
+                "artifact": {"filename": "mgz.csv", "sha256": "a" * 64},
+                "external_submission": "not_executed",
+                "requires_supervision": True,
+                "requires_manual_review": True,
+            },
+        )
+
+        controller = WorkflowController(self.config)
+        controller.run_workflow()
+
+        operations = self.mocks["OperationsClient"].return_value
+        self.mocks["MijngeldzakenHandler"].return_value.enter_data.assert_called_once()
+        operations.create_routing_attempt.assert_any_call(
+            12,
+            "mijngeldzaken",
+            "requires_review",
+            workflow_run_id=34,
+            message="MijnGeldzaken CSV prepared for supervised import.",
+            metadata=ANY,
+        )
+        operations.update_document.assert_any_call(
+            12,
+            ANY,
+            processing_status="awaiting_supervised_submission",
+        )
+        operations.create_review_item.assert_any_call(
+            12,
+            "mijngeldzaken_supervision_required",
+            "MijnGeldzaken CSV prepared for supervised import.",
+        )
+        operations.record_audit_event.assert_any_call(
+            "workflow.document.supervised_submission_required",
+            "bookkeeping_document",
+            "12",
+            ANY,
+        )
+        with open(self.config["workflow_state_file"], "r", encoding="utf-8") as handle:
+            workflow_state = json.load(handle)
+        self.assertEqual(
+            workflow_state["source_documents"]["gmail:doc1"]["status"],
+            "needs_supervised_external_submission",
+        )
+        operations.update_workflow_run.assert_called_with(
+            34,
+            status="completed_with_review",
+            documentsImported=1,
+            documentsProcessed=1,
+            documentsNeedingReview=1,
+        )
+
     def test_fetch_errors_are_recovered_and_run_is_marked_failed(self):
         self.mocks["GmailFetcher"].return_value.fetch_documents.side_effect = Exception("Fetch error")
         self.mocks["DriveFetcher"].return_value.fetch_documents.return_value = []

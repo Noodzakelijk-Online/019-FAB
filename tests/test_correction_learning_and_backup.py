@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import zipfile
 
 from src.backup.backup_manager import BackupManager
 from src.learning.correction_learning import CorrectionLearningService
@@ -60,6 +61,25 @@ class TestCorrectionLearningAndBackup(unittest.TestCase):
         self.assertTrue(os.path.exists(result["path"]))
         backups = manager.list_backups()
         self.assertEqual(len(backups), 1)
+
+    def test_default_backup_includes_mijngeldzaken_supervised_artifacts(self):
+        export_dir = os.path.join(self.tempdir.name, "mijngeldzaken-exports")
+        os.makedirs(export_dir)
+        artifact_path = os.path.join(export_dir, "mijngeldzaken_import_doc-1.csv")
+        with open(artifact_path, "w", encoding="utf-8") as handle:
+            handle.write("Datum;Bedrag\n2026-07-10;10.00\n")
+        config = {**self.config, "mijngeldzaken_export_dir": export_dir}
+
+        manager = BackupManager(config)
+        result = manager.perform_backup()
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn(export_dir, result["included_paths"])
+        with zipfile.ZipFile(result["path"], "r") as archive:
+            self.assertIn(
+                "mijngeldzaken-exports/mijngeldzaken_import_doc-1.csv",
+                {name.replace("\\", "/") for name in archive.namelist()},
+            )
 
 
 if __name__ == "__main__":

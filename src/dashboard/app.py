@@ -161,6 +161,19 @@ def create_app(config: Dict[str, Any] = None) -> Flask:
         payload = request.get_json(silent=True) or {}
         return jsonify(posting_approval.reject_attempt(attempt_id, reason=payload.get("reason", "Rejected from dashboard")))
 
+    @app.post("/posting-attempts/<int:attempt_id>/complete-supervised")
+    @require_auth
+    def complete_supervised_posting_attempt(attempt_id: int):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(posting_approval.complete_supervised_attempt(
+            attempt_id,
+            confirmation=str(payload.get("confirmation") or ""),
+            completed_by="dashboard_user",
+            external_id=payload.get("external_id"),
+            evidence=payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
+            reason=payload.get("reason", "Supervised external submission completed from dashboard"),
+        ))
+
     @app.get("/reconciliation-results")
     @require_auth
     def reconciliation_results():

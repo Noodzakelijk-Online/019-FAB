@@ -1,10 +1,12 @@
+import json
 import os
 import tempfile
 import unittest
 
-from src.data_entry.posting_approval import PostingApprovalService
+from src.data_entry.posting_approval import PostingApprovalService, SUPERVISED_COMPLETION_PHRASE
 from src.data_entry.posting_executor import PostingExecutor
 from src.data_entry.safe_posting import SafePostingService
+from src.dashboard.app import create_app
 from src.storage.database import Database
 
 
@@ -27,6 +29,24 @@ class DeferredRateLimitHandler:
             "retry_after_seconds": 90,
             "requires_manual_review": False,
             "rate_limit": {"name": "WaveApps", "quotaExhausted": False},
+        }
+
+
+class SupervisedMijngeldzakenHandler:
+    def enter_data(self, categorized_data):
+        return {
+            "status": "supervised_action_required",
+            "message": "CSV prepared for supervised import.",
+            "artifact": {
+                "path": "C:/private/fab/mijngeldzaken.csv",
+                "filename": "mijngeldzaken.csv",
+                "sha256": "a" * 64,
+                "format": "csv",
+                "row_count": 1,
+            },
+            "external_submission": "not_executed",
+            "requires_supervision": True,
+            "credentials_used": False,
         }
 
 
@@ -113,6 +133,88 @@ class TestPostingExecutor(unittest.TestCase):
         audit_actions = [entry["action"] for entry in self.database.fetch_all("SELECT * FROM audit_log")]
         self.assertIn("retry_deferred", audit_actions)
         self.assertIn("execution_deferred_rate_limit", audit_actions)
+
+    def test_mijngeldzaken_execution_pauses_for_supervision_without_retry_or_failure(self):
+        attempt_id = self._create_approved_attempt()
+        executor = PostingExecutor(self.config, handlers={"mijngeldzaken": SupervisedMijngeldzakenHandler()})
+
+        result = executor.execute_attempt(attempt_id)
+
+        self.assertEqual(result["status"], "supervision_required")
+        attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
+        document = self.database.fetch_one("SELECT * FROM documents WHERE id = ?", ("doc-1",))
+        review = self.database.fetch_one(
+            "SELECT * FROM manual_review_items WHERE document_id = ? AND reason = ?",
+            ("doc-1", "mijngeldzaken_supervision_required"),
+        )
+        self.assertEqual(attempt["status"], "supervision_required")
+        self.assertEqual(document["current_state"], "awaiting_supervised_submission")
+        self.assertEqual(review["status"], "pending")
+        self.assertEqual(self.database.fetch_all("SELECT * FROM retry_queue"), [])
+        audit_actions = [entry["action"] for entry in self.database.fetch_all("SELECT * FROM audit_log")]
+        self.assertIn("execution_paused_for_supervision", audit_actions)
+        self.assertNotIn("posting_failed", audit_actions)
+
+        approval = PostingApprovalService(self.config)
+        blocked = approval.complete_supervised_attempt(attempt_id, confirmation="wrong")
+        completed = approval.complete_supervised_attempt(
+            attempt_id,
+            confirmation=SUPERVISED_COMPLETION_PHRASE,
+            completed_by="tester",
+            external_id="mgz-import-2026-07-10",
+            evidence={
+                "artifact_sha256": "a" * 64,
+                "note": "Observed import confirmation",
+                "password": "must-not-be-logged",
+            },
+        )
+
+        self.assertEqual(blocked["status"], "confirmation_required")
+        self.assertEqual(completed["status"], "posted")
+        attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
+        document = self.database.fetch_one("SELECT * FROM documents WHERE id = ?", ("doc-1",))
+        review = self.database.fetch_one("SELECT * FROM manual_review_items WHERE id = ?", (review["id"],))
+        completion_audit = self.database.fetch_one(
+            "SELECT * FROM audit_log WHERE entity_type = 'posting_attempt' AND entity_id = ? AND action = ?",
+            (str(attempt_id), "supervised_submission_completed"),
+        )
+        self.assertEqual(attempt["status"], "posted")
+        self.assertEqual(attempt["external_id"], "mgz-import-2026-07-10")
+        self.assertEqual(document["current_state"], "posted")
+        self.assertEqual(review["status"], "resolved")
+        self.assertNotIn("must-not-be-logged", json.dumps(completion_audit, sort_keys=True))
+
+    def test_dashboard_records_supervised_completion_only_with_exact_confirmation(self):
+        attempt_id = self._create_approved_attempt()
+        PostingExecutor(
+            self.config,
+            handlers={"mijngeldzaken": SupervisedMijngeldzakenHandler()},
+        ).execute_attempt(attempt_id)
+        app = create_app({**self.config, "dashboard_access_token": "dashboard-token"})
+        client = app.test_client()
+        headers = {"X-FAB-Token": "dashboard-token"}
+
+        blocked = client.post(
+            f"/posting-attempts/{attempt_id}/complete-supervised",
+            headers=headers,
+            json={"confirmation": "wrong"},
+        )
+        completed = client.post(
+            f"/posting-attempts/{attempt_id}/complete-supervised",
+            headers=headers,
+            json={
+                "confirmation": SUPERVISED_COMPLETION_PHRASE,
+                "external_id": "mgz-dashboard-import",
+                "evidence": {"receipt_reference": "confirmation-screen"},
+            },
+        )
+
+        self.assertEqual(blocked.status_code, 200)
+        self.assertEqual(blocked.get_json()["status"], "confirmation_required")
+        self.assertEqual(completed.status_code, 200)
+        self.assertEqual(completed.get_json()["status"], "posted")
+        attempt = self.database.fetch_one("SELECT * FROM posting_attempts WHERE id = ?", (attempt_id,))
+        self.assertEqual(attempt["external_id"], "mgz-dashboard-import")
 
 
 if __name__ == "__main__":

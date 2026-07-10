@@ -1,17 +1,12 @@
-from typing import Dict, Any, List
-# from playwright.sync_api import sync_playwright # Uncomment if direct browser interaction is needed
+from typing import Dict, Any
 
 class MijngeldzakenAnalyzer:
     """Analyzes existing Mijngeldzaken data to learn categorization patterns."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.username = self.config.get("mijngeldzaken_username")
-        self.password = self.config.get("mijngeldzaken_password")
-        self.login_url = self.config.get("mijngeldzaken_login_url", "https://www.mijngeldzaken.nl/login")
         # Data export/analysis from Mijngeldzaken is challenging via automation.
-        # A realistic approach might involve the user manually exporting data
-        # and the system processing that export file.
+        # FAB learns from a user-owned export instead of storing login secrets.
 
     def analyze_data(self, export_file_path: str) -> Dict[str, Any]:
         """Analyzes data from a Mijngeldzaken export file (e.g., CSV)."""
@@ -55,25 +50,4 @@ class MijngeldzakenAnalyzer:
         return {
             "description_keywords_map": final_keyword_map
         }
-
-    # Direct browser automation for data export is complex and fragile.
-    # The method below is commented out as it's not the recommended approach.
-    # def _fetch_data_via_browser(self) -> List[Dict[str, Any]]:
-    #     """Attempts to fetch data directly via browser automation (complex and fragile)."""
-    #     if not self.username or not self.password:
-    #         print("Mijngeldzaken credentials not configured for browser fetching.")
-    #         return []
-    #     
-    #     transactions = []
-    #     try:
-    #         with sync_playwright() as p:
-    #             browser = p.chromium.launch(headless=True)
-    #             page = browser.new_page()
-    #             # ... browser automation steps to login and navigate to data/export page ...
-    #             # ... logic to scrape or trigger export ...
-    #             browser.close()
-    #     except Exception as e:
-    #         print(f"Error fetching Mijngeldzaken data via browser: {e}")
-    #     return transactions
-
 

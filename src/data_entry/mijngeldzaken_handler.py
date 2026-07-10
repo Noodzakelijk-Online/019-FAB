@@ -1,103 +1,161 @@
-from typing import Dict, Any
-import csv
-import os
-import tempfile
+from __future__ import annotations
 
-try:
-    from playwright.sync_api import sync_playwright
-except ImportError:
-    sync_playwright = None
+import csv
+import hashlib
+import io
+import os
+import re
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Iterable
 
 from src.data_entry.base import BaseDataEntryHandler
+from src.data_entry.mijngeldzaken_surface import (
+    MIJNGELDZAKEN_IMPORT_COLUMNS,
+    build_mijngeldzaken_import_row,
+)
+
 
 class MijngeldzakenHandler(BaseDataEntryHandler):
-    """Handles data entry into mijngeldzaken.nl via automated browser upload."""
+    """Prepare a reviewable MijnGeldzaken import for supervised submission.
+
+    MijnGeldzaken does not expose a supported bookkeeping write API for this
+    flow. FAB therefore never signs in with a stored username/password here.
+    Approved records become durable CSV artifacts and remain explicitly
+    pending until a user completes the external import in a supervised session.
+    """
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.username = self.config.get("mijngeldzaken_username")
-        self.password = self.config.get("mijngeldzaken_password")
-        self.login_url = self.config.get("mijngeldzaken_login_url", "https://www.mijngeldzaken.nl/login")
-        self.import_url = self.config.get("mijngeldzaken_import_url", "https://www.mijngeldzaken.nl/import")
-        self.csv_template = self.config.get("mijngeldzaken_csv_template", {})
+        self.csv_template = self.config.get("mijngeldzaken_csv_template") or {}
+        self.export_dir = Path(
+            self.config.get("mijngeldzaken_export_dir")
+            or self.config.get("operations_mijngeldzaken_export_dir")
+            or "data/exports/mijngeldzaken"
+        ).expanduser()
 
-    def _generate_csv(self, data: Dict[str, Any], filename: str) -> str:
-        csv_dir = self.config.get("temp_dir") or tempfile.gettempdir()
-        os.makedirs(csv_dir, exist_ok=True)
-        csv_path = os.path.join(csv_dir, filename)
-        with open(csv_path, "w", newline="") as csvfile:
-            fieldnames = self.csv_template.get("columns", [])
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=self.csv_template.get("delimiter", ";"))
-            
-            writer.writeheader()
-            # Map your processed_data to the CSV template
-            row = {}
-            for col, source_key in self.csv_template.get("mapping", {}).items():
-                # This is a simplified mapping. Real implementation needs robust type conversion and formatting.
-                if source_key == "category":
-                    row[col] = self._map_category_to_mijngeldzaken(data.get(source_key))
-                elif source_key == "transaction_date":
-                    # Assuming date is in YYYY-MM-DD, convert to DD-MM-YYYY if needed
-                    date_obj = data.get("extracted_data", {}).get(source_key)
-                    if date_obj:
-                        row[col] = date_obj # Needs proper date formatting
-                else:
-                    row[col] = data.get("extracted_data", {}).get(source_key)
-            writer.writerow(row)
-        return csv_path
+    def _generate_csv(self, data: Dict[str, Any], filename: str | None = None) -> str:
+        csv_bytes = self._render_csv(data).encode("utf-8-sig")
+        checksum = hashlib.sha256(csv_bytes).hexdigest()
+        document_id = _safe_filename_segment(data.get("document_id") or "document")
+        attempt_id = _safe_filename_segment(data.get("posting_attempt_id") or "draft")
+        resolved_filename = filename or (
+            f"mijngeldzaken_import_{attempt_id}_{document_id}_{checksum[:12]}.csv"
+        )
 
-    def _map_category_to_mijngeldzaken(self, category: str) -> str:
-        # This mapping should be configurable
-        mapping = self.config.get("mijngeldzaken_category_mapping", {})
-        return mapping.get(category, "Overig") # Default to 'Overig' or a manual review category
+        export_dir = self.export_dir.resolve()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = export_dir / Path(resolved_filename).name
+
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".fab-mijngeldzaken-",
+            suffix=".tmp",
+            dir=str(export_dir),
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(csv_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, csv_path)
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+            raise
+        return str(csv_path)
+
+    def _render_csv(self, data: Dict[str, Any]) -> str:
+        columns = [str(column) for column in self.csv_template.get("columns") or MIJNGELDZAKEN_IMPORT_COLUMNS]
+        mapping = self.csv_template.get("mapping") or {}
+        delimiter = str(
+            self.csv_template.get("delimiter")
+            or self.config.get("mijngeldzaken_csv_delimiter")
+            or ";"
+        )
+        if len(delimiter) != 1:
+            raise ValueError("mijngeldzaken_csv_delimiter must be exactly one character")
+
+        if mapping:
+            row = {
+                column: self._mapped_value(data, source_key)
+                for column, source_key in mapping.items()
+            }
+        else:
+            row = build_mijngeldzaken_import_row(
+                data,
+                self._map_category_to_mijngeldzaken(data.get("category")),
+                default_account=str(self.config.get("mijngeldzaken_default_account") or "Huishouden"),
+            )
+
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            buffer,
+            fieldnames=columns,
+            delimiter=delimiter,
+            extrasaction="ignore",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerow({column: row.get(column, "") for column in columns})
+        return buffer.getvalue()
+
+    def _mapped_value(self, data: Dict[str, Any], source_key: Any) -> Any:
+        key = str(source_key or "")
+        if key == "category":
+            return self._map_category_to_mijngeldzaken(data.get("category"))
+        return _nested_value(data, key.split("."))
+
+    def _map_category_to_mijngeldzaken(self, category: Any) -> str:
+        mapping = self.config.get("mijngeldzaken_category_mapping") or {}
+        return str(mapping.get(category, category or "Overig"))
 
     def enter_data(self, categorized_data: Dict[str, Any]) -> Dict[str, Any]:
-        if not self.username or not self.password:
-            return {"status": "failure", "message": "Mijngeldzaken credentials not configured.", "requires_manual_review": True}
-
-        if sync_playwright is None:
+        try:
+            csv_file_path = self._generate_csv(categorized_data)
+            with open(csv_file_path, "rb") as handle:
+                checksum = hashlib.sha256(handle.read()).hexdigest()
+        except Exception as exc:
             return {
                 "status": "failure",
-                "message": "Playwright is not installed; browser upload is unavailable.",
+                "message": f"MijnGeldzaken import artifact could not be prepared: {exc}",
                 "requires_manual_review": True,
             }
 
-        rate_limit_result = self.acquire_outbound_slot("mijngeldzaken")
-        if rate_limit_result:
-            return rate_limit_result
-
-        csv_filename = f"mijngeldzaken_import_{categorized_data['document_id']}.csv"
-        csv_file_path = self._generate_csv(categorized_data, csv_filename)
-
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True) # Set to False for debugging UI
-                page = browser.new_page()
-
-                # Login
-                page.goto(self.login_url)
-                page.fill("input[name=\"username\"]", self.username)
-                page.fill("input[name=\"password\"]", self.password)
-                page.click("button[type=\"submit\"]")
-                page.wait_for_url(self.import_url) # Wait for successful login redirect
-
-                # Navigate to import page and upload CSV
-                page.goto(self.import_url)
-                page.set_input_files("input[type=\"file\"]", csv_file_path)
-                page.click("button:has-text(\"Upload\")") # Assuming an upload button
-                
-                # Wait for upload confirmation or success message
-                page.wait_for_selector(".success-message", timeout=10000) # Adjust selector as needed
-                status_message = page.inner_text(".success-message")
-
-                browser.close()
-                return {"status": "success", "message": f"Successfully uploaded to Mijngeldzaken: {status_message}"}
-
-        except Exception as e:
-            print(f"Error during Mijngeldzaken automation: {e}")
-            return {"status": "failure", "message": f"Mijngeldzaken upload failed: {e}", "requires_manual_review": True}
-        finally:
-            if os.path.exists(csv_file_path):
-                os.remove(csv_file_path) # Clean up generated CSV
+        artifact = {
+            "format": "csv",
+            "path": csv_file_path,
+            "filename": os.path.basename(csv_file_path),
+            "sha256": checksum,
+            "row_count": 1,
+        }
+        return {
+            "status": "supervised_action_required",
+            "message": (
+                "MijnGeldzaken CSV prepared. Complete the import in a supervised "
+                "user-owned session, then record the external submission in FAB."
+            ),
+            "artifact": artifact,
+            "artifact_path": csv_file_path,
+            "external_submission": "not_executed",
+            "requires_supervision": True,
+            "requires_manual_review": True,
+            "credentials_used": False,
+        }
 
 
+def _nested_value(data: Dict[str, Any], path: Iterable[str]) -> Any:
+    current: Any = data
+    for part in path:
+        if not part or not isinstance(current, dict):
+            return ""
+        current = current.get(part)
+    return "" if current is None else current
+
+
+def _safe_filename_segment(value: Any) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip())
+    return text.strip(".-")[:80] or "item"

@@ -160,7 +160,7 @@ class LocalReadinessService:
             },
             _python_dependency("PIL", "Pillow", "Image loading for OCR processors"),
             _python_dependency("googleapiclient", "Google API client", "Gmail, Drive, Photos, and Vision integrations"),
-            _python_dependency("playwright", "Playwright", "MijnGeldzaken browser automation"),
+            _python_dependency("playwright", "Playwright", "Optional supervised browser tooling"),
         ]
 
     def _paths(self) -> Dict[str, Any]:
@@ -176,6 +176,17 @@ class LocalReadinessService:
         return {
             "ledger": _path_status("ledger", "Operations ledger", self.ledger_path, kind="file"),
             "backupDir": _path_status("backupDir", "Backup directory", backup_dir, kind="directory"),
+            "mijngeldzakenExportDir": _path_status(
+                "mijngeldzakenExportDir",
+                "MijnGeldzaken supervised exports",
+                _config_value(
+                    self.config,
+                    "mijngeldzaken_export_dir",
+                    "operations_mijngeldzaken_export_dir",
+                    default="data/exports/mijngeldzaken",
+                ),
+                kind="directory",
+            ),
             "intake": [
                 _path_status(f"intake_{index + 1}", f"Intake folder {index + 1}", path, kind="directory")
                 for index, path in enumerate(self.intake_paths)
@@ -198,8 +209,8 @@ class LocalReadinessService:
             _credential_value("wave_business_id", "Waveapps Business ID", self.config, "waveapps_business_id", "waveapps_business.business_id", secret=False),
             _credential_value("wave_personal_token", "Waveapps Personal token", self.config, "waveapps_personal_access_token", "waveapps_personal.access_token"),
             _credential_value("wave_personal_id", "Waveapps Personal ID", self.config, "waveapps_personal_id", "waveapps_personal.personal_id", secret=False),
-            _credential_value("mijngeldzaken_username", "MijnGeldzaken username", self.config, "mijngeldzaken_username", "mijngeldzaken.username", secret=False),
-            _credential_value("mijngeldzaken_password", "MijnGeldzaken password", self.config, "mijngeldzaken_password", "mijngeldzaken.password"),
+            _credential_value("mijngeldzaken_username", "Legacy MijnGeldzaken username (ignored)", self.config, "mijngeldzaken_username", "mijngeldzaken.username", secret=False),
+            _credential_value("mijngeldzaken_password", "Legacy MijnGeldzaken password (ignored)", self.config, "mijngeldzaken_password", "mijngeldzaken.password"),
             _credential_value("banking_credentials", "Banking API credentials", self.config, "banking_api_credentials", "banking.api_credentials", "banking_api_client_secret", "banking.client_secret"),
             _credential_value("api_token", "FAB local API token", self.config, "fab_local_api_token", "fab_operations_api_token", "operations_api_token", "operations.api_token", "api_token"),
         ]
@@ -235,13 +246,12 @@ class LocalReadinessService:
             _source_status(
                 "mijngeldzaken",
                 "MijnGeldzaken",
-                configured=credential_map["mijngeldzaken_username"]["configured"] or credential_map["mijngeldzaken_password"]["configured"],
-                ready=(
-                    credential_map["mijngeldzaken_username"]["configured"]
-                    and credential_map["mijngeldzaken_password"]["configured"]
-                    and dependencies["playwright"]["status"] == "ok"
+                configured=paths["mijngeldzakenExportDir"]["configured"],
+                ready=paths["mijngeldzakenExportDir"]["status"] == "ok",
+                details=(
+                    "FAB can prepare checksum-bound import artifacts. External submission "
+                    "requires a supervised user-owned session; stored passwords are ignored."
                 ),
-                details="Browser automation target; actions remain supervised/approval-gated.",
             ),
             _pair_source(
                 "waveapps_business",
@@ -343,7 +353,12 @@ class LocalReadinessService:
                     "message": f"{dependency['label']} is not ready.",
                     "nextAction": dependency["details"],
                 })
-        for path in [paths["ledger"], paths["backupDir"], *paths["intake"]]:
+        for path in [
+            paths["ledger"],
+            paths["backupDir"],
+            paths["mijngeldzakenExportDir"],
+            *paths["intake"],
+        ]:
             if path["configured"] and not path["parentWritable"]:
                 issues.append({
                     "severity": "blocked",

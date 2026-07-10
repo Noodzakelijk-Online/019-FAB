@@ -18,6 +18,7 @@ class BackupManager:
             self.config.get("manual_review_queue_file", "data/manual_review_queue.json"),
             self.config.get("local_input_dir", "data/sort_out"),
             self.config.get("bank_import_dir", "data/bank_exports"),
+            self.config.get("mijngeldzaken_export_dir", "data/exports/mijngeldzaken"),
         ]
         return [path for path in paths if path and os.path.exists(path)]
 
