@@ -15,6 +15,7 @@ from src.data_entry.mijngeldzaken_surface import (
 )
 from src.data_entry.waveapps_business_handler import WaveappsBusinessHandler
 from src.data_entry.waveapps_personal_handler import WaveappsPersonalHandler
+from src.utils.rate_limiter import reset_all_limiters
 from src.data_entry.waveapps_surface import (
     WAVE_SURFACE_CATALOG,
     build_wave_report_payload,
@@ -30,6 +31,7 @@ from src.data_entry.waveapps_surface import (
 class TestDataEntry(unittest.TestCase):
 
     def setUp(self):
+        reset_all_limiters()
         self.config = {
             "mijngeldzaken_username": "test_user",
             "mijngeldzaken_password": "test_pass",
@@ -69,6 +71,9 @@ class TestDataEntry(unittest.TestCase):
             "category": "Personal",
             "confidence_score": 0.95
         }
+
+    def tearDown(self):
+        reset_all_limiters()
 
     @patch("src.data_entry.mijngeldzaken_handler.sync_playwright")
     def test_mijngeldzaken_handler(self, mock_sync_playwright):

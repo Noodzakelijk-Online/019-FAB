@@ -55,15 +55,19 @@ class MijngeldzakenHandler(BaseDataEntryHandler):
         if not self.username or not self.password:
             return {"status": "failure", "message": "Mijngeldzaken credentials not configured.", "requires_manual_review": True}
 
-        csv_filename = f"mijngeldzaken_import_{categorized_data['document_id']}.csv"
-        csv_file_path = self._generate_csv(categorized_data, csv_filename)
-
         if sync_playwright is None:
             return {
                 "status": "failure",
                 "message": "Playwright is not installed; browser upload is unavailable.",
                 "requires_manual_review": True,
             }
+
+        rate_limit_result = self.acquire_outbound_slot("mijngeldzaken")
+        if rate_limit_result:
+            return rate_limit_result
+
+        csv_filename = f"mijngeldzaken_import_{categorized_data['document_id']}.csv"
+        csv_file_path = self._generate_csv(categorized_data, csv_filename)
 
         try:
             with sync_playwright() as p:

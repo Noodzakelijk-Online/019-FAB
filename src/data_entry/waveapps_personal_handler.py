@@ -71,6 +71,14 @@ class WaveappsPersonalHandler(BaseDataEntryHandler):
         # Note: The above mutation is highly simplified. Waveapps API requires more fields
         # like account ID, vendor ID, etc. You would need to query these first.
 
+        rate_limit_result = self.acquire_outbound_slot("waveapps")
+        if rate_limit_result:
+            rate_limit_result.update({
+                "target_surface": destination["target_surface"],
+                "action_plan": plan_wave_action(destination["target_surface"], action_id, action_payload),
+            })
+            return rate_limit_result
+
         try:
             response = requests.post(self.api_url, headers=self.headers, json={
                 "query": mutation

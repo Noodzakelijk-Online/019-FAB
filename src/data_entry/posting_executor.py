@@ -11,6 +11,8 @@ from src.storage.database import Database
 class PostingExecutor:
     """Executes approved posting attempts against configured bookkeeping handlers."""
 
+    DEFERRED_HANDLER_STATUSES = {"rate_limited", "quota_exhausted"}
+
     def __init__(self, config: Dict[str, Any], handlers: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.database = Database(config)
@@ -85,6 +87,9 @@ class PostingExecutor:
             self._mark_document_posted(categorized_data.get("document_id"), result)
             return {"attempt_id": attempt_id, "status": "posted", "result": result}
 
+        if result.get("status") in self.DEFERRED_HANDLER_STATUSES:
+            return self._defer_attempt(attempt_id, payload, categorized_data, result)
+
         self._handle_failure(attempt_id, payload, result)
         document_id = categorized_data.get("document_id")
         if document_id:
@@ -98,7 +103,7 @@ class PostingExecutor:
                 return {"status": "not_found", "attempt_id": attempt_id}
             allowed_statuses = {"approved"}
             if force:
-                allowed_statuses.update({"posting_failed", "posting_in_progress"})
+                allowed_statuses.update({"posting_failed", "posting_in_progress", "posting_deferred"})
             if attempt["status"] not in allowed_statuses:
                 return {"status": "not_approved", "attempt_id": attempt_id, "current_status": attempt["status"]}
             cursor = connection.execute(
@@ -108,6 +113,56 @@ class PostingExecutor:
             if cursor.rowcount != 1:
                 return {"status": "already_claimed", "attempt_id": attempt_id}
             return {"status": "claimed", "attempt": dict(attempt)}
+
+    def _defer_attempt(
+        self,
+        attempt_id: int,
+        payload: Dict[str, Any],
+        categorized_data: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        reason = str(result.get("message") or "Downstream rate limit is temporarily unavailable.")
+        retry_after_seconds = _positive_int(
+            result.get("retry_after_seconds"),
+            default=_positive_int(self.config.get("rate_limit_retry_delay_seconds"), default=60),
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE posting_attempts SET status = 'posting_deferred', updated_at = ? WHERE id = ?",
+                (self.database.now(), attempt_id),
+            )
+        retry = self.retry_manager.defer_retry(
+            "posting_attempt",
+            str(attempt_id),
+            "execute_posting",
+            reason,
+            payload,
+            delay_seconds=retry_after_seconds,
+        )
+        details = {
+            "target_system": categorized_data.get("target_system"),
+            "document_id": categorized_data.get("document_id"),
+            "provider_status": result.get("status"),
+            "retry_after_seconds": retry_after_seconds,
+            "next_retry_at": retry.get("next_retry_at"),
+            "rate_limit": result.get("rate_limit"),
+        }
+        self.database.add_audit_log(
+            "posting_attempt",
+            str(attempt_id),
+            "execution_deferred_rate_limit",
+            None,
+            details,
+            reason,
+            "system",
+        )
+        return {
+            "attempt_id": attempt_id,
+            "status": "posting_deferred",
+            "defer_reason": result.get("status"),
+            "retry": retry,
+            "result": result,
+        }
 
     def _handle_failure(self, attempt_id: int, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
         self.approval_service.mark_failed(attempt_id, result)
@@ -144,3 +199,10 @@ class PostingExecutor:
                     (self.database.now(), document_id),
                 )
         self.database.add_audit_log("document", document_id, "posted", None, result, "Posting attempt executed successfully", "system")
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        return max(int(float(value)), 1)
+    except (TypeError, ValueError):
+        return default

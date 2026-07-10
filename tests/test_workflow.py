@@ -350,6 +350,54 @@ class TestWorkflow(unittest.TestCase):
             documentsNeedingReview=0,
         )
 
+    def test_workflow_defers_rate_limited_data_entry_without_review_or_failure(self):
+        self._configure_successful_run(
+            entry_result={
+                "status": "rate_limited",
+                "message": "WaveApps dispatch deferred because its configured quota is currently unavailable.",
+                "retryable": True,
+                "retry_after_seconds": 60,
+                "requires_manual_review": False,
+                "rate_limit": {"name": "WaveApps", "quotaExhausted": False},
+            }
+        )
+
+        controller = WorkflowController(self.config)
+        controller.run_workflow()
+
+        operations = self.mocks["OperationsClient"].return_value
+        self.mocks["AutomatedReconciliation"].return_value.reconcile.assert_called_once_with([], [])
+        operations.create_routing_attempt.assert_any_call(
+            12,
+            "waveapps_business",
+            "deferred",
+            workflow_run_id=34,
+            message="WaveApps dispatch deferred because its configured quota is currently unavailable.",
+            metadata=ANY,
+        )
+        operations.update_document.assert_any_call(12, ANY, processing_status="deferred")
+        operations.record_audit_event.assert_any_call(
+            "workflow.document.data_entry_deferred",
+            "bookkeeping_document",
+            "12",
+            ANY,
+        )
+        self.assertNotIn("data_entry_failed", [call.args[1] for call in operations.create_review_item.call_args_list])
+        with open(self.config["workflow_state_file"], "r", encoding="utf-8") as handle:
+            workflow_state = json.load(handle)
+        self.assertEqual(
+            workflow_state["source_documents"]["gmail:doc1"]["status"],
+            "deferred_data_entry",
+        )
+        self.assertEqual(workflow_state["known_documents"], [])
+        operations.update_workflow_run.assert_called_with(
+            34,
+            status="completed",
+            documentsImported=1,
+            documentsProcessed=1,
+            documentsNeedingReview=0,
+        )
+
     def test_fetch_errors_are_recovered_and_run_is_marked_failed(self):
         self.mocks["GmailFetcher"].return_value.fetch_documents.side_effect = Exception("Fetch error")
         self.mocks["DriveFetcher"].return_value.fetch_documents.return_value = []

@@ -743,6 +743,34 @@ class WorkflowController:
                         )
                     else:
                         self.logger.warning(f"Failed to enter {document_id} into {target_system}: {entry_result['message']}")
+                        if entry_result.get("status") in {"rate_limited", "quota_exhausted"}:
+                            self.operations_client.create_routing_attempt(
+                                operations_document_id,
+                                self._operations_target(target_system),
+                                "deferred",
+                                workflow_run_id=workflow_run_id,
+                                message=entry_result["message"],
+                                metadata={"route": route_result, "entry_result": entry_result},
+                            )
+                            self.operations_client.update_document(
+                                operations_document_id,
+                                doc_data,
+                                processing_status="deferred",
+                            )
+                            self.operations_client.record_audit_event(
+                                "workflow.document.data_entry_deferred",
+                                "bookkeeping_document",
+                                str(operations_document_id or document_id),
+                                {
+                                    "documentId": document_id,
+                                    "targetSystem": target_system,
+                                    "providerStatus": entry_result.get("status"),
+                                    "retryAfterSeconds": entry_result.get("retry_after_seconds"),
+                                    "rateLimit": entry_result.get("rate_limit"),
+                                },
+                            )
+                            self._mark_source_document(doc_data, "deferred_data_entry")
+                            continue
                         route_status = "requires_review" if entry_result.get("requires_manual_review", False) else "failed"
                         self.operations_client.create_routing_attempt(
                             operations_document_id,

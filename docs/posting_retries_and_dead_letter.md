@@ -2,6 +2,24 @@
 
 FAB now treats approved posting execution as a controlled external operation.
 
+## Provider throttling and daily quotas
+
+FAB treats a configured provider throttle differently from a failed posting.
+Immediately before a Waveapps API request or MijnGeldzaken browser upload, the
+handler reserves a slot from the shared API quota guard. If no slot is
+available, the posting changes to `posting_deferred` and is placed back into
+the retry queue without increasing its failure count, creating a dead-letter
+item, or opening manual review.
+
+```ini
+outbound_rate_limit_max_wait_seconds = 0
+rate_limit_retry_delay_seconds = 60
+quota_exhausted_retry_delay_seconds = 3600
+```
+
+The default is non-blocking so the worker stays responsive. `outbound_rate_limit_max_wait_seconds`
+can be set to a small positive number when waiting briefly is acceptable.
+
 ## Why this exists
 
 Bookkeeping postings must not be duplicated and must not disappear silently. External systems can fail, credentials can expire, browser automation can break, and network issues can happen. FAB therefore uses:

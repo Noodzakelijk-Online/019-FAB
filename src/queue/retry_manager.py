@@ -99,6 +99,68 @@ class RetryManager:
         self.database.add_audit_log(entity_type, entity_id, "retry_scheduled", None, {"operation": operation, "attempt_count": attempt_count, "next_retry_at": next_retry_at}, error, "system")
         return {"status": "retry_scheduled", "entity_type": entity_type, "entity_id": entity_id, "operation": operation, "attempt_count": attempt_count, "next_retry_at": next_retry_at}
 
+    def defer_retry(
+        self,
+        entity_type: str,
+        entity_id: str,
+        operation: str,
+        reason: str,
+        payload: Optional[Dict[str, Any]] = None,
+        delay_seconds: int = 60,
+    ) -> Dict[str, Any]:
+        """Schedule a known temporary pause without spending failure attempts."""
+        self.ensure_schema()
+        now = datetime.now(timezone.utc)
+        existing = self.database.fetch_one(
+            "SELECT * FROM retry_queue WHERE entity_type = ? AND entity_id = ? AND operation = ?",
+            (entity_type, entity_id, operation),
+        )
+        next_retry_at = (now + timedelta(seconds=max(int(delay_seconds), 1))).isoformat()
+        attempt_count = int(existing["attempt_count"]) if existing else 0
+        max_attempts = int(existing["max_attempts"]) if existing else self.default_max_attempts
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO retry_queue (
+                    entity_type, entity_id, operation, status, attempt_count, max_attempts,
+                    last_error, next_retry_at, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(entity_type, entity_id, operation) DO UPDATE SET
+                    status='pending',
+                    last_error=excluded.last_error,
+                    next_retry_at=excluded.next_retry_at,
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    entity_type,
+                    entity_id,
+                    operation,
+                    attempt_count,
+                    max_attempts,
+                    reason,
+                    next_retry_at,
+                    self.database.json_dumps(payload or {}),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        details = {
+            "operation": operation,
+            "attempt_count": attempt_count,
+            "next_retry_at": next_retry_at,
+            "reason": reason,
+        }
+        self.database.add_audit_log(entity_type, entity_id, "retry_deferred", None, details, reason, "system")
+        return {
+            "status": "retry_deferred",
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "operation": operation,
+            "attempt_count": attempt_count,
+            "next_retry_at": next_retry_at,
+        }
+
     def move_to_dead_letter(self, entity_type: str, entity_id: str, operation: str, error: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         self.ensure_schema()
         with self.database.connect() as connection:
