@@ -61,4 +61,12 @@ Each execution attempt is written to the audit log:
 
 ## Current Limitation
 
-The executor calls the current configured handlers. If a handler is still a placeholder or credentials are missing, the attempt will fail safely, be audit logged, and be sent to manual review rather than silently ignored.
+Wave expense execution uses the documented `moneyTransactionCreate` API contract.
+Before FAB can submit, each Wave target needs a verified anchor account ID and
+a category-to-account-ID mapping. FAB refuses to send a request when any of
+those are absent and sends the item to review instead. The configuration
+template shows the required fields under `[waveapps_business]` and
+`[waveapps_personal]`; keep OAuth tokens out of `config.ini`.
+
+MijnGeldzaken browser execution remains supervised and is still dependent on
+an explicitly approved export attempt and a verified current browser surface.

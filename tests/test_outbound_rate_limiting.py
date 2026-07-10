@@ -29,6 +29,8 @@ class TestOutboundRateLimiting(unittest.TestCase):
         handler = WaveappsBusinessHandler({
             "waveapps_business_access_token": "token",
             "waveapps_business_id": "business-id",
+            "waveapps_business_anchor_account_id": "anchor-account",
+            "waveapps_business_category_account_ids": {"Business": "expense-account"},
         })
 
         result = handler.enter_data(self.document)

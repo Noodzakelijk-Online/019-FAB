@@ -29,6 +29,8 @@ class TestConfigLoader(unittest.TestCase):
                     "[reconciliation]\n"
                     "reconciliation_threshold=0.05\n"
                     "reconciliation_date_tolerance_days=2\n"
+                    "[waveapps_business]\n"
+                    "category_account_ids={\"Office Supplies\": \"account-1\"}\n"
                 )
 
             config = ConfigLoader(config_file=config_path).get_all_config()
@@ -38,6 +40,7 @@ class TestConfigLoader(unittest.TestCase):
         self.assertEqual(config["google_drive_folder_id"], "sort-out")
         self.assertEqual(config["reconciliation_threshold"], "0.05")
         self.assertEqual(config["reconciliation_date_tolerance_days"], "2")
+        self.assertEqual(config["waveapps_business_category_account_ids"], {"Office Supplies": "account-1"})
 
     def test_direct_fab_local_environment_values_are_flat_aliases(self):
         with tempfile.TemporaryDirectory() as temp_dir:

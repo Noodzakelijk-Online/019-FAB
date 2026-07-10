@@ -1,4 +1,5 @@
 import configparser
+import json
 import os
 from typing import Any, Dict
 
@@ -55,6 +56,11 @@ class ConfigLoader:
             return False
         if lowered in {"none", "null"}:
             return None
+        if stripped.startswith(("{", "[")):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
         return stripped
 
     def _add_flat_aliases(self, config_data: Dict[str, Any]) -> None:

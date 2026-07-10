@@ -51,9 +51,13 @@ class TestDataEntry(unittest.TestCase):
             "waveapps_business_access_token": "business_token",
             "waveapps_business_id": "business_id",
             "waveapps_business_category_mapping": {"Business": "Office Supplies"},
+            "waveapps_business_anchor_account_id": "business-anchor-account",
+            "waveapps_business_category_account_ids": {"Office Supplies": "business-office-supplies-account"},
             "waveapps_personal_access_token": "personal_token",
             "waveapps_personal_id": "personal_id",
             "waveapps_personal_category_mapping": {"Handicaps": "Medical Expenses"},
+            "waveapps_personal_anchor_account_id": "personal-anchor-account",
+            "waveapps_personal_category_account_ids": {"Medical Expenses": "personal-medical-account"},
             "waveapps_handicap_tag": "#handicap"
         }
         self.dummy_doc_id = "doc123"
@@ -113,9 +117,9 @@ class TestDataEntry(unittest.TestCase):
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "data": {
-                "expenseCreate": {
+                "moneyTransactionCreate": {
                     "didSucceed": True,
-                    "expense": {"id": "new_expense_id"}
+                    "transaction": {"id": "new_expense_id"}
                 }
             }
         }
@@ -127,18 +131,23 @@ class TestDataEntry(unittest.TestCase):
         result = handler.enter_data(business_data)
 
         self.assertEqual(result["status"], "success")
-        self.assertIn("Expense created", result["message"])
+        self.assertIn("Money transaction created", result["message"])
         self.assertEqual(result["external_id"], "new_expense_id")
         self.assertEqual(result["target_surface"], "transactions")
         self.assertEqual(result["action_plan"]["action_id"], "transaction_add")
         self.assertTrue(result["action_plan"]["can_run_autonomously"])
+        request = mock_post.call_args.kwargs["json"]
+        self.assertIn("moneyTransactionCreate", request["query"])
+        self.assertEqual(request["variables"]["input"]["anchor"]["accountId"], "business-anchor-account")
+        self.assertEqual(request["variables"]["input"]["lineItems"][0]["accountId"], "business-office-supplies-account")
+        self.assertEqual(request["variables"]["input"]["anchor"]["direction"], "WITHDRAWAL")
 
         # Test API failure
         mock_response.json.return_value = {
             "data": {
-                "expenseCreate": {
+                "moneyTransactionCreate": {
                     "didSucceed": False,
-                    "errors": [{"message": "API Error", "code": "123"}]
+                    "inputErrors": [{"message": "API Error", "code": "123"}]
                 }
             }
         }
@@ -146,6 +155,12 @@ class TestDataEntry(unittest.TestCase):
         self.assertEqual(result["status"], "failure")
         self.assertIn("API Error", result["message"])
         self.assertTrue(result["requires_manual_review"])
+
+        self.config["waveapps_business_category_account_ids"] = {}
+        handler = WaveappsBusinessHandler(self.config)
+        result = handler.enter_data(business_data)
+        self.assertEqual(result["status"], "needs_review")
+        self.assertIn("categoryAccountId", result["missing_fields"])
 
         # Test CSV fallback
         self.config["waveapps_business_access_token"] = None
@@ -259,9 +274,9 @@ class TestDataEntry(unittest.TestCase):
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "data": {
-                "expenseCreate": {
+                "moneyTransactionCreate": {
                     "didSucceed": True,
-                    "expense": {"id": "new_personal_expense_id"}
+                    "transaction": {"id": "new_personal_expense_id"}
                 }
             }
         }
@@ -273,12 +288,15 @@ class TestDataEntry(unittest.TestCase):
         result = handler.enter_data(personal_data)
 
         self.assertEqual(result["status"], "success")
-        self.assertIn("Expense created", result["message"])
+        self.assertIn("Money transaction created", result["message"])
         self.assertEqual(result["external_id"], "new_personal_expense_id")
         self.assertEqual(result["target_surface"], "transactions")
         self.assertEqual(result["action_plan"]["action_id"], "transaction_add")
-        # Verify handicap tag was added to description in the API call
-        self.assertIn("#handicap", mock_post.call_args[1]["json"]["query"])
+        # Verify handicap tag was added to the GraphQL variables, not interpolated into the query.
+        request = mock_post.call_args.kwargs["json"]
+        self.assertIn("#handicap", request["variables"]["input"]["description"])
+        self.assertEqual(request["variables"]["input"]["anchor"]["accountId"], "personal-anchor-account")
+        self.assertEqual(request["variables"]["input"]["lineItems"][0]["accountId"], "personal-medical-account")
 
         # Test CSV fallback
         self.config["waveapps_personal_access_token"] = None
