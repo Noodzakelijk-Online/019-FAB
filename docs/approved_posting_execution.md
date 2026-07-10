@@ -10,17 +10,25 @@ FAB now separates posting into three stages:
 
 Approved posting execution is disabled unless the local config explicitly enables it.
 
+The legacy `WorkflowController` also defaults to draft-only operation. It will
+create an approval-required review item and an audited routing attempt instead
+of calling a Waveapps or MijnGeldzaken handler directly. Do not enable direct
+workflow dispatch in normal operation; use the export-attempt workflow so
+approval, retries, and results remain in the local ledger.
+
 Add these keys to the `[app]` section in `config/config.ini` when the operator is ready:
 
 ```ini
 execute_approved_postings = false
 worker_process_approved_postings = true
+workflow_execute_external_posting = false
 ```
 
 Meaning:
 
 - `execute_approved_postings = false` means approved posting attempts are not executed automatically.
 - `worker_process_approved_postings = true` means the worker will check the approved queue, but execution still respects `execute_approved_postings`.
+- `workflow_execute_external_posting = false` keeps the legacy pipeline from bypassing FAB's draft/approval process.
 
 To enable real execution after careful testing:
 

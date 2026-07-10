@@ -65,6 +65,10 @@ class WorkflowController:
         self.version_control = DocumentVersionControl(config)
         self.checkpoint_store = WorkflowCheckpointStore(config)
         self._review_document_ids = set()
+        self.workflow_execute_external_posting = _as_bool(
+            self.config.get("workflow_execute_external_posting"),
+            default=False,
+        )
         self.categorization_review_confidence_threshold = float(
             self.config.get(
                 "categorization_review_confidence_threshold",
@@ -704,6 +708,47 @@ class WorkflowController:
                 continue
             
             if target_system:
+                if not self.workflow_execute_external_posting:
+                    message = (
+                        "External bookkeeping submission is disabled for workflow runs. "
+                        "Prepare and approve the FAB export attempt before dispatch."
+                    )
+                    self.operations_client.create_routing_attempt(
+                        operations_document_id,
+                        self._operations_target(target_system),
+                        "approval_required",
+                        workflow_run_id=workflow_run_id,
+                        message=message,
+                        metadata={
+                            "route": route_result,
+                            "externalSubmission": "not_executed",
+                            "requiredSetting": "workflow_execute_external_posting",
+                        },
+                    )
+                    self.operations_client.update_document(
+                        operations_document_id,
+                        doc_data,
+                        processing_status="needs_review",
+                    )
+                    self._queue_manual_review(
+                        document_id,
+                        "external_posting_approval_required",
+                        message,
+                        operations_document_id,
+                    )
+                    self.operations_client.record_audit_event(
+                        "workflow.document.external_submission_blocked",
+                        "bookkeeping_document",
+                        str(operations_document_id or document_id),
+                        {
+                            "documentId": document_id,
+                            "targetSystem": target_system,
+                            "externalSubmission": "not_executed",
+                            "requiredSetting": "workflow_execute_external_posting",
+                        },
+                    )
+                    self._mark_source_document(doc_data, "needs_review_external_posting_approval")
+                    continue
                 try:
                     self.logger.info(f"Entering data for {document_id} into {target_system}...")
                     handler = self.data_entry_handlers[target_system]
@@ -922,6 +967,16 @@ class WorkflowController:
             },
         )
         self.logger.info("Automated bookkeeping workflow finished.")
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
 
 
 

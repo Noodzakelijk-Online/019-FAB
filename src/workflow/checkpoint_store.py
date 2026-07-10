@@ -33,6 +33,7 @@ class WorkflowCheckpointStore:
         "needs_review_budget_exceeded",
         "needs_review_data_entry_failed",
         "needs_review_data_entry_error",
+        "needs_review_external_posting_approval",
         "needs_review_routing_failed",
         "needs_review_no_target_system",
         "needs_review_unmatched_reconciliation",

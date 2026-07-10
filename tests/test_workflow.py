@@ -19,6 +19,7 @@ class TestWorkflow(unittest.TestCase):
             "error_recovery_max_retries": 1,
             "error_recovery_retry_delay_seconds": 0,
             "email_notifications_enabled": False,
+            "workflow_execute_external_posting": True,
             "mijngeldzaken_username": "test_user",
             "mijngeldzaken_password": "test_pass",
             "mijngeldzaken_login_url": "http://mijngeldzaken.test/login",
@@ -348,6 +349,48 @@ class TestWorkflow(unittest.TestCase):
             documentsImported=1,
             documentsProcessed=1,
             documentsNeedingReview=0,
+        )
+
+    def test_workflow_defaults_to_draft_first_external_posting(self):
+        self.config["workflow_execute_external_posting"] = False
+        self._configure_successful_run()
+
+        controller = WorkflowController(self.config)
+        controller.run_workflow()
+
+        operations = self.mocks["OperationsClient"].return_value
+        self.mocks["WaveappsBusinessHandler"].return_value.enter_data.assert_not_called()
+        operations.create_routing_attempt.assert_any_call(
+            12,
+            "waveapps_business",
+            "approval_required",
+            workflow_run_id=34,
+            message=ANY,
+            metadata=ANY,
+        )
+        operations.create_review_item.assert_any_call(
+            12,
+            "external_posting_approval_required",
+            ANY,
+        )
+        operations.record_audit_event.assert_any_call(
+            "workflow.document.external_submission_blocked",
+            "bookkeeping_document",
+            "12",
+            ANY,
+        )
+        with open(self.config["workflow_state_file"], "r", encoding="utf-8") as handle:
+            workflow_state = json.load(handle)
+        self.assertEqual(
+            workflow_state["source_documents"]["gmail:doc1"]["status"],
+            "needs_review_external_posting_approval",
+        )
+        operations.update_workflow_run.assert_called_with(
+            34,
+            status="completed_with_review",
+            documentsImported=1,
+            documentsProcessed=1,
+            documentsNeedingReview=1,
         )
 
     def test_workflow_defers_rate_limited_data_entry_without_review_or_failure(self):
