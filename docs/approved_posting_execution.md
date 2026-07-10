@@ -68,5 +68,10 @@ those are absent and sends the item to review instead. The configuration
 template shows the required fields under `[waveapps_business]` and
 `[waveapps_personal]`; keep OAuth tokens out of `config.ini`.
 
+Use the dashboard's **Refresh accounts** action or `POST /api/wave/accounts/discover`
+to read the current chart of accounts. FAB records the read as an audited Wave
+operation snapshot and shows whether each configured anchor/category ID still
+exists before an approved export is dispatched.
+
 MijnGeldzaken browser execution remains supervised and is still dependent on
 an explicitly approved export attempt and a verified current browser surface.

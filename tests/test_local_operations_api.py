@@ -1,11 +1,13 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
 from src.operations.local_ledger import LocalOperationsLedger
+from src.utils.rate_limiter import reset_all_limiters
 
 
 class TestLocalOperationsApi(unittest.TestCase):
@@ -1737,6 +1739,63 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("local_wave.action_plan_prepared", audit_actions)
             self.assertIn("local_wave.workflow_plan_prepared", audit_actions)
             self.assertIn("local_wave.report_result_captured", audit_actions)
+
+    @patch("src.data_entry.waveapps_account_discovery.requests.post")
+    def test_api_discovers_and_persists_verified_wave_accounts(self, mock_post):
+        reset_all_limiters()
+        self.addCleanup(reset_all_limiters)
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "data": {
+                "business": {
+                    "id": "business-1",
+                    "name": "FAB Test Business",
+                    "accounts": {
+                        "edges": [
+                            {"node": {"id": "anchor-1", "name": "Checking", "subtype": {"name": "Cash and Bank", "value": "CASH_AND_BANK"}}},
+                            {"node": {"id": "expense-1", "name": "Office Supplies", "subtype": {"name": "Expense", "value": "EXPENSE"}}},
+                        ],
+                    },
+                },
+            },
+        }
+        mock_post.return_value = response
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "waveapps_business_access_token": "business-secret-token",
+                "waveapps_business_id": "business-1",
+                "waveapps_business_anchor_account_id": "anchor-1",
+                "waveapps_business_category_account_ids": {"Office Supplies": "expense-1"},
+            })
+            client = app.test_client()
+
+            mappings = client.get("/api/wave/account-mappings")
+            discovery = client.post("/api/wave/accounts/discover", json={"targetSystem": "waveapps_business"})
+            snapshots = client.get("/api/wave/operations?actionId=chart_account_list_read")
+            audit = client.get("/api/audit")
+            dashboard = client.get("/")
+
+            self.assertEqual(mappings.status_code, 200)
+            self.assertTrue(mappings.get_json()["targets"][0]["configured"])
+            self.assertEqual(discovery.status_code, 200)
+            result = discovery.get_json()
+            self.assertTrue(result["mapping"]["verified"])
+            self.assertEqual(result["accounts"][0]["id"], "anchor-1")
+            self.assertNotIn("business-secret-token", discovery.data.decode("utf-8"))
+            self.assertEqual(len(snapshots.get_json()["waveOperationSnapshots"]), 1)
+            self.assertEqual(
+                snapshots.get_json()["waveOperationSnapshots"][0]["metadata"]["accountDiscovery"]["accounts"][0]["id"],
+                "anchor-1",
+            )
+            self.assertIn(
+                "local_wave.account_discovery_read",
+                [event["action"] for event in audit.get_json()["auditEvents"]],
+            )
+            self.assertIn("Verified account mappings", dashboard.data.decode("utf-8"))
+            self.assertIn("anchor-1", dashboard.data.decode("utf-8"))
+            self.assertIn("/wave/accounts/discover", dashboard.data.decode("utf-8"))
 
     def test_api_prepares_lists_and_inspects_close_pack_after_wave_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

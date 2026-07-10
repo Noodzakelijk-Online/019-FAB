@@ -26,6 +26,8 @@ class TestLocalWaveControlService(unittest.TestCase):
         self.assertEqual(overview["summary"]["reports"], 12)
         self.assertTrue(overview["credentials"]["waveappsBusiness"]["accessTokenConfigured"])
         self.assertTrue(overview["credentials"]["waveappsPersonal"]["accessTokenConfigured"])
+        self.assertIn("accountMappings", overview)
+        self.assertEqual(len(overview["accountMappings"]["targets"]), 2)
         self.assertIn("detailed_reporting", {section["id"] for section in overview["reportSections"]})
         self.assertIn("account-transactions", {report["type"] for report in overview["reports"]})
         self.assertNotIn("business-secret-token", rendered)

@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional
 
 from src.data_entry.waveapps_autonomous_operator import WaveappsAutonomousOperator
+from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
 from src.data_entry.waveapps_surface import (
     WAVE_SURFACE_CATALOG,
     build_wave_report_payload,
@@ -61,6 +62,7 @@ class LocalWaveControlService:
             "externalSubmission": "not_executed",
             "summary": parity,
             "credentials": _credential_status(self.config),
+            "accountMappings": WaveappsAccountDiscoveryService(self.config).mapping_status(),
             "safetyPolicy": {
                 "read_only": "FAB may plan and read report/list state without changing Wave.",
                 "safe_draft": "FAB may prepare drafts, but still records the operation before execution.",
@@ -88,6 +90,8 @@ class LocalWaveControlService:
                 },
             ],
             "nextActions": [
+                "Use /api/wave/account-mappings to inspect the anchor and category-account mappings required for verified exports.",
+                "Use /api/wave/accounts/discover for an audited, read-only Wave chart-of-accounts refresh before enabling export execution.",
                 "Use /api/wave/workflows/plan for general-ledger reconciliation or close-pack planning.",
                 "Use /api/wave/plan to prepare a single Wave action with policy gates and idempotency.",
                 "Connect an approved Wave API or browser executor only after the operation plan is reviewed.",
@@ -302,6 +306,7 @@ class LocalWaveControlService:
             "metadata": {
                 "operation": operation,
                 "source": "wave_control_plan",
+                **(operation.get("metadata") if isinstance(operation.get("metadata"), dict) else {}),
             },
         })
 

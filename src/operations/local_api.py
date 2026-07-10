@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
 
 from src.config_loader import ConfigLoader
+from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
@@ -1502,6 +1503,41 @@ DASHBOARD_TEMPLATE = """
         <div class="summary-item"><span>Safe drafts</span><strong>{{ wave_control.summary.actions_by_safety.safe_draft }}</strong></div>
         <div class="summary-item"><span>Confirmations</span><strong>{{ wave_control.summary.actions_by_safety.requires_confirmation }}</strong></div>
       </div>
+      <div class="section-head" style="padding: 14px 18px 0;">
+        <div>
+          <h3>Verified account mappings</h3>
+          <p>Read Wave's chart of accounts and confirm the exact anchor and category IDs used by approved exports.</p>
+        </div>
+        <form class="inline-actions" method="post" action="{{ url_for('discover_wave_accounts_form') }}">
+          <select name="targetSystem" aria-label="Wave target account">
+            <option value="waveapps_business">Wave Business</option>
+            <option value="waveapps_personal">Wave Personal</option>
+          </select>
+          <button type="submit">Refresh accounts</button>
+        </form>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Target</th><th>Configuration</th><th>Anchor account</th><th>Category accounts</th><th>Discovery</th></tr></thead>
+          <tbody>
+          {% for mapping in wave_control.accountMappings.targets %}
+            <tr>
+              <td><strong>{{ mapping.targetSystem }}</strong></td>
+              <td><span class="badge {{ 'ready' if mapping.configured else 'blocked' }}">{{ 'configured' if mapping.configured else 'missing' }}</span><div class="muted">{{ ", ".join(mapping.requiredMissing) if mapping.requiredMissing else "All required settings present" }}</div></td>
+              <td><span class="mono">{{ mapping.anchorAccount.accountId or '-' }}</span><div class="muted">verified {{ mapping.anchorAccount.verified if mapping.anchorAccount.verified is not none else 'not checked' }}</div></td>
+              <td>{{ mapping.categoryAccounts|length }} mapped<div class="muted">verified {{ mapping.verified if mapping.accountsDiscovered is not none else 'not checked' }}</div></td>
+              <td>{{ mapping.accountsDiscovered if mapping.accountsDiscovered is not none else '-' }} accounts</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if wave_account_discovery_summary %}
+      <details open>
+        <summary>Last Wave account discovery</summary>
+        <pre>{{ pretty_json(wave_account_discovery_summary) }}</pre>
+      </details>
+      {% endif %}
       {% if wave_plan_summary %}
       <details open>
         <summary>Last Wave workflow plan</summary>
@@ -3281,6 +3317,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             category_summaries=category_summaries,
             sources=sources,
             wave_control=wave_control,
+            wave_account_discovery_summary=session.pop("fab_last_wave_account_discovery", None),
             wave_plan_summary=last_wave_plan,
             wave_report_snapshots=wave_report_snapshots,
             wave_operation_snapshots=wave_operation_snapshots,
@@ -3498,6 +3535,73 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             safety=request.args.get("safety"),
             mode=request.args.get("mode"),
         ))
+
+    @app.get("/api/wave/account-mappings")
+    def wave_account_mappings():
+        return jsonify(WaveappsAccountDiscoveryService(config).mapping_status(
+            request.args.get("targetSystem") or request.args.get("target_system"),
+        ))
+
+    def run_wave_account_discovery(target_system: str) -> Dict[str, Any]:
+        result = WaveappsAccountDiscoveryService(config).discover(target_system)
+        operation = result.get("operation") if isinstance(result.get("operation"), dict) else None
+        if operation:
+            operation["metadata"] = {
+                "accountDiscovery": {
+                    "targetSystem": result.get("targetSystem"),
+                    "business": result.get("business"),
+                    "accounts": result.get("accounts"),
+                    "mapping": result.get("mapping"),
+                    "externalSubmission": "not_executed",
+                },
+            }
+            LocalWaveControlService(config).record_operation_snapshot(
+                ledger,
+                operation,
+                workflow_id="wave_account_discovery",
+                status=result.get("status") or "read_result_captured",
+            )
+        ledger.record_audit_event({
+            "action": "local_wave.account_discovery_read",
+            "entityType": "wave_account_discovery",
+            "entityId": str((operation or {}).get("operation_id") or target_system),
+            "details": {
+                "targetSystem": target_system,
+                "success": result.get("success"),
+                "status": result.get("status"),
+                "accountCount": len(result.get("accounts") or []),
+                "externalSubmission": "not_executed",
+            },
+        })
+        return result
+
+    @app.post("/api/wave/accounts/discover")
+    def discover_wave_accounts():
+        payload = request.get_json(silent=True) or {}
+        target_system = str(payload.get("targetSystem") or payload.get("target_system") or "waveapps_business")
+        result = run_wave_account_discovery(target_system)
+        status_code = 200 if result.get("success") else 400
+        if result.get("status") in {"rate_limited", "quota_exhausted"}:
+            status_code = 429
+        elif result.get("status") == "provider_error":
+            status_code = 502
+        return jsonify(result), status_code
+
+    @app.post("/wave/accounts/discover")
+    def discover_wave_accounts_form():
+        target_system = str(request.form.get("targetSystem") or "waveapps_business")
+        result = run_wave_account_discovery(target_system)
+        session["fab_last_wave_account_discovery"] = {
+            "success": result.get("success"),
+            "status": result.get("status"),
+            "targetSystem": target_system,
+            "business": result.get("business"),
+            "accounts": result.get("accounts"),
+            "mapping": result.get("mapping"),
+            "message": result.get("message"),
+            "externalSubmission": "not_executed",
+        }
+        return redirect(url_for("dashboard_page", _anchor="wave"))
 
     @app.get("/api/wave/reports")
     def wave_reports():
