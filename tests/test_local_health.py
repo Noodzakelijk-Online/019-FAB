@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 from src.operations.local_api import create_app
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, LocalExportAttemptService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_routing import LocalRoutingService
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 
 
@@ -194,6 +196,44 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["metrics"]["apiQuotaExhaustedServices"], 1)
             self.assertTrue(health["rateLimits"]["waveapps"]["quotaExhausted"])
             self.assertIn("api_quota_exhausted", {issue["type"] for issue in health["issues"]})
+
+    def test_health_flags_stuck_atomic_export_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-stuck-export",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-07-10",
+                "totalAmount": 42.5,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            service = LocalExportAttemptService(ledger)
+            prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+            ledger.claim_export_attempt(prepared["exportAttemptId"])
+            _set_timestamp(
+                ledger_path,
+                "export_attempts",
+                prepared["exportAttemptId"],
+                "updated_at",
+                _hours_ago(2),
+            )
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            self.assertEqual(health["metrics"]["executingExports"], 1)
+            self.assertIn("stuck_export_execution", {issue["type"] for issue in health["issues"]})
+            self.assertIn("verify downstream state", " ".join(health["nextActions"]))
 
 
 def _hours_ago(hours: int) -> str:

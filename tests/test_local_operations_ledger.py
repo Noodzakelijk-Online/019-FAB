@@ -351,6 +351,7 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     "export_attempts": 0,
                     "export_attempts_needing_approval": 0,
                     "approved_export_attempts": 0,
+                    "supervised_export_attempts": 0,
                     "executed_export_attempts": 0,
                     "wave_report_snapshots": 0,
                     "wave_operation_snapshots": 0,

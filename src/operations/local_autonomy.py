@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
-from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_close_readiness import LocalCloseReadinessService
@@ -687,27 +686,32 @@ class LocalAutonomousService:
     def _run_export_execution(self, limit: int) -> Dict[str, Any]:
         service = LocalExportAttemptService(self.ledger, self.config)
         attempts = self.ledger.list_export_attempts(status="approved", limit=limit)
-        pre_execution_backup = None
+        batch = service.process_approved_attempts(
+            limit=limit,
+            actor="local_autonomy",
+            force=True,
+            create_backup=True,
+        )
+        pre_execution_backup = batch.get("preExecutionBackup")
         if attempts:
-            pre_execution_backup = LocalBackupService(self.ledger, self.config).create_backup(
-                note="Automatic pre-execution backup before autonomous approved export execution"
-            )
             self.ledger.record_audit_event({
                 "action": "local_autonomy.export_execution_preflight_backup",
                 "entityType": "autonomous_cycle",
                 "details": {
                     "attemptCount": len(attempts),
-                    "backupPath": pre_execution_backup.get("backupPath"),
-                    "backupFilename": pre_execution_backup.get("backupFilename"),
-                    "ledgerSha256": (pre_execution_backup.get("manifest") or {}).get("ledgerSha256"),
+                    "backupPath": (pre_execution_backup or {}).get("backupPath"),
+                    "backupFilename": (pre_execution_backup or {}).get("backupFilename"),
+                    "ledgerSha256": (pre_execution_backup or {}).get("ledgerSha256"),
+                    "backupStatus": (pre_execution_backup or {}).get("status"),
+                    "batchStatus": batch.get("status"),
                     "externalSubmission": "not_executed",
                 },
             })
         export_summaries = []
-        for attempt in attempts:
-            execution = service.execute_attempt(int(attempt["id"]), actor="local_autonomy")
+        for execution in batch.get("processed") or []:
+            attempt = execution.get("exportAttempt") if isinstance(execution.get("exportAttempt"), dict) else {}
             export_summaries.append({
-                "exportAttemptId": attempt["id"],
+                "exportAttemptId": attempt.get("id"),
                 "targetSystem": _export_target_system(attempt),
                 "success": execution.get("success"),
                 "status": execution.get("status"),
@@ -715,12 +719,13 @@ class LocalAutonomousService:
             })
         return {
             "id": "execute_approved_exports",
-            "status": "completed",
+            "status": "completed" if batch.get("success") else "blocked",
             "summary": {
                 "attempted": len(export_summaries),
                 "targetBreakdown": _target_breakdown(attempts, _export_target_system),
                 "attemptSummaries": export_summaries,
-                "preExecutionBackup": _compact_backup(pre_execution_backup),
+                "preExecutionBackup": pre_execution_backup,
+                "batchStatus": batch.get("status"),
             },
         }
 
@@ -979,20 +984,6 @@ def _compact_master_ledger(projection: Dict[str, Any]) -> Dict[str, Any]:
         "readyForExternalExecution": summary.get("readyForExternalExecution", 0),
         "downstreamStatuses": summary.get("downstreamStatuses") or {},
         "byTargetSystem": summary.get("byTargetSystem") or {},
-    }
-
-
-def _compact_backup(backup: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not backup:
-        return None
-    manifest = backup.get("manifest") if isinstance(backup.get("manifest"), dict) else {}
-    return {
-        "status": backup.get("status"),
-        "backupPath": backup.get("backupPath"),
-        "backupFilename": backup.get("backupFilename"),
-        "ledgerSha256": manifest.get("ledgerSha256"),
-        "ledgerBytes": manifest.get("ledgerBytes"),
-        "externalSubmission": "not_executed",
     }
 
 

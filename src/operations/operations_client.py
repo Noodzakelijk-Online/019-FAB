@@ -3,7 +3,8 @@ from typing import Any, Dict, Optional
 import requests
 
 from src.document_handling.source_identity import source_document_id
-from src.operations.local_ledger import LocalOperationsLedger, default_ledger_path
+from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_runtime import build_local_operations_ledger
 
 
 class OperationsClient:
@@ -76,27 +77,7 @@ class OperationsClient:
         return parsed if parsed > 0 else default
 
     def _build_local_ledger(self) -> Optional[LocalOperationsLedger]:
-        configured_enabled = self.config.get(
-            "fab_local_ledger_enabled",
-            self.config.get("operations_local_ledger_enabled"),
-        )
-        configured_path = (
-            self.config.get("fab_local_ledger_path")
-            or self.config.get("operations_ledger_path")
-        )
-        enabled = (
-            bool(configured_path)
-            if configured_enabled is None
-            else self._as_bool(configured_enabled)
-        )
-        if not enabled:
-            return None
-
-        try:
-            return LocalOperationsLedger(str(configured_path or default_ledger_path()))
-        except Exception as exc:
-            self._log_warning(f"FAB local operations ledger unavailable: {exc}")
-            return None
+        return build_local_operations_ledger(self.config, on_error=self._log_warning)
 
     def _disabled(self) -> Dict[str, Any]:
         return {"enabled": False, "status": "skipped"}

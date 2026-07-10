@@ -5,8 +5,8 @@ FAB now treats approved posting execution as a controlled external operation.
 ## Provider throttling and daily quotas
 
 FAB treats a configured provider throttle differently from a failed posting.
-Immediately before a Waveapps API request or MijnGeldzaken browser upload, the
-handler reserves a slot from the shared API quota guard. If no slot is
+Immediately before a Waveapps API request, the handler reserves a slot from the
+shared API quota guard. If no slot is
 available, the posting changes to `posting_deferred` and is placed back into
 the retry queue without increasing its failure count, creating a dead-letter
 item, or opening manual review.
@@ -58,7 +58,8 @@ When the retry limit is reached, FAB moves the item to `dead_letter_queue`. That
 
 ## Worker behavior
 
-The worker cycle now does this:
+The compatibility worker cycle does this only when
+`worker_process_legacy_postings = true`:
 
 1. Run the normal FAB workflow.
 2. Process due retries.
@@ -67,7 +68,10 @@ The worker cycle now does this:
 
 ## Safety default
 
-Execution remains disabled unless `execute_approved_postings = true` is set in local config.
+The authoritative operations-ledger executor remains disabled unless
+`fab_autonomy_execute_approved_exports = true` is set in local config. The
+retry/dead-letter queue documented here belongs to the compatibility
+`posting_attempts` executor.
 
 ## Operational rule
 

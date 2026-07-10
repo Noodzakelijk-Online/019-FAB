@@ -1127,6 +1127,43 @@ class LocalOperationsLedger:
         values["updated_at"] = self._now()
         self._update("export_attempts", export_attempt_id, values)
 
+    def claim_export_attempt(
+        self,
+        export_attempt_id: int,
+        allowed_statuses: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        allowed = {str(status) for status in (allowed_statuses or ("approved",))}
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM export_attempts WHERE id = ? LIMIT 1",
+                (export_attempt_id,),
+            ).fetchone()
+            if not row:
+                return {"status": "not_found", "exportAttemptId": export_attempt_id}
+            current_status = str(row["status"] or "")
+            if current_status not in allowed:
+                return {
+                    "status": "not_claimable",
+                    "exportAttemptId": export_attempt_id,
+                    "currentStatus": current_status,
+                }
+            now = self._now()
+            cursor = connection.execute(
+                """
+                UPDATE export_attempts
+                SET status = 'execution_in_progress', updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (now, export_attempt_id, current_status),
+            )
+            if cursor.rowcount != 1:
+                return {"status": "already_claimed", "exportAttemptId": export_attempt_id}
+            return {
+                "status": "claimed",
+                "exportAttemptId": export_attempt_id,
+                "attempt": self._row_to_dict(row),
+            }
+
     def get_export_attempt(self, export_attempt_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(
@@ -1961,6 +1998,11 @@ class LocalOperationsLedger:
                     connection,
                     "export_attempts",
                     "status = 'approved' AND external_submission = 'approved_not_executed'",
+                ),
+                "supervised_export_attempts": self._count(
+                    connection,
+                    "export_attempts",
+                    "status = 'supervision_required' AND external_submission = 'not_executed'",
                 ),
                 "executed_export_attempts": self._count(
                     connection,

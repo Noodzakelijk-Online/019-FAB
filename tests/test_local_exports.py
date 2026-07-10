@@ -178,7 +178,8 @@ class TestLocalExportAttemptService(unittest.TestCase):
             repeated = service.prepare_ready_exports()
 
             self.assertEqual(approved["status"], "approved")
-            self.assertEqual(repeated["prepared"], 1)
+            self.assertEqual(repeated["prepared"], 0)
+            self.assertEqual(repeated["alreadyPrepared"], 1)
             attempts = ledger.list_export_attempts(limit=10)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0]["status"], "approved")
@@ -212,7 +213,8 @@ class TestLocalExportAttemptService(unittest.TestCase):
             document = ledger.get_document(document_id)
             self.assertEqual(document["bookkeeping_record"]["status"], "export_rejected")
             self.assertEqual(document["bookkeeping_record"]["export_status"], "rejected_not_executed")
-            self.assertEqual(repeated["prepared"], 1)
+            self.assertEqual(repeated["prepared"], 0)
+            self.assertEqual(repeated["alreadyPrepared"], 1)
             self.assertEqual(len(ledger.list_export_attempts(limit=10)), 1)
             self.assertEqual(ledger.list_export_attempts(limit=10)[0]["status"], "rejected")
             audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
@@ -289,15 +291,19 @@ class TestLocalExportAttemptService(unittest.TestCase):
             self.assertEqual(record["bookkeeping_record"]["status"], "routed")
             self.assertEqual(ledger.get_export_attempt(prepared["exportAttemptId"])["external_submission"], "queued")
 
-    def test_execute_approved_mijngeldzaken_export_attempt_uses_master_ledger_operator(self):
+    def test_execute_approved_mijngeldzaken_export_prepares_supervised_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
             document_id = self._register_mijngeldzaken_document(ledger)
+            config = {
+                "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
+                "mijngeldzaken_export_dir": os.path.join(temp_dir, "mijngeldzaken-exports"),
+            }
             route = LocalRoutingService(
                 ledger,
-                {"mijngeldzaken_category_mapping": {"Personal": "Huishouden"}},
+                config,
             ).prepare_document_route(document_id)
-            service = LocalExportAttemptService(ledger)
+            service = LocalExportAttemptService(ledger, config)
 
             prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
             json_artifact = service.artifact_for_attempt(prepared["exportAttemptId"], export_format="json")
@@ -308,6 +314,8 @@ class TestLocalExportAttemptService(unittest.TestCase):
                 confirmation=EXPORT_APPROVAL_PHRASE,
             )
             executed = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+            preserved = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            blocked_regeneration = service.regenerate_attempt(prepared["exportAttemptId"], actor="tester")
 
             self.assertTrue(prepared["success"])
             self.assertEqual(prepared["exportAttempt"]["target_system"], "mijngeldzaken")
@@ -348,8 +356,18 @@ class TestLocalExportAttemptService(unittest.TestCase):
                 approved["exportAttempt"]["metadata"]["approval"]["masterLedgerChecksum"],
                 master_draft["checksum"],
             )
-            self.assertEqual(executed["status"], "queued")
-            self.assertEqual(executed["externalSubmission"], "queued")
+            self.assertEqual(executed["status"], "supervision_required")
+            self.assertEqual(executed["executionStatus"], "supervised_action_required")
+            self.assertEqual(executed["externalSubmission"], "not_executed")
+            self.assertTrue(os.path.isfile(executed["artifact"]["path"]))
+            self.assertEqual(len(executed["artifact"]["sha256"]), 64)
+            self.assertEqual(preserved["status"], "already_prepared")
+            self.assertEqual(preserved["exportAttempt"]["status"], "supervision_required")
+            self.assertEqual(blocked_regeneration["status"], "supervision_in_progress")
+            self.assertEqual(
+                executed["artifact"]["masterLedgerChecksum"],
+                master_draft["checksum"],
+            )
             self.assertIn("MijnGeldzaken", executed["exportAttempt"]["message"])
             self.assertEqual(
                 executed["exportAttempt"]["metadata"]["lastExecution"]["masterLedgerChecksum"],
@@ -359,26 +377,72 @@ class TestLocalExportAttemptService(unittest.TestCase):
                 executed["exportAttempt"]["result"]["masterLedgerChecksum"],
                 master_draft["checksum"],
             )
-            result_operation = executed["exportAttempt"]["result"]["operation"]
-            self.assertEqual(result_operation["action_id"], "transaction_import_prepare")
-            self.assertEqual(result_operation["surface"], "transactions")
-            self.assertTrue(result_operation["operation_id"].startswith("mijngeldzaken:"))
-            self.assertEqual(result_operation["payload"]["category"], "Huishouden")
+            self.assertEqual(
+                executed["exportAttempt"]["result"]["status"],
+                "supervised_action_required",
+            )
             self.assertEqual(
                 executed["exportAttempt"]["metadata"]["masterLedgerChecksum"],
                 master_draft["checksum"],
             )
             document = ledger.get_document(document_id)
-            self.assertEqual(document["bookkeeping_record"]["export_status"], "queued")
+            self.assertEqual(document["bookkeeping_record"]["export_status"], "supervision_required")
+            self.assertEqual(document["bookkeeping_record"]["status"], "export_supervision_required")
             self.assertEqual(
                 document["bookkeeping_record"]["metadata"]["latestExport"]["details"]["masterLedgerChecksum"],
                 master_draft["checksum"],
             )
             executed_events = [
                 event for event in ledger.list_audit_events(limit=30)
-                if event["action"] == "local_export_attempt.executed"
+                if event["action"] == "local_export_attempt.supervision_required"
             ]
             self.assertEqual(executed_events[0]["details"]["masterLedgerChecksum"], master_draft["checksum"])
+            reviews = ledger.list_review_items(document_id=document_id)
+            self.assertEqual(reviews[0]["reason"], "mijngeldzaken_supervision_required")
+            self.assertEqual(reviews[0]["status"], "pending")
+
+            recorded = service.record_result(
+                prepared["exportAttemptId"],
+                status="executed",
+                external_id="mgz-supervised-import",
+                result={"artifactSha256": executed["artifact"]["sha256"]},
+                actor="tester",
+                confirmation=EXPORT_RESULT_CONFIRMATION_PHRASE,
+            )
+
+            self.assertTrue(recorded["success"])
+            self.assertEqual(recorded["status"], "executed")
+            self.assertEqual(recorded["resolvedReviewIds"], [reviews[0]["id"]])
+            self.assertEqual(ledger.get_review_item(reviews[0]["id"])["status"], "resolved")
+            self.assertEqual(
+                ledger.get_export_attempt(prepared["exportAttemptId"])["external_submission"],
+                "executed",
+            )
+
+    def test_export_execution_uses_atomic_operations_ledger_claim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = self._register_mijngeldzaken_document(ledger)
+            config = {
+                "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
+                "mijngeldzaken_export_dir": os.path.join(temp_dir, "exports"),
+            }
+            route = LocalRoutingService(ledger, config).prepare_document_route(document_id)
+            service = LocalExportAttemptService(ledger, config)
+            prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+
+            claim = ledger.claim_export_attempt(prepared["exportAttemptId"])
+            duplicate_execution = service.execute_attempt(prepared["exportAttemptId"], actor="second-worker")
+
+            self.assertEqual(claim["status"], "claimed")
+            self.assertEqual(duplicate_execution["status"], "already_claimed")
+            self.assertEqual(duplicate_execution["currentStatus"], "execution_in_progress")
+            self.assertFalse(os.path.exists(config["mijngeldzaken_export_dir"]))
 
     def test_mijngeldzaken_export_approval_blocks_stale_master_ledger_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:

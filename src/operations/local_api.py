@@ -1279,6 +1279,7 @@ DASHBOARD_TEMPLATE = """
         <div class="summary-item"><span>Attempts</span><strong>{{ metrics.export_attempts }}</strong></div>
         <div class="summary-item"><span>Need approval</span><strong>{{ metrics.export_attempts_needing_approval }}</strong></div>
         <div class="summary-item"><span>Approved</span><strong>{{ metrics.approved_export_attempts }}</strong></div>
+        <div class="summary-item"><span>Needs supervision</span><strong>{{ metrics.supervised_export_attempts }}</strong></div>
         <div class="summary-item"><span>Executed</span><strong>{{ metrics.executed_export_attempts }}</strong></div>
       </div>
       {% if export_summary %}
@@ -1342,7 +1343,7 @@ DASHBOARD_TEMPLATE = """
               </td>
               <td>{{ export.message or "-" }}</td>
               <td>
-                {% if export.metadata and export.metadata.masterLedgerDraft and export.external_submission not in ["queued", "submitted", "executed"] %}
+                {% if export.metadata and export.metadata.masterLedgerDraft and export.status != "supervision_required" and export.external_submission not in ["queued", "submitted", "executed"] %}
                 <form class="table-actions" method="post" action="{{ url_for('regenerate_export_attempt_form', export_attempt_id=export.id) }}">
                   <button class="compact secondary" type="submit">Regenerate draft</button>
                 </form>
@@ -1373,6 +1374,18 @@ DASHBOARD_TEMPLATE = """
                   <input type="text" name="externalId" placeholder="External ID">
                   <input type="text" name="confirmation" placeholder="{{ export_result_confirmation_phrase }}">
                   <button class="compact secondary" type="submit">Record result</button>
+                </form>
+                {% elif export.status == "supervision_required" %}
+                <div class="muted">Complete the stored artifact import in your MijnGeldzaken session.</div>
+                <form class="review-actions" method="post" action="{{ url_for('record_export_attempt_result_form', export_attempt_id=export.id) }}">
+                  <select name="status" aria-label="Supervised export result">
+                    <option value="executed">Executed</option>
+                    <option value="submitted">Submitted</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                  <input type="text" name="externalId" placeholder="Receipt reference">
+                  <input type="text" name="confirmation" placeholder="{{ export_result_confirmation_phrase }}">
+                  <button class="compact secondary" type="submit">Record supervised result</button>
                 </form>
                 {% else %}
                 -

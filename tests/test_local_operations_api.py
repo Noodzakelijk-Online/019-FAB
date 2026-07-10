@@ -1899,6 +1899,90 @@ class TestLocalOperationsApi(unittest.TestCase):
             html = dashboard.data.decode("utf-8")
             self.assertIn("rejected_not_executed", html)
 
+    def test_api_runs_mijngeldzaken_export_into_supervised_result_workflow(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            export_dir = os.path.join(temp_dir, "mijngeldzaken-exports")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-supervised-api",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Local Supermarket",
+                "category": "Personal",
+                "transactionDate": "2026-07-10",
+                "totalAmount": 31.25,
+                "extractedData": {
+                    "vendor_name": "Local Supermarket",
+                    "transaction_date": "2026-07-10",
+                    "total_amount": 31.25,
+                    "description": "Weekly groceries",
+                },
+                "metadata": {"targetSystem": "mijngeldzaken"},
+            })
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "mijngeldzaken_export_dir": export_dir,
+                "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
+            })
+            client = app.test_client()
+            route = client.post(
+                f"/api/documents/{document_id}/route",
+                json={"targetSystem": "mijngeldzaken"},
+            ).get_json()
+            prepared = client.post(
+                f"/api/routing/{route['routingAttemptId']}/export-attempt"
+            ).get_json()
+            export_id = prepared["exportAttemptId"]
+            approved = client.post(
+                f"/api/export-attempts/{export_id}/approve",
+                json={"confirmation": EXPORT_APPROVAL_PHRASE, "actor": "tester"},
+            )
+            executed = client.post(f"/api/export-attempts/{export_id}/execute")
+            dashboard_metrics = client.get("/api/dashboard").get_json()
+            dashboard = client.get("/").get_data(as_text=True)
+
+            self.assertEqual(approved.status_code, 200)
+            self.assertEqual(executed.status_code, 200)
+            self.assertEqual(executed.get_json()["status"], "supervision_required")
+            self.assertTrue(os.path.isfile(executed.get_json()["artifact"]["path"]))
+            self.assertEqual(dashboard_metrics["supervised_export_attempts"], 1)
+            self.assertIn("Record supervised result", dashboard)
+            review = ledger.list_review_items(document_id=document_id)[0]
+            self.assertEqual(review["reason"], "mijngeldzaken_supervision_required")
+
+            blocked_queued = client.post(
+                f"/api/export-attempts/{export_id}/result",
+                json={
+                    "status": "queued",
+                    "confirmation": EXPORT_RESULT_CONFIRMATION_PHRASE,
+                },
+            )
+
+            recorded = client.post(
+                f"/api/export-attempts/{export_id}/result",
+                json={
+                    "status": "executed",
+                    "externalId": "mgz-api-confirmation",
+                    "confirmation": EXPORT_RESULT_CONFIRMATION_PHRASE,
+                    "result": {"source": "supervised-session"},
+                },
+            )
+
+            self.assertEqual(blocked_queued.status_code, 400)
+            self.assertEqual(blocked_queued.get_json()["status"], "invalid_supervised_result")
+            self.assertEqual(recorded.status_code, 200)
+            self.assertEqual(recorded.get_json()["status"], "executed")
+            self.assertEqual(recorded.get_json()["resolvedReviewIds"], [review["id"]])
+            self.assertEqual(ledger.get_review_item(review["id"])["status"], "resolved")
+            self.assertEqual(client.get("/api/dashboard").get_json()["supervised_export_attempts"], 0)
+            self.assertEqual(
+                ledger.get_export_attempt(export_id)["external_id"],
+                "mgz-api-confirmation",
+            )
+
     def test_api_exposes_mijngeldzaken_master_ledger_control_center(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app({

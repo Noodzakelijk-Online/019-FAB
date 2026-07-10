@@ -20,6 +20,8 @@ RUNNING_WORKFLOW_STATUSES = ("running",)
 FAILED_WORKFLOW_STATUSES = ("failed", "error")
 PENDING_EXPORT_APPROVAL_STATUSES = ("approval_required", "prepared")
 APPROVED_EXPORT_STATUSES = ("approved",)
+SUPERVISED_EXPORT_STATUSES = ("supervision_required",)
+EXECUTING_EXPORT_STATUSES = ("execution_in_progress",)
 
 
 class LocalOperationsHealth:
@@ -70,6 +72,13 @@ class LocalOperationsHealth:
             "export_approved_stale_hours",
             default=48.0,
         )
+        self.export_execution_stale_hours = _float_config(
+            self.config,
+            "fab_local_export_execution_stale_hours",
+            "operations_export_execution_stale_hours",
+            "export_execution_stale_hours",
+            default=1.0,
+        )
 
     def summarize(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -83,6 +92,8 @@ class LocalOperationsHealth:
         failed_runs = self.ledger.list_workflow_runs(status=FAILED_WORKFLOW_STATUSES, limit=100)
         pending_export_approvals = self.ledger.list_export_attempts(status=PENDING_EXPORT_APPROVAL_STATUSES, limit=500)
         approved_exports = self.ledger.list_export_attempts(status=APPROVED_EXPORT_STATUSES, limit=500)
+        supervised_exports = self.ledger.list_export_attempts(status=SUPERVISED_EXPORT_STATUSES, limit=500)
+        executing_exports = self.ledger.list_export_attempts(status=EXECUTING_EXPORT_STATUSES, limit=500)
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
@@ -201,6 +212,22 @@ class LocalOperationsHealth:
                     },
                 ))
 
+        for export_attempt in executing_exports:
+            age_hours = _age_hours(export_attempt.get("updated_at"), now)
+            if age_hours is not None and age_hours >= self.export_execution_stale_hours:
+                issues.append(_issue(
+                    "high",
+                    "stuck_export_execution",
+                    "export_attempt",
+                    export_attempt.get("id"),
+                    f"Export attempt #{export_attempt.get('id')} has been executing for {age_hours:.1f} hours.",
+                    age_hours,
+                    {
+                        "documentId": export_attempt.get("document_id"),
+                        "routingAttemptId": export_attempt.get("routing_attempt_id"),
+                    },
+                ))
+
         for export_attempt in failed_exports:
             issues.append(_issue(
                 "high",
@@ -265,6 +292,7 @@ class LocalOperationsHealth:
                 "workflowStaleHours": self.workflow_stale_hours,
                 "exportApprovalStaleHours": self.export_approval_stale_hours,
                 "exportApprovedStaleHours": self.export_approved_stale_hours,
+                "exportExecutionStaleHours": self.export_execution_stale_hours,
             },
             "metrics": {
                 **metrics,
@@ -277,6 +305,8 @@ class LocalOperationsHealth:
                 "staleRoutingDrafts": len(stale_pending_routes),
                 "pendingExportApprovals": len(pending_export_approvals),
                 "approvedExports": len(approved_exports),
+                "supervisedExports": len(supervised_exports),
+                "executingExports": len(executing_exports),
                 "failedExports": len(failed_exports),
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),
                 "masterLedgerBlockedRows": master_ledger_summary.get("blockedRows", 0),
@@ -349,6 +379,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Review pending export attempts and approve or reject before external submission.")
     if "stale_export_approved" in issue_types:
         actions.append("Review approved export attempts that remain pending and decide whether to submit or cancel.")
+    if "stuck_export_execution" in issue_types:
+        actions.append("Inspect the claimed export attempt and verify downstream state before releasing or retrying it.")
     if "failed_export_attempt" in issue_types:
         actions.append("Inspect failed export attempts and retry after fixing the source issue.")
     if "master_ledger_blockers" in issue_types:

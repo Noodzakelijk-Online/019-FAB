@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from src.data_entry.mijngeldzaken_autonomous_operator import MijngeldzakenAutonomousOperator
+from src.data_entry.mijngeldzaken_artifacts import MijngeldzakenArtifactStore
 from src.data_entry.mijngeldzaken_surface import (
     build_mijngeldzaken_action_payload,
     build_mijngeldzaken_master_ledger_draft,
@@ -22,10 +22,19 @@ EXPORT_REJECTION_PHRASE = "REJECT FAB EXPORT DRAFT"
 EXPORT_RESULT_CONFIRMATION_PHRASE = "RECORD FAB EXPORT RESULT"
 OPEN_REVIEW_STATUSES = {"pending", "in_review"}
 APPROVABLE_EXPORT_STATUSES = {"approval_required", "prepared"}
-REJECTABLE_EXPORT_STATUSES = {"approval_required", "prepared", "approved"}
+REJECTABLE_EXPORT_STATUSES = {"approval_required", "prepared", "approved", "supervision_required"}
 RESULT_STATUSES = {"executed", "submitted", "queued", "failed"}
 TERMINAL_EXECUTION_STATUSES = {"executed", "submitted", "queued"}
-PRESERVED_EXPORT_STATUSES = {"approved", "queued", "executed", "submitted", "failed", "rejected"}
+PRESERVED_EXPORT_STATUSES = {
+    "approved",
+    "execution_in_progress",
+    "supervision_required",
+    "queued",
+    "executed",
+    "submitted",
+    "failed",
+    "rejected",
+}
 
 
 class LocalExportAttemptService:
@@ -203,13 +212,16 @@ class LocalExportAttemptService:
         summary = {
             "requested": len(routing_attempts),
             "prepared": 0,
+            "alreadyPrepared": 0,
             "blocked": 0,
             "exportAttempts": [],
             "externalSubmission": "not_executed",
         }
         for routing_attempt in routing_attempts:
             result = self.prepare_from_routing_attempt(int(routing_attempt["id"]))
-            if result.get("success"):
+            if result.get("status") == "already_prepared":
+                summary["alreadyPrepared"] += 1
+            elif result.get("success"):
                 summary["prepared"] += 1
             else:
                 summary["blocked"] += 1
@@ -220,11 +232,83 @@ class LocalExportAttemptService:
             "details": {
                 "requested": summary["requested"],
                 "prepared": summary["prepared"],
+                "alreadyPrepared": summary["alreadyPrepared"],
                 "blocked": summary["blocked"],
                 "externalSubmission": "not_executed",
             },
         })
         return summary
+
+    def process_approved_attempts(
+        self,
+        limit: int = 20,
+        actor: str = "fab_local_exports",
+        force: bool = False,
+        create_backup: bool = True,
+    ) -> Dict[str, Any]:
+        if not force and not _as_bool(self.config.get("fab_autonomy_execute_approved_exports", False)):
+            return {
+                "success": True,
+                "status": "skipped",
+                "reason": "fab_autonomy_execute_approved_exports is disabled",
+                "processed": [],
+                "count": 0,
+            }
+
+        attempts = self.ledger.list_export_attempts(status="approved", limit=limit)
+        pre_execution_backup = None
+        if attempts and create_backup:
+            from src.operations.local_backup import LocalBackupService
+
+            try:
+                pre_execution_backup = LocalBackupService(self.ledger, self.config).create_backup(
+                    note="Automatic pre-execution backup before approved operations-ledger exports"
+                )
+            except Exception as exc:
+                pre_execution_backup = {"success": False, "status": "failed", "error": str(exc)}
+            self.ledger.record_audit_event({
+                "action": "local_export_attempt.batch_execution_preflight_backup",
+                "entityType": "export_attempt",
+                "details": {
+                    "actor": actor,
+                    "attemptCount": len(attempts),
+                    "backupPath": pre_execution_backup.get("backupPath"),
+                    "backupFilename": pre_execution_backup.get("backupFilename"),
+                    "ledgerSha256": (pre_execution_backup.get("manifest") or {}).get("ledgerSha256"),
+                    "externalSubmission": "not_executed",
+                },
+            })
+            if not pre_execution_backup.get("success"):
+                self.ledger.record_audit_event({
+                    "action": "local_export_attempt.batch_execution_blocked_backup",
+                    "entityType": "export_attempt",
+                    "details": {
+                        "actor": actor,
+                        "attemptCount": len(attempts),
+                        "backupStatus": pre_execution_backup.get("status"),
+                        "error": pre_execution_backup.get("error"),
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                return {
+                    "success": False,
+                    "status": "pre_execution_backup_failed",
+                    "processed": [],
+                    "count": 0,
+                    "preExecutionBackup": _compact_backup_result(pre_execution_backup),
+                }
+
+        processed = [
+            self.execute_attempt(int(attempt["id"]), actor=actor)
+            for attempt in attempts
+        ]
+        return {
+            "success": all(result.get("success") for result in processed),
+            "status": "completed",
+            "processed": processed,
+            "count": len(processed),
+            "preExecutionBackup": _compact_backup_result(pre_execution_backup),
+        }
 
     def artifact_for_attempt(
         self,
@@ -295,6 +379,13 @@ class LocalExportAttemptService:
         attempt = self.ledger.get_export_attempt(export_attempt_id)
         if not attempt:
             return {"success": False, "status": "not_found", "error": "Export attempt not found"}
+        if attempt.get("status") == "supervision_required":
+            return {
+                "success": False,
+                "status": "supervision_in_progress",
+                "message": "Record or reject the current supervised import before regenerating its artifact.",
+                "externalSubmission": "not_executed",
+            }
         if attempt.get("external_submission") in {"queued", "submitted", "executed"}:
             return {
                 "success": False,
@@ -555,12 +646,20 @@ class LocalExportAttemptService:
             "message": "Export rejected locally; no external submission was executed.",
             "metadata": metadata,
         })
+        resolved_review_ids = []
+        if attempt.get("status") == "supervision_required":
+            resolved_review_ids = self._resolve_mijngeldzaken_supervision_reviews(
+                attempt,
+                actor=actor,
+                result_status="rejected",
+            )
         details = {
             "exportAttemptId": export_attempt_id,
             "rejectedBy": actor,
             "resolution": resolution,
             "externalSubmission": "rejected_not_executed",
             "masterLedgerChecksum": master_ledger_checksum,
+            "resolvedReviewIds": resolved_review_ids,
         }
         if attempt.get("document_id"):
             LocalBookkeepingRecordService(self.ledger, self.config).record_export_state(
@@ -593,12 +692,14 @@ class LocalExportAttemptService:
                 "externalSubmission": "rejected_not_executed",
                 "resolution": resolution,
                 "masterLedgerChecksum": master_ledger_checksum,
+                "resolvedReviewIds": resolved_review_ids,
             },
         })
         return {
             "success": True,
             "status": "rejected",
             "externalSubmission": "rejected_not_executed",
+            "resolvedReviewIds": resolved_review_ids,
             "exportAttempt": self.ledger.get_export_attempt(export_attempt_id),
         }
 
@@ -624,11 +725,17 @@ class LocalExportAttemptService:
                 "confirmationPhrase": EXPORT_RESULT_CONFIRMATION_PHRASE,
                 "message": "Type the exact result phrase before recording an external export result.",
             }
-        if attempt.get("status") != "approved" and status in {"executed", "submitted", "queued"}:
+        if attempt.get("status") == "supervision_required" and status == "queued":
+            return {
+                "success": False,
+                "status": "invalid_supervised_result",
+                "message": "A supervised MijnGeldzaken import must be recorded as executed, submitted, or failed.",
+            }
+        if attempt.get("status") not in {"approved", "supervision_required"} and status in {"executed", "submitted", "queued"}:
             return {
                 "success": False,
                 "status": "blocked_unapproved",
-                "message": "Only approved export attempts can receive submitted/executed results.",
+                "message": "Only approved or supervised export attempts can receive submitted/executed results.",
             }
         if status in {"executed", "submitted", "queued"}:
             stale = self._master_ledger_staleness(attempt, "result", actor)
@@ -658,6 +765,13 @@ class LocalExportAttemptService:
             "result": result_payload,
             "metadata": metadata,
         })
+        resolved_review_ids = []
+        if attempt.get("status") == "supervision_required" and status in {"executed", "submitted"}:
+            resolved_review_ids = self._resolve_mijngeldzaken_supervision_reviews(
+                attempt,
+                actor=actor,
+                result_status=status,
+            )
         if attempt.get("document_id"):
             LocalBookkeepingRecordService(self.ledger, self.config).record_export_state(
                 int(attempt["document_id"]),
@@ -699,12 +813,14 @@ class LocalExportAttemptService:
                 "externalSubmission": external_submission,
                 "externalId": external_id,
                 "masterLedgerChecksum": master_ledger_checksum,
+                "resolvedReviewIds": resolved_review_ids,
             },
         })
         return {
             "success": True,
             "status": status,
             "externalSubmission": external_submission,
+            "resolvedReviewIds": resolved_review_ids,
             "exportAttempt": self.ledger.get_export_attempt(export_attempt_id),
         }
 
@@ -719,14 +835,27 @@ class LocalExportAttemptService:
 
         status = str(attempt.get("status") or "").strip().lower()
         if status == "approved":
+            claim = self.ledger.claim_export_attempt(export_attempt_id)
+            if claim.get("status") != "claimed":
+                current = self.ledger.get_export_attempt(export_attempt_id)
+                return {
+                    "success": False,
+                    "status": "already_claimed",
+                    "currentStatus": (current or {}).get("status"),
+                    "externalSubmission": (current or {}).get("external_submission"),
+                    "exportAttempt": current,
+                }
+            attempt = claim["attempt"]
             metadata = dict(attempt.get("metadata") or {})
             master_ledger_checksum = _master_ledger_checksum(metadata)
             stale = self._master_ledger_staleness(attempt, "execution", actor)
             if stale:
+                self._release_execution_claim(export_attempt_id, "Master-ledger draft became stale before dispatch.")
                 return stale
             action_id = attempt.get("action_id")
             operation = dict(metadata.get("operation") or {})
             if not action_id:
+                self._release_execution_claim(export_attempt_id, "Executable action id is missing.")
                 return {
                     "success": False,
                     "status": "invalid_plan",
@@ -740,32 +869,22 @@ class LocalExportAttemptService:
             confidence = metadata.get("confidence")
             operation_mode = metadata.get("mode") or operation.get("mode") or operation.get("plan", {}).get("mode")
             target_system = _target_system_for_attempt(attempt)
+            if _is_mijngeldzaken_target(target_system):
+                return self._prepare_mijngeldzaken_supervision(attempt, actor)
             try:
-                if _is_mijngeldzaken_target(target_system):
-                    operator = MijngeldzakenAutonomousOperator(self.config)
-                    execution = operator.execute(
-                        action_id,
-                        payload,
-                        surface=attempt.get("surface") or operation.get("surface"),
-                        actor=actor,
-                        confirmed=True,
-                        idempotency_key=str(attempt.get("operation_id") or attempt.get("id")),
-                        mode=operation_mode,
-                    )
-                else:
-                    operator = WaveappsAutonomousOperator(self.config)
-                    execution = operator.execute(
-                        action_id,
-                        payload,
-                        surface=attempt.get("surface") or operation.get("surface"),
-                        actor=actor,
-                        confirmed=True,
-                        idempotency_key=str(attempt.get("operation_id") or attempt.get("id")),
-                        mode=operation_mode,
-                        capability_id=capability_id,
-                        available_signals=available_signals,
-                        confidence=confidence,
-                    )
+                operator = WaveappsAutonomousOperator(self.config)
+                execution = operator.execute(
+                    action_id,
+                    payload,
+                    surface=attempt.get("surface") or operation.get("surface"),
+                    actor=actor,
+                    confirmed=True,
+                    idempotency_key=str(attempt.get("operation_id") or attempt.get("id")),
+                    mode=operation_mode,
+                    capability_id=capability_id,
+                    available_signals=available_signals,
+                    confidence=confidence,
+                )
             except Exception as exc:
                 execution_status = "failed"
                 message = f"Execution failed before dispatch: {exc}"
@@ -875,6 +994,23 @@ class LocalExportAttemptService:
                 "exportAttempt": attempt,
             }
 
+        if status == "supervision_required":
+            return {
+                "success": True,
+                "status": "already_supervision_required",
+                "externalSubmission": "not_executed",
+                "exportAttempt": attempt,
+            }
+
+        if status == "execution_in_progress":
+            return {
+                "success": False,
+                "status": "already_claimed",
+                "currentStatus": "execution_in_progress",
+                "externalSubmission": attempt.get("external_submission"),
+                "exportAttempt": attempt,
+            }
+
         if status == "failed":
             return {
                 "success": False,
@@ -887,6 +1023,194 @@ class LocalExportAttemptService:
             "status": "not_approved",
             "message": f"Export attempt status {attempt.get('status')} cannot be executed without approval.",
         }
+
+    def _release_execution_claim(self, export_attempt_id: int, message: str) -> None:
+        self.ledger.update_export_attempt(export_attempt_id, {
+            "status": "approved",
+            "externalSubmission": "approved_not_executed",
+            "message": message,
+        })
+        self.ledger.record_audit_event({
+            "action": "local_export_attempt.execution_claim_released",
+            "entityType": "export_attempt",
+            "entityId": str(export_attempt_id),
+            "details": {
+                "message": message,
+                "externalSubmission": "approved_not_executed",
+            },
+        })
+
+    def _prepare_mijngeldzaken_supervision(
+        self,
+        attempt: Dict[str, Any],
+        actor: str,
+    ) -> Dict[str, Any]:
+        export_attempt_id = int(attempt["id"])
+        metadata = dict(attempt.get("metadata") or {})
+        draft = metadata.get("masterLedgerDraft") if isinstance(metadata.get("masterLedgerDraft"), dict) else {}
+        export_format = "csv" if draft.get("draftType") == "transaction_import" else "json"
+        prepared = self.artifact_for_attempt(export_attempt_id, export_format=export_format, actor=actor)
+        if not prepared.get("success"):
+            return prepared
+
+        draft_artifact = prepared["artifact"]
+        try:
+            stored = MijngeldzakenArtifactStore(self.config).write_text(
+                draft_artifact["filename"],
+                draft_artifact["content"],
+                encoding="utf-8-sig" if export_format == "csv" else "utf-8",
+                include_checksum=True,
+            )
+        except Exception as exc:
+            self.ledger.update_export_attempt(export_attempt_id, {
+                "status": "failed",
+                "externalSubmission": "not_executed",
+                "message": f"MijnGeldzaken supervised artifact could not be persisted: {exc}",
+                "result": {"status": "artifact_persistence_failed", "message": str(exc)},
+            })
+            self.ledger.record_audit_event({
+                "action": "local_export_attempt.supervised_artifact_failed",
+                "entityType": "export_attempt",
+                "entityId": str(export_attempt_id),
+                "details": {"actor": actor, "error": str(exc), "externalSubmission": "not_executed"},
+            })
+            return {
+                "success": False,
+                "status": "artifact_persistence_failed",
+                "message": str(exc),
+                "externalSubmission": "not_executed",
+            }
+
+        artifact = {
+            **stored,
+            "format": export_format,
+            "contentType": draft_artifact.get("contentType"),
+            "draftType": draft_artifact.get("draftType"),
+            "masterLedgerChecksum": draft_artifact.get("checksum"),
+            "externalSubmission": "not_executed",
+        }
+        now = _now()
+        execution_metadata = {
+            "actor": actor,
+            "executedAt": now,
+            "rawStatus": "supervised_action_required",
+            "mappedStatus": "supervision_required",
+            "masterLedgerChecksum": draft_artifact.get("checksum"),
+            "artifact": artifact,
+        }
+        metadata.update({
+            "supervisedArtifact": artifact,
+            "lastExecution": execution_metadata,
+        })
+        message = (
+            "MijnGeldzaken artifact prepared. Complete the import in a supervised "
+            "user-owned session, then record the result in FAB."
+        )
+        self.ledger.update_export_attempt(export_attempt_id, {
+            "status": "supervision_required",
+            "externalSubmission": "not_executed",
+            "message": message,
+            "result": {
+                "status": "supervised_action_required",
+                "message": message,
+                "artifact": artifact,
+                "masterLedgerChecksum": draft_artifact.get("checksum"),
+            },
+            "metadata": metadata,
+        })
+
+        document_id = attempt.get("document_id")
+        if document_id:
+            LocalBookkeepingRecordService(self.ledger, self.config).record_export_state(
+                int(document_id),
+                "supervision_required",
+                status="export_supervision_required",
+                routing_attempt_id=attempt.get("routing_attempt_id"),
+                details={
+                    "exportAttemptId": export_attempt_id,
+                    "artifact": artifact,
+                    "masterLedgerChecksum": draft_artifact.get("checksum"),
+                    "externalSubmission": "not_executed",
+                },
+            )
+        elif attempt.get("bookkeeping_record_id"):
+            record = self.ledger.get_bookkeeping_record(int(attempt["bookkeeping_record_id"])) or {}
+            if record:
+                _update_record_export_state(
+                    self.ledger,
+                    record,
+                    "supervision_required",
+                    status="export_supervision_required",
+                    routing_attempt_id=attempt.get("routing_attempt_id"),
+                    details={
+                        "exportAttemptId": export_attempt_id,
+                        "artifact": artifact,
+                        "masterLedgerChecksum": draft_artifact.get("checksum"),
+                        "externalSubmission": "not_executed",
+                    },
+                )
+
+        review_id = self.ledger.create_review_item({
+            "documentId": document_id,
+            "reason": "mijngeldzaken_supervision_required",
+            "details": json.dumps({
+                "exportAttemptId": export_attempt_id,
+                "artifact": artifact,
+                "message": message,
+            }, sort_keys=True, default=str),
+            "status": "pending",
+        })
+        self.ledger.record_audit_event({
+            "action": "local_export_attempt.supervision_required",
+            "entityType": "export_attempt",
+            "entityId": str(export_attempt_id),
+            "details": {
+                "actor": actor,
+                "reviewItemId": review_id,
+                "documentId": document_id,
+                "bookkeepingRecordId": attempt.get("bookkeeping_record_id"),
+                "artifact": artifact,
+                "masterLedgerChecksum": draft_artifact.get("checksum"),
+                "externalSubmission": "not_executed",
+            },
+        })
+        return {
+            "success": True,
+            "status": "supervision_required",
+            "executionStatus": "supervised_action_required",
+            "externalSubmission": "not_executed",
+            "artifact": artifact,
+            "reviewItemId": review_id,
+            "exportAttempt": self.ledger.get_export_attempt(export_attempt_id),
+        }
+
+    def _resolve_mijngeldzaken_supervision_reviews(
+        self,
+        attempt: Dict[str, Any],
+        actor: str,
+        result_status: str,
+    ) -> list[int]:
+        document_id = attempt.get("document_id")
+        candidates = self.ledger.list_review_items(
+            status=tuple(OPEN_REVIEW_STATUSES),
+            document_id=int(document_id) if document_id else None,
+            limit=500,
+        )
+        resolved = []
+        export_marker = f'"exportAttemptId": {int(attempt["id"])}'
+        for review in candidates:
+            if review.get("reason") != "mijngeldzaken_supervision_required":
+                continue
+            if not document_id and export_marker not in str(review.get("details") or ""):
+                continue
+            self.ledger.resolve_review_item(
+                int(review["id"]),
+                status="resolved",
+                resolution=f"MijnGeldzaken supervised submission recorded as {result_status} by {actor}.",
+                corrected_data={"exportAttemptId": int(attempt["id"]), "resultStatus": result_status},
+            )
+            resolved.append(int(review["id"]))
+        return resolved
 
     def _master_ledger_staleness(
         self,
@@ -1321,6 +1645,28 @@ def _message_for_result(status: str) -> str:
     if status == "queued":
         return "External export queued by a separate executor."
     return "External export failure recorded."
+
+
+def _compact_backup_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not result:
+        return None
+    manifest = result.get("manifest") if isinstance(result.get("manifest"), dict) else {}
+    return {
+        "status": result.get("status"),
+        "backupPath": result.get("backupPath"),
+        "backupFilename": result.get("backupFilename"),
+        "ledgerSha256": manifest.get("ledgerSha256"),
+        "error": result.get("error"),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
 
 
 def _map_execution_status(status: str, target_system: Any = "waveapps") -> tuple[str, str, str]:
