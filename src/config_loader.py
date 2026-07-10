@@ -38,8 +38,25 @@ class ConfigLoader:
                 else:
                     config_data[key.lower()] = parsed_value # For single-level env vars
             elif key.startswith("FAB_"):
-                # Example: FAB_LOCAL_LEDGER_PATH -> fab_local_ledger_path
-                config_data[key.lower()] = parsed_value
+                if key.startswith("FAB_WAVEAPPS_BUSINESS_"):
+                    self._set_section_env_alias(
+                        config_data,
+                        "waveapps_business",
+                        key[len("FAB_WAVEAPPS_BUSINESS_"):].lower(),
+                        parsed_value,
+                    )
+                elif key.startswith("FAB_WAVEAPPS_PERSONAL_"):
+                    self._set_section_env_alias(
+                        config_data,
+                        "waveapps_personal",
+                        key[len("FAB_WAVEAPPS_PERSONAL_"):].lower(),
+                        parsed_value,
+                    )
+                elif key == "FAB_WAVEAPPS_DEFAULT_TARGET":
+                    config_data["waveapps_default_target"] = parsed_value
+                else:
+                    # Example: FAB_LOCAL_LEDGER_PATH -> fab_local_ledger_path
+                    config_data[key.lower()] = parsed_value
 
         self._add_flat_aliases(config_data)
         return config_data
@@ -72,6 +89,20 @@ class ConfigLoader:
                 config_data.setdefault(f"{section}_{key}", value)
                 if key.startswith(f"{section}_"):
                     config_data.setdefault(key, value)
+
+    @staticmethod
+    def _set_section_env_alias(
+        config_data: Dict[str, Any],
+        section: str,
+        option: str,
+        value: Any,
+    ) -> None:
+        section_values = config_data.setdefault(section, {})
+        if not isinstance(section_values, dict):
+            section_values = {}
+            config_data[section] = section_values
+        section_values[option] = value
+        config_data[f"{section}_{option}"] = value
 
     def get(self, section: str, key: str, default: Any = None) -> Any:
         """Retrieves a configuration value."""

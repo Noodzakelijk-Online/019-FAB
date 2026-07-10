@@ -22,6 +22,7 @@ PENDING_EXPORT_APPROVAL_STATUSES = ("approval_required", "prepared")
 APPROVED_EXPORT_STATUSES = ("approved",)
 SUPERVISED_EXPORT_STATUSES = ("supervision_required",)
 EXECUTING_EXPORT_STATUSES = ("execution_in_progress",)
+DEFERRED_EXPORT_STATUSES = ("deferred",)
 
 
 class LocalOperationsHealth:
@@ -94,6 +95,7 @@ class LocalOperationsHealth:
         approved_exports = self.ledger.list_export_attempts(status=APPROVED_EXPORT_STATUSES, limit=500)
         supervised_exports = self.ledger.list_export_attempts(status=SUPERVISED_EXPORT_STATUSES, limit=500)
         executing_exports = self.ledger.list_export_attempts(status=EXECUTING_EXPORT_STATUSES, limit=500)
+        deferred_exports = self.ledger.list_export_attempts(status=DEFERRED_EXPORT_STATUSES, limit=500)
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
@@ -228,6 +230,25 @@ class LocalOperationsHealth:
                     },
                 ))
 
+        for export_attempt in deferred_exports:
+            metadata = export_attempt.get("metadata") if isinstance(export_attempt.get("metadata"), dict) else {}
+            retry = metadata.get("retry") if isinstance(metadata.get("retry"), dict) else {}
+            next_retry_at = _parse_datetime(retry.get("nextRetryAt"))
+            if next_retry_at and next_retry_at <= now:
+                issues.append(_issue(
+                    "low",
+                    "deferred_export_retry_due",
+                    "export_attempt",
+                    export_attempt.get("id"),
+                    f"Deferred export attempt #{export_attempt.get('id')} is ready for retry.",
+                    _age_hours(retry.get("nextRetryAt"), now),
+                    {
+                        "documentId": export_attempt.get("document_id"),
+                        "reason": retry.get("reason"),
+                        "nextRetryAt": retry.get("nextRetryAt"),
+                    },
+                ))
+
         for export_attempt in failed_exports:
             issues.append(_issue(
                 "high",
@@ -307,6 +328,8 @@ class LocalOperationsHealth:
                 "approvedExports": len(approved_exports),
                 "supervisedExports": len(supervised_exports),
                 "executingExports": len(executing_exports),
+                "deferredExports": len(deferred_exports),
+                "deferredExportsDue": _issue_count(issues, "deferred_export_retry_due"),
                 "failedExports": len(failed_exports),
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),
                 "masterLedgerBlockedRows": master_ledger_summary.get("blockedRows", 0),
@@ -381,6 +404,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Review approved export attempts that remain pending and decide whether to submit or cancel.")
     if "stuck_export_execution" in issue_types:
         actions.append("Inspect the claimed export attempt and verify downstream state before releasing or retrying it.")
+    if "deferred_export_retry_due" in issue_types:
+        actions.append("Run the approved-export worker to retry due quota-deferred Wave attempts.")
     if "failed_export_attempt" in issue_types:
         actions.append("Inspect failed export attempts and retry after fixing the source issue.")
     if "master_ledger_blockers" in issue_types:

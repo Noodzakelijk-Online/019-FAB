@@ -235,6 +235,34 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertIn("stuck_export_execution", {issue["type"] for issue in health["issues"]})
             self.assertIn("verify downstream state", " ".join(health["nextActions"]))
 
+    def test_health_surfaces_due_quota_deferred_exports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            export_id = ledger.upsert_export_attempt({
+                "status": "deferred",
+                "externalSubmission": "not_executed",
+                "targetSystem": "waveapps_business",
+                "message": "Wave quota unavailable.",
+                "metadata": {
+                    "retry": {
+                        "reason": "rate_limited",
+                        "attemptCount": 1,
+                        "nextRetryAt": _hours_ago(1),
+                    }
+                },
+            })
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            self.assertEqual(health["metrics"]["deferredExports"], 1)
+            self.assertEqual(health["metrics"]["deferredExportsDue"], 1)
+            issue = next(
+                item for item in health["issues"]
+                if item["type"] == "deferred_export_retry_due"
+            )
+            self.assertEqual(issue["entityId"], str(export_id))
+            self.assertIn("approved-export worker", " ".join(health["nextActions"]))
+
 
 def _hours_ago(hours: int) -> str:
     value = datetime.now(timezone.utc) - timedelta(hours=hours)

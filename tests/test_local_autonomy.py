@@ -487,8 +487,14 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(execution_action["summary"]["attempted"], 1)
             self.assertEqual(
                 ledger.get_export_attempt(prepared["exportAttemptId"])["status"],
-                "queued",
+                "attention_required",
             )
+            self.assertEqual(
+                ledger.get_export_attempt(prepared["exportAttemptId"])["external_submission"],
+                "not_executed",
+            )
+            reviews = ledger.list_review_items(document_id=document_id)
+            self.assertEqual(reviews[0]["reason"], "wave_target_ambiguous")
             audit_actions = [event["action"] for event in ledger.list_audit_events(limit=40)]
             self.assertIn("local_backup.created", audit_actions)
             self.assertIn("local_autonomy.export_execution_preflight_backup", audit_actions)

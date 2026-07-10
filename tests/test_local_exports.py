@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -12,6 +13,16 @@ from src.operations.local_bookkeeping_records import LocalBookkeepingRecordServi
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_routing import LocalRoutingService
+
+
+class _FakeWaveExecutor:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return dict(self.result)
 
 
 class TestLocalExportAttemptService(unittest.TestCase):
@@ -267,7 +278,12 @@ class TestLocalExportAttemptService(unittest.TestCase):
                 },
             })
             route = LocalRoutingService(ledger).prepare_document_route(document_id)
-            service = LocalExportAttemptService(ledger)
+            wave_executor = _FakeWaveExecutor({
+                "status": "success",
+                "message": "Wave transaction created.",
+                "external_id": "wave-api-tx-1",
+            })
+            service = LocalExportAttemptService(ledger, wave_executor=wave_executor)
 
             prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
             cannot_execute = service.execute_attempt(prepared["exportAttemptId"])
@@ -282,14 +298,187 @@ class TestLocalExportAttemptService(unittest.TestCase):
             self.assertEqual(prepared["success"], True)
             self.assertEqual(cannot_execute["status"], "not_approved")
             self.assertEqual(approved["status"], "approved")
-            self.assertEqual(executed["status"], "queued")
-            self.assertEqual(executed["executionStatus"], "queued")
-            self.assertEqual(executed["externalSubmission"], "queued")
-            self.assertEqual(repeated["status"], "already_queued")
+            self.assertEqual(executed["status"], "executed")
+            self.assertEqual(executed["executionStatus"], "success")
+            self.assertEqual(executed["externalSubmission"], "executed")
+            self.assertEqual(repeated["status"], "already_executed")
+            self.assertEqual(len(wave_executor.calls), 1)
+            self.assertEqual(wave_executor.calls[0]["idempotency_key"], prepared["operationId"])
             record = ledger.get_document(document_id)
-            self.assertEqual(record["bookkeeping_record"]["export_status"], "queued")
+            self.assertEqual(record["bookkeeping_record"]["export_status"], "executed")
             self.assertEqual(record["bookkeeping_record"]["status"], "routed")
-            self.assertEqual(ledger.get_export_attempt(prepared["exportAttemptId"])["external_submission"], "queued")
+            attempt = ledger.get_export_attempt(prepared["exportAttemptId"])
+            self.assertEqual(attempt["external_submission"], "executed")
+            self.assertEqual(attempt["external_id"], "wave-api-tx-1")
+
+    def test_wave_execution_without_unambiguous_target_opens_review_and_stays_unsubmitted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-wave-ambiguous",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-07-10",
+                "totalAmount": 42.5,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            service = LocalExportAttemptService(ledger)
+            prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+
+            result = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "attention_required")
+            self.assertEqual(result["externalSubmission"], "not_executed")
+            attempt = ledger.get_export_attempt(prepared["exportAttemptId"])
+            self.assertEqual(attempt["status"], "attention_required")
+            self.assertEqual(attempt["external_submission"], "not_executed")
+            review = ledger.get_review_item(result["reviewItemId"])
+            self.assertEqual(review["reason"], "wave_target_ambiguous")
+            self.assertIn(str(prepared["exportAttemptId"]), review["details"])
+            record = ledger.get_document(document_id)["bookkeeping_record"]
+            self.assertEqual(record["status"], "export_attention_required")
+            self.assertEqual(record["export_status"], "attention_required")
+
+            reapproved = service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+                resolution="Configured an explicit Wave target.",
+            )
+
+            self.assertEqual(reapproved["status"], "approved")
+            self.assertEqual(reapproved["resolvedReviewIds"], [review["id"]])
+            self.assertEqual(ledger.get_review_item(review["id"])["status"], "resolved")
+
+    def test_wave_quota_deferral_is_durable_and_not_retried_early(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-wave-rate-limit",
+                "originalFilename": "receipt.txt",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-07-10",
+                "totalAmount": 42.5,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            wave_executor = _FakeWaveExecutor({
+                "status": "rate_limited",
+                "message": "Wave quota unavailable.",
+                "retry_after_seconds": 600,
+            })
+            service = LocalExportAttemptService(
+                ledger,
+                {"fab_autonomy_execute_approved_exports": True},
+                wave_executor=wave_executor,
+            )
+            prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+
+            deferred = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+            repeated = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+            batch = service.process_approved_attempts(force=True, create_backup=False)
+
+            self.assertTrue(deferred["success"])
+            self.assertEqual(deferred["status"], "deferred")
+            self.assertEqual(deferred["externalSubmission"], "not_executed")
+            self.assertEqual(repeated["status"], "retry_deferred")
+            self.assertEqual(batch["count"], 0)
+            self.assertEqual(batch["deferredNotDue"], 1)
+            self.assertEqual(len(wave_executor.calls), 1)
+            attempt = ledger.get_export_attempt(prepared["exportAttemptId"])
+            self.assertEqual(attempt["status"], "deferred")
+            self.assertEqual(attempt["metadata"]["retry"]["attemptCount"], 1)
+            self.assertIsNotNone(attempt["metadata"]["retry"]["nextRetryAt"])
+
+            metadata = dict(attempt["metadata"])
+            metadata["retry"] = dict(metadata["retry"])
+            metadata["retry"]["nextRetryAt"] = (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat()
+            ledger.update_export_attempt(prepared["exportAttemptId"], {"metadata": metadata})
+            wave_executor.result = {
+                "status": "success",
+                "message": "Wave transaction created after quota reset.",
+                "external_id": "wave-retry-tx-1",
+            }
+
+            retried = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+
+            self.assertEqual(retried["status"], "executed")
+            self.assertEqual(retried["externalSubmission"], "executed")
+            self.assertEqual(len(wave_executor.calls), 2)
+            self.assertEqual(
+                ledger.get_export_attempt(prepared["exportAttemptId"])["external_id"],
+                "wave-retry-tx-1",
+            )
+
+    def test_approved_wave_action_without_verified_api_executor_is_not_marked_queued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-wave-bill-unsupported",
+                "originalFilename": "vendor-invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-07-10",
+                "totalAmount": 42.5,
+                "extractedData": {
+                    "vendor_name": "Office Shop",
+                    "transaction_date": "2026-07-10",
+                    "total_amount": 42.5,
+                    "line_items": [{
+                        "description": "Printer paper",
+                        "amount": 42.5,
+                        "category": "Office Supplies",
+                    }],
+                },
+            })
+            config = {
+                "waveapps_default_target": "waveapps_business",
+                "waveapps_business_access_token": "secret-store-token",
+                "waveapps_business_id": "business-1",
+            }
+            route = LocalRoutingService(ledger, config).prepare_document_route(document_id)
+            service = LocalExportAttemptService(ledger, config)
+            prepared = service.prepare_from_routing_attempt(route["routingAttemptId"])
+            service.approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+
+            result = service.execute_attempt(prepared["exportAttemptId"], actor="tester")
+
+            self.assertEqual(prepared["exportAttempt"]["action_id"], "bill_create")
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "attention_required")
+            self.assertEqual(result["externalSubmission"], "not_executed")
+            attempt = ledger.get_export_attempt(prepared["exportAttemptId"])
+            self.assertEqual(attempt["status"], "attention_required")
+            self.assertNotEqual(attempt["external_submission"], "queued")
+            review = ledger.get_review_item(result["reviewItemId"])
+            self.assertEqual(review["reason"], "wave_executor_unavailable")
 
     def test_execute_approved_mijngeldzaken_export_prepares_supervised_artifact(self):
         with tempfile.TemporaryDirectory() as temp_dir:

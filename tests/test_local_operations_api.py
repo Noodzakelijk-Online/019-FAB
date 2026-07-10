@@ -1044,6 +1044,8 @@ class TestLocalOperationsApi(unittest.TestCase):
 
     def test_api_executes_approved_export_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            reset_all_limiters()
+            self.addCleanup(reset_all_limiters)
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
             ledger = LocalOperationsLedger(ledger_path)
             document_id = ledger.register_document({
@@ -1064,8 +1066,20 @@ class TestLocalOperationsApi(unittest.TestCase):
                         "tax_code": "BTW 21%",
                     }]
                 },
+                "metadata": {"targetSystem": "waveapps_business"},
             })
-            app = create_app({"fab_local_ledger_path": ledger_path})
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "waveapps_business_access_token": "secret-store-token",
+                "waveapps_business_id": "business-1",
+                "waveapps_business_anchor_account_id": "bank-account-1",
+                "waveapps_business_category_mapping": {
+                    "Office Supplies": "Office Supplies",
+                },
+                "waveapps_business_category_account_ids": {
+                    "Office Supplies": "expense-account-1",
+                },
+            })
             client = app.test_client()
 
             route = client.post(f"/api/documents/{document_id}/route", json={}).get_json()
@@ -1077,19 +1091,42 @@ class TestLocalOperationsApi(unittest.TestCase):
                 f"/api/export-attempts/{prepared.get_json()['exportAttemptId']}/approve",
                 json={"confirmation": EXPORT_APPROVAL_PHRASE, "actor": "test"},
             )
-            executed = client.post(
-                f"/api/export-attempts/{prepared.get_json()['exportAttemptId']}/execute",
-                json={},
-            )
+            wave_response = MagicMock()
+            wave_response.raise_for_status.return_value = None
+            wave_response.json.return_value = {
+                "data": {
+                    "moneyTransactionCreate": {
+                        "didSucceed": True,
+                        "inputErrors": [],
+                        "transaction": {"id": "wave-api-transaction-1"},
+                    }
+                }
+            }
+            with patch(
+                "src.data_entry.waveapps_business_handler.requests.post",
+                return_value=wave_response,
+            ) as wave_post:
+                executed = client.post(
+                    f"/api/export-attempts/{prepared.get_json()['exportAttemptId']}/execute",
+                    json={},
+                )
 
             self.assertEqual(prepared.status_code, 200)
             self.assertEqual(approved.status_code, 200)
-            self.assertIn(executed.get_json()["status"], {"queued", "already_queued"})
-            self.assertIn(executed.get_json()["externalSubmission"], {"queued", "executed"})
+            self.assertEqual(executed.status_code, 200)
+            self.assertEqual(executed.get_json()["status"], "executed")
+            self.assertEqual(executed.get_json()["externalSubmission"], "executed")
+            wave_post.assert_called_once()
+            request_input = wave_post.call_args.kwargs["json"]["variables"]["input"]
+            self.assertEqual(request_input["businessId"], "business-1")
+            self.assertEqual(request_input["externalId"], f"fab:{prepared.get_json()['operationId']}")
+            self.assertEqual(request_input["anchor"]["accountId"], "bank-account-1")
+            self.assertEqual(request_input["lineItems"][0]["accountId"], "expense-account-1")
             page = client.get("/").data.decode("utf-8")
-            self.assertIn("Execute", page)
+            self.assertIn("wave-api-transaction-1", page)
             attempt = client.get(f"/api/export-attempts/{prepared.get_json()['exportAttemptId']}").get_json()
-            self.assertIn(attempt["external_submission"], {"queued", "executed"})
+            self.assertEqual(attempt["external_submission"], "executed")
+            self.assertEqual(attempt["external_id"], "wave-api-transaction-1")
             records = client.get("/api/bookkeeping-records").get_json()["bookkeepingRecords"]
             self.assertEqual(records[0]["status"], "routed")
 

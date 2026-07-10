@@ -6,10 +6,12 @@ FAB now treats approved posting execution as a controlled external operation.
 
 FAB treats a configured provider throttle differently from a failed posting.
 Immediately before a Waveapps API request, the handler reserves a slot from the
-shared API quota guard. If no slot is
-available, the posting changes to `posting_deferred` and is placed back into
-the retry queue without increasing its failure count, creating a dead-letter
-item, or opening manual review.
+shared API quota guard. In the authoritative operations ledger, an unavailable
+slot changes the export attempt to `deferred` and stores `attemptCount`,
+`retryAfterSeconds`, and `nextRetryAt` in redacted export metadata. The worker
+does not claim the attempt again before that time. This does not consume a
+failure count or create avoidable manual review. The compatibility executor
+uses its older `posting_deferred` retry-queue state.
 
 ```ini
 outbound_rate_limit_max_wait_seconds = 0
@@ -32,7 +34,10 @@ Bookkeeping postings must not be duplicated and must not disappear silently. Ext
 
 ## Atomic claim
 
-Before a posting attempt is executed, FAB changes the status from `approved` to `posting_in_progress` in one database update. This prevents two workers from executing the same approved attempt at the same time.
+Before an operations-ledger export is executed, FAB atomically changes
+`approved` or due `deferred` to `execution_in_progress`. The compatibility
+executor similarly uses `posting_in_progress`. This prevents two workers from
+executing the same approved attempt at the same time.
 
 ## Retry queue
 
@@ -70,8 +75,9 @@ The compatibility worker cycle does this only when
 
 The authoritative operations-ledger executor remains disabled unless
 `fab_autonomy_execute_approved_exports = true` is set in local config. The
-retry/dead-letter queue documented here belongs to the compatibility
-`posting_attempts` executor.
+SQL retry/dead-letter queue documented below belongs to the compatibility
+`posting_attempts` executor; operations-ledger quota deferral stays on the
+authoritative `export_attempts` row and is visible in `/api/health`.
 
 ## Operational rule
 

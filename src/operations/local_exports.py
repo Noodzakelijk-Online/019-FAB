@@ -1,7 +1,7 @@
 import csv
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from src.data_entry.mijngeldzaken_artifacts import MijngeldzakenArtifactStore
@@ -11,6 +11,7 @@ from src.data_entry.mijngeldzaken_surface import (
     classify_mijngeldzaken_destination,
     resolve_mijngeldzaken_action_for_document,
 )
+from src.data_entry.waveapps_api_executor import WaveappsApiExecutor
 from src.data_entry.waveapps_autonomous_operator import WaveappsAutonomousOperator
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
@@ -21,12 +22,23 @@ EXPORT_APPROVAL_PHRASE = "APPROVE FAB EXPORT DRAFT"
 EXPORT_REJECTION_PHRASE = "REJECT FAB EXPORT DRAFT"
 EXPORT_RESULT_CONFIRMATION_PHRASE = "RECORD FAB EXPORT RESULT"
 OPEN_REVIEW_STATUSES = {"pending", "in_review"}
-APPROVABLE_EXPORT_STATUSES = {"approval_required", "prepared"}
-REJECTABLE_EXPORT_STATUSES = {"approval_required", "prepared", "approved", "supervision_required"}
+APPROVABLE_EXPORT_STATUSES = {"approval_required", "prepared", "attention_required"}
+REJECTABLE_EXPORT_STATUSES = {
+    "approval_required",
+    "prepared",
+    "approved",
+    "attention_required",
+    "deferred",
+    "supervision_required",
+}
 RESULT_STATUSES = {"executed", "submitted", "queued", "failed"}
 TERMINAL_EXECUTION_STATUSES = {"executed", "submitted", "queued"}
+CLAIMABLE_EXECUTION_STATUSES = {"approved", "deferred"}
+DEFERRED_EXECUTION_STATUSES = {"rate_limited", "quota_exhausted"}
 PRESERVED_EXPORT_STATUSES = {
     "approved",
+    "attention_required",
+    "deferred",
     "execution_in_progress",
     "supervision_required",
     "queued",
@@ -45,9 +57,15 @@ class LocalExportAttemptService:
     results without silently submitting data to Wave.
     """
 
-    def __init__(self, ledger: LocalOperationsLedger, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        ledger: LocalOperationsLedger,
+        config: Optional[Dict[str, Any]] = None,
+        wave_executor: Optional[WaveappsApiExecutor] = None,
+    ):
         self.ledger = ledger
         self.config = config or {}
+        self.wave_executor = wave_executor or WaveappsApiExecutor(self.config)
 
     def prepare_from_routing_attempt(
         self,
@@ -255,7 +273,12 @@ class LocalExportAttemptService:
                 "count": 0,
             }
 
-        attempts = self.ledger.list_export_attempts(status="approved", limit=limit)
+        candidates = self.ledger.list_export_attempts(
+            status=tuple(CLAIMABLE_EXECUTION_STATUSES),
+            limit=max(limit * 2, limit),
+        )
+        attempts = [attempt for attempt in candidates if _execution_retry_due(attempt)][:limit]
+        deferred_not_due = len(candidates) - len([attempt for attempt in candidates if _execution_retry_due(attempt)])
         pre_execution_backup = None
         if attempts and create_backup:
             from src.operations.local_backup import LocalBackupService
@@ -295,6 +318,9 @@ class LocalExportAttemptService:
                     "status": "pre_execution_backup_failed",
                     "processed": [],
                     "count": 0,
+                    "candidateCount": len(candidates),
+                    "eligibleCount": len(attempts),
+                    "deferredNotDue": deferred_not_due,
                     "preExecutionBackup": _compact_backup_result(pre_execution_backup),
                 }
 
@@ -307,6 +333,9 @@ class LocalExportAttemptService:
             "status": "completed",
             "processed": processed,
             "count": len(processed),
+            "candidateCount": len(candidates),
+            "eligibleCount": len(attempts),
+            "deferredNotDue": deferred_not_due,
             "preExecutionBackup": _compact_backup_result(pre_execution_backup),
         }
 
@@ -533,6 +562,11 @@ class LocalExportAttemptService:
             return stale
 
         now = _now()
+        resolved_review_ids = (
+            self._resolve_wave_execution_reviews(attempt, actor, "reapproved")
+            if attempt.get("status") == "attention_required"
+            else []
+        )
         metadata = dict(attempt.get("metadata") or {})
         master_ledger_checksum = _master_ledger_checksum(metadata)
         metadata["approval"] = {
@@ -590,11 +624,13 @@ class LocalExportAttemptService:
                 "routingAttemptId": attempt.get("routing_attempt_id"),
                 "externalSubmission": "approved_not_executed",
                 "masterLedgerChecksum": master_ledger_checksum,
+                "resolvedReviewIds": resolved_review_ids,
             },
         })
         return {
             "success": True,
             "status": "approved",
+            "resolvedReviewIds": resolved_review_ids,
             "exportAttempt": self.ledger.get_export_attempt(export_attempt_id),
         }
 
@@ -653,6 +689,8 @@ class LocalExportAttemptService:
                 actor=actor,
                 result_status="rejected",
             )
+        elif attempt.get("status") == "attention_required":
+            resolved_review_ids = self._resolve_wave_execution_reviews(attempt, actor, "rejected")
         details = {
             "exportAttemptId": export_attempt_id,
             "rejectedBy": actor,
@@ -834,8 +872,20 @@ class LocalExportAttemptService:
             return {"success": False, "status": "not_found", "error": "Export attempt not found"}
 
         status = str(attempt.get("status") or "").strip().lower()
-        if status == "approved":
-            claim = self.ledger.claim_export_attempt(export_attempt_id)
+        if status in CLAIMABLE_EXECUTION_STATUSES:
+            if not _execution_retry_due(attempt):
+                retry = (attempt.get("metadata") or {}).get("retry") or {}
+                return {
+                    "success": True,
+                    "status": "retry_deferred",
+                    "nextRetryAt": retry.get("nextRetryAt"),
+                    "externalSubmission": "not_executed",
+                    "exportAttempt": attempt,
+                }
+            claim = self.ledger.claim_export_attempt(
+                export_attempt_id,
+                allowed_statuses=CLAIMABLE_EXECUTION_STATUSES,
+            )
             if claim.get("status") != "claimed":
                 current = self.ledger.get_export_attempt(export_attempt_id)
                 return {
@@ -872,7 +922,19 @@ class LocalExportAttemptService:
             if _is_mijngeldzaken_target(target_system):
                 return self._prepare_mijngeldzaken_supervision(attempt, actor)
             try:
-                operator = WaveappsAutonomousOperator(self.config)
+                operator = WaveappsAutonomousOperator(
+                    self.config,
+                    action_handlers={
+                        str(action_id): lambda wave_payload: self.wave_executor.execute(
+                            target_system=target_system,
+                            action_id=action_id,
+                            payload=wave_payload,
+                            idempotency_key=attempt.get("operation_id") or attempt.get("id"),
+                            document_id=attempt.get("document_id"),
+                            bookkeeping_record_id=attempt.get("bookkeeping_record_id"),
+                        )
+                    },
+                )
                 execution = operator.execute(
                     action_id,
                     payload,
@@ -894,6 +956,7 @@ class LocalExportAttemptService:
             execution_status = str(execution.get("status") or "").strip().lower()
             external_id = execution.get("external_id")
             operation = execution.get("operation") or attempt
+            provider_result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
             external_submission, mapped_status, mapped_message = _map_execution_status(execution_status, target_system)
 
             now = _now()
@@ -904,6 +967,9 @@ class LocalExportAttemptService:
             execution_metadata["mappedStatus"] = mapped_status
             execution_metadata["operation"] = operation
             execution_metadata["masterLedgerChecksum"] = master_ledger_checksum
+            retry_state = None
+            if mapped_status == "deferred":
+                retry_state = _next_retry_state(metadata, provider_result, self.config, now)
 
             update_payload = {
                 "status": mapped_status,
@@ -914,11 +980,13 @@ class LocalExportAttemptService:
                     "message": execution.get("message"),
                     "externalId": external_id,
                     "operation": operation,
+                    "providerResult": provider_result,
                     "masterLedgerChecksum": master_ledger_checksum,
                 },
                 "metadata": {
                     **dict(metadata),
                     "lastExecution": execution_metadata,
+                    **({"retry": retry_state} if retry_state else {}),
                 },
             }
             if mapped_status in TERMINAL_EXECUTION_STATUSES:
@@ -964,8 +1032,29 @@ class LocalExportAttemptService:
                         },
                     )
 
+            review_id = None
+            if mapped_status in {"attention_required", "failed"}:
+                review_id = self._queue_wave_execution_review(
+                    attempt,
+                    execution_status,
+                    execution.get("message") or mapped_message,
+                    provider_result,
+                )
+                self._record_attention_state(
+                    attempt,
+                    export_attempt_id,
+                    mapped_status,
+                    execution_status,
+                    review_id,
+                )
+
+            audit_action = {
+                "deferred": "local_export_attempt.execution_deferred",
+                "attention_required": "local_export_attempt.execution_attention_required",
+                "failed": "local_export_attempt.execution_failed",
+            }.get(mapped_status, "local_export_attempt.executed")
             self.ledger.record_audit_event({
-                "action": "local_export_attempt.executed",
+                "action": audit_action,
                 "entityType": "export_attempt",
                 "entityId": str(export_attempt_id),
                 "details": {
@@ -976,13 +1065,17 @@ class LocalExportAttemptService:
                     "externalId": external_id,
                     "targetSystem": target_system,
                     "masterLedgerChecksum": master_ledger_checksum,
+                    "reviewItemId": review_id,
+                    "nextRetryAt": (retry_state or {}).get("nextRetryAt"),
                 },
             })
             return {
-                "success": True,
+                "success": mapped_status in TERMINAL_EXECUTION_STATUSES or mapped_status == "deferred",
                 "status": mapped_status,
                 "externalSubmission": external_submission,
                 "executionStatus": execution_status,
+                "reviewItemId": review_id,
+                "nextRetryAt": (retry_state or {}).get("nextRetryAt"),
                 "exportAttempt": self.ledger.get_export_attempt(export_attempt_id),
             }
 
@@ -1023,6 +1116,110 @@ class LocalExportAttemptService:
             "status": "not_approved",
             "message": f"Export attempt status {attempt.get('status')} cannot be executed without approval.",
         }
+
+    def _queue_wave_execution_review(
+        self,
+        attempt: Dict[str, Any],
+        execution_status: str,
+        message: str,
+        provider_result: Dict[str, Any],
+    ) -> Optional[int]:
+        reason = str(provider_result.get("review_reason") or "wave_execution_attention_required")
+        document_id = attempt.get("document_id")
+        marker = f'"exportAttemptId": {int(attempt["id"])}'
+        candidates = self.ledger.list_review_items(
+            status=tuple(OPEN_REVIEW_STATUSES),
+            document_id=int(document_id) if document_id else None,
+            limit=500,
+        )
+        for item in candidates:
+            if item.get("reason") == reason and marker in str(item.get("details") or ""):
+                return int(item["id"])
+        details = {
+            "exportAttemptId": int(attempt["id"]),
+            "bookkeepingRecordId": attempt.get("bookkeeping_record_id"),
+            "targetSystem": _target_system_for_attempt(attempt),
+            "actionId": attempt.get("action_id"),
+            "executionStatus": execution_status,
+            "message": message,
+            "missingConfiguration": provider_result.get("missing_configuration"),
+            "externalSubmission": "not_executed",
+        }
+        return self.ledger.create_review_item({
+            "documentId": document_id,
+            "reason": reason,
+            "details": json.dumps(details, sort_keys=True, default=str),
+            "status": "pending",
+        })
+
+    def _resolve_wave_execution_reviews(
+        self,
+        attempt: Dict[str, Any],
+        actor: str,
+        result_status: str,
+    ) -> list[int]:
+        document_id = attempt.get("document_id")
+        marker = f'"exportAttemptId": {int(attempt["id"])}'
+        candidates = self.ledger.list_review_items(
+            status=tuple(OPEN_REVIEW_STATUSES),
+            document_id=int(document_id) if document_id else None,
+            limit=500,
+        )
+        resolved = []
+        for item in candidates:
+            if marker not in str(item.get("details") or ""):
+                continue
+            if not str(item.get("reason") or "").startswith("wave_"):
+                continue
+            self.ledger.resolve_review_item(
+                int(item["id"]),
+                status="resolved",
+                resolution=f"Wave export {result_status} by {actor}.",
+                corrected_data={
+                    "exportAttemptId": int(attempt["id"]),
+                    "resultStatus": result_status,
+                    "resolvedBy": actor,
+                },
+            )
+            resolved.append(int(item["id"]))
+        return resolved
+
+    def _record_attention_state(
+        self,
+        attempt: Dict[str, Any],
+        export_attempt_id: int,
+        mapped_status: str,
+        execution_status: str,
+        review_id: Optional[int],
+    ) -> None:
+        export_status = "failed" if mapped_status == "failed" else "attention_required"
+        record_status = "export_failed" if mapped_status == "failed" else "export_attention_required"
+        details = {
+            "exportAttemptId": export_attempt_id,
+            "executionStatus": execution_status,
+            "reviewItemId": review_id,
+            "externalSubmission": "not_executed",
+        }
+        if attempt.get("document_id"):
+            LocalBookkeepingRecordService(self.ledger, self.config).record_export_state(
+                int(attempt["document_id"]),
+                export_status,
+                status=record_status,
+                routing_attempt_id=attempt.get("routing_attempt_id"),
+                details=details,
+            )
+            return
+        if attempt.get("bookkeeping_record_id"):
+            record = self.ledger.get_bookkeeping_record(int(attempt["bookkeeping_record_id"])) or {}
+            if record:
+                _update_record_export_state(
+                    self.ledger,
+                    record,
+                    export_status,
+                    status=record_status,
+                    routing_attempt_id=attempt.get("routing_attempt_id"),
+                    details=details,
+                )
 
     def _release_execution_claim(self, export_attempt_id: int, message: str) -> None:
         self.ledger.update_export_attempt(export_attempt_id, {
@@ -1677,13 +1874,71 @@ def _map_execution_status(status: str, target_system: Any = "waveapps") -> tuple
         return "submitted", "submitted", f"{target_label} external execution submitted."
     if status == "queued":
         return "queued", "queued", f"{target_label} execution queued for external processing."
+    if status in DEFERRED_EXECUTION_STATUSES:
+        return "not_executed", "deferred", f"{target_label} execution was deferred by the outbound quota guard."
     if status == "blocked_requires_confirmation":
-        return "not_executed", "approved", "Execution is waiting for explicit confirmed action settings."
+        return "not_executed", "attention_required", "Execution needs an explicitly supported confirmed-action executor."
     if status == "blocked_requires_credentials":
-        return "not_executed", "approved", "Execution is waiting for external credentials."
+        return "not_executed", "attention_required", "Execution is waiting for external credentials."
     if status == "needs_review":
-        return "not_executed", "approved", "Execution needs additional review before it can run."
+        return "not_executed", "attention_required", "Execution needs additional review before it can run."
     return "failed", "failed", f"{target_label} execution could not run: {status!r}."
+
+
+def _execution_retry_due(attempt: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    if str(attempt.get("status") or "") != "deferred":
+        return True
+    metadata = attempt.get("metadata") if isinstance(attempt.get("metadata"), dict) else {}
+    retry = metadata.get("retry") if isinstance(metadata.get("retry"), dict) else {}
+    next_retry_at = _parse_datetime(retry.get("nextRetryAt"))
+    if not next_retry_at:
+        return True
+    return (now or datetime.now(timezone.utc)) >= next_retry_at
+
+
+def _next_retry_state(
+    metadata: Dict[str, Any],
+    provider_result: Dict[str, Any],
+    config: Dict[str, Any],
+    now_text: str,
+) -> Dict[str, Any]:
+    previous = metadata.get("retry") if isinstance(metadata.get("retry"), dict) else {}
+    delay_value = provider_result.get("retry_after_seconds")
+    if delay_value in (None, ""):
+        status = str(provider_result.get("status") or "")
+        delay_value = config.get(
+            "quota_exhausted_retry_delay_seconds"
+            if status == "quota_exhausted"
+            else "rate_limit_retry_delay_seconds",
+            3600 if status == "quota_exhausted" else 60,
+        )
+    try:
+        delay_seconds = max(float(delay_value), 1.0)
+    except (TypeError, ValueError):
+        delay_seconds = 60.0
+    started_at = _parse_datetime(now_text) or datetime.now(timezone.utc)
+    return {
+        "attemptCount": int(previous.get("attemptCount") or 0) + 1,
+        "reason": provider_result.get("status") or "rate_limited",
+        "message": provider_result.get("message"),
+        "retryAfterSeconds": delay_seconds,
+        "nextRetryAt": (started_at + timedelta(seconds=delay_seconds)).isoformat(),
+    }
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _record_status_for_execution(status: str) -> str:

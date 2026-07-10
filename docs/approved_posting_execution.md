@@ -84,18 +84,54 @@ routes and checks approved operations-ledger exports. Execution remains disabled
 until `fab_autonomy_execute_approved_exports` is enabled. A backup is created
 before any approved batch is processed; a failed backup blocks the entire batch.
 
+## Verified Wave API execution
+
+The authoritative export service now attaches `WaveappsApiExecutor` to the
+existing Wave action planner. An approved export is only marked `executed` when
+the configured Wave handler returns a successful `moneyTransactionCreate`
+result with a Wave transaction ID. FAB passes the durable export operation ID
+into Wave's `externalId` field so retries use the same idempotency identity.
+
+Current verified API coverage is `transaction_add` for expenses. Modeled Wave
+actions such as bill, invoice, bank-feed, user-management, and destructive
+operations are not falsely reported as queued: they change to
+`attention_required`, remain `externalSubmission=not_executed`, and create a
+review item until a verified executor is implemented.
+
+Every route must identify `waveapps_business` or `waveapps_personal`. A generic
+`waveapps` target is blocked for review unless `[waveapps] default_target` was
+deliberately configured. This prevents a personal expense from silently being
+posted into the business ledger, or vice versa.
+
+Store credentials outside `config.ini`:
+
+```powershell
+$env:FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN = "..."
+$env:FAB_WAVEAPPS_BUSINESS_ID = "..."
+$env:FAB_WAVEAPPS_PERSONAL_ACCESS_TOKEN = "..."
+$env:FAB_WAVEAPPS_PERSONAL_ID = "..."
+```
+
+Anchor and category account IDs are non-secret routing configuration and must
+still be verified through account discovery. Missing credentials, ambiguous
+targets, missing account mappings, and unsupported actions create review work;
+they never count as external submission.
+
 ## Audit Trail
 
 Each execution attempt is written to the audit log:
 
 - execution started
 - posted
+- quota-deferred with next retry time
+- attention required with linked review item
 - posting failed
 - manual review item created when posting fails
 
 ## Current Limitation
 
-Wave expense execution uses the documented `moneyTransactionCreate` API contract.
+Wave expense execution uses the `moneyTransactionCreate` API contract already
+covered by FAB's handler tests.
 Before FAB can submit, each Wave target needs a verified anchor account ID and
 a category-to-account-ID mapping. FAB refuses to send a request when any of
 those are absent and sends the item to review instead. The configuration

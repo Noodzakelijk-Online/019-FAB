@@ -40,20 +40,24 @@ def build_expense_transaction_input(
     category = str(data.get("category") or "").strip()
     mapped_category = str(_as_mapping(category_mapping).get(category) or category).strip()
     account_ids = _as_mapping(category_account_ids)
-    category_account_id = (
-        account_ids.get(mapped_category)
-        or account_ids.get(category)
-        or default_category_account_id
-    )
     resolved_description = str(description or extracted.get("description") or "Automated expense").strip()
     amount = _amount(extracted.get("total_amount"))
     transaction_date = _date(extracted.get("transaction_date"))
-    missing = [
+    raw_line_items = extracted.get("line_items") if isinstance(extracted.get("line_items"), list) else []
+    line_items, line_item_missing = _expense_line_items(
+        raw_line_items,
+        fallback_category=category,
+        fallback_mapped_category=mapped_category,
+        category_mapping=category_mapping,
+        category_account_ids=account_ids,
+        default_category_account_id=default_category_account_id,
+        total_amount=amount,
+    )
+    missing = list(line_item_missing) + [
         name
         for name, value in (
             ("businessId", business_id),
             ("anchorAccountId", anchor_account_id),
-            ("categoryAccountId", category_account_id),
             ("transactionDate", transaction_date),
             ("totalAmount", amount),
         )
@@ -81,13 +85,69 @@ def build_expense_transaction_input(
                 "amount": amount,
                 "direction": "WITHDRAWAL",
             },
-            "lineItems": [{
-                "accountId": str(category_account_id),
-                "amount": amount,
-                "balance": "INCREASE",
-            }],
+            "lineItems": line_items,
         },
     }
+
+
+def _expense_line_items(
+    raw_items: list,
+    *,
+    fallback_category: str,
+    fallback_mapped_category: str,
+    category_mapping: Any,
+    category_account_ids: Dict[str, Any],
+    default_category_account_id: Any,
+    total_amount: Optional[float],
+) -> tuple[list[Dict[str, Any]], list[str]]:
+    mappings = _as_mapping(category_mapping)
+    if not raw_items:
+        account_id = (
+            category_account_ids.get(fallback_mapped_category)
+            or category_account_ids.get(fallback_category)
+            or default_category_account_id
+        )
+        if not account_id:
+            return [], ["categoryAccountId"]
+        return [{
+            "accountId": str(account_id),
+            "amount": total_amount,
+            "balance": "INCREASE",
+        }], []
+
+    line_items = []
+    missing = []
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            missing.append(f"lineItems[{index}]")
+            continue
+        line_category = str(item.get("category") or fallback_category).strip()
+        mapped_category = str(mappings.get(line_category) or line_category or fallback_mapped_category).strip()
+        account_label = str(item.get("account") or item.get("account_name") or "").strip()
+        account_id = (
+            category_account_ids.get(mapped_category)
+            or category_account_ids.get(line_category)
+            or category_account_ids.get(account_label)
+            or default_category_account_id
+        )
+        line_amount = _amount(item.get("amount"))
+        if not account_id:
+            missing.append(f"lineItems[{index}].accountId")
+        if line_amount is None:
+            missing.append(f"lineItems[{index}].amount")
+        if account_id and line_amount is not None:
+            line_items.append({
+                "accountId": str(account_id),
+                "amount": line_amount,
+                "balance": "INCREASE",
+            })
+
+    if not missing and total_amount is not None:
+        item_total = sum((Decimal(str(item["amount"])) for item in line_items), Decimal("0"))
+        expected_total = Decimal(str(total_amount))
+        if item_total.quantize(Decimal("0.01")) != expected_total.quantize(Decimal("0.01")):
+            missing.append("lineItemTotal")
+    return line_items, missing
 
 
 def wave_error_messages(payload: Any) -> str:

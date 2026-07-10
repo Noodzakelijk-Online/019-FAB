@@ -9,7 +9,13 @@ class TestConfigLoader(unittest.TestCase):
     def setUp(self):
         self._original_env = {
             key: os.environ.get(key)
-            for key in ("FAB_LOCAL_LEDGER_PATH", "FAB_LOCAL_API_PORT")
+            for key in (
+                "FAB_LOCAL_LEDGER_PATH",
+                "FAB_LOCAL_API_PORT",
+                "FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN",
+                "FAB_WAVEAPPS_BUSINESS_ID",
+                "FAB_WAVEAPPS_DEFAULT_TARGET",
+            )
         }
 
     def tearDown(self):
@@ -53,6 +59,21 @@ class TestConfigLoader(unittest.TestCase):
 
         self.assertEqual(config["fab_local_ledger_path"], ledger_path)
         self.assertEqual(config["fab_local_api_port"], "5052")
+
+    def test_wave_credentials_can_be_loaded_from_uncommitted_environment_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN"] = "environment-token"
+            os.environ["FAB_WAVEAPPS_BUSINESS_ID"] = "business-123"
+            os.environ["FAB_WAVEAPPS_DEFAULT_TARGET"] = "waveapps_business"
+
+            config = ConfigLoader(
+                config_file=os.path.join(temp_dir, "missing.ini")
+            ).get_all_config()
+
+        self.assertEqual(config["waveapps_business_access_token"], "environment-token")
+        self.assertEqual(config["waveapps_business_id"], "business-123")
+        self.assertEqual(config["waveapps_business"]["access_token"], "environment-token")
+        self.assertEqual(config["waveapps_default_target"], "waveapps_business")
 
 
 if __name__ == "__main__":

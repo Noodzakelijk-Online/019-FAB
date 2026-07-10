@@ -53,6 +53,59 @@ class TestWaveappsTransactionInput(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["missingFields"], ["categoryAccountId", "transactionDate", "totalAmount"])
 
+    def test_preserves_balanced_multi_category_line_items(self):
+        document = self._document(extracted_data={
+            "description": "Office order",
+            "total_amount": "42.50",
+            "transaction_date": "2026-07-10",
+            "line_items": [
+                {"description": "Paper", "amount": "30.00", "category": "Office Supplies"},
+                {"description": "Cloud storage", "amount": "12.50", "category": "Software"},
+            ],
+        })
+
+        result = build_expense_transaction_input(
+            document,
+            business_id="business-1",
+            anchor_account_id="anchor-1",
+            category_mapping={
+                "Business": "Office Supplies",
+                "Office Supplies": "Office Supplies",
+                "Software": "Software",
+            },
+            category_account_ids={
+                "Office Supplies": "expense-office",
+                "Software": "expense-software",
+            },
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["input"]["lineItems"], [
+            {"accountId": "expense-office", "amount": 30.0, "balance": "INCREASE"},
+            {"accountId": "expense-software", "amount": 12.5, "balance": "INCREASE"},
+        ])
+
+    def test_unbalanced_line_items_require_review(self):
+        document = self._document(extracted_data={
+            "description": "Office order",
+            "total_amount": "42.50",
+            "transaction_date": "2026-07-10",
+            "line_items": [
+                {"description": "Paper", "amount": "30.00", "category": "Business"},
+            ],
+        })
+
+        result = build_expense_transaction_input(
+            document,
+            business_id="business-1",
+            anchor_account_id="anchor-1",
+            category_mapping={"Business": "Office Supplies"},
+            category_account_ids={"Office Supplies": "expense-office"},
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIn("lineItemTotal", result["missingFields"])
+
 
 if __name__ == "__main__":
     unittest.main()

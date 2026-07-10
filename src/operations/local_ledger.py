@@ -1999,10 +1999,20 @@ class LocalOperationsLedger:
                     "export_attempts",
                     "status = 'approved' AND external_submission = 'approved_not_executed'",
                 ),
+                "attention_export_attempts": self._count(
+                    connection,
+                    "export_attempts",
+                    "status = 'attention_required' AND external_submission = 'not_executed'",
+                ),
                 "supervised_export_attempts": self._count(
                     connection,
                     "export_attempts",
                     "status = 'supervision_required' AND external_submission = 'not_executed'",
+                ),
+                "deferred_export_attempts": self._count(
+                    connection,
+                    "export_attempts",
+                    "status = 'deferred' AND external_submission = 'not_executed'",
                 ),
                 "executed_export_attempts": self._count(
                     connection,

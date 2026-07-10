@@ -190,7 +190,7 @@ DASHBOARD_TEMPLATE = """
     .badge.attention, .badge.medium, .badge.low { background: #fff7e6; color: var(--warning); }
     .badge.needs_attention, .badge.needs_auth { background: #fff7e6; color: var(--warning); }
     .badge.safe_auto, .badge.safe_draft, .badge.read_only { background: #ecfdf3; color: var(--ok); }
-    .badge.review_required, .badge.approval_required, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed { background: #fff7e6; color: var(--warning); }
+    .badge.review_required, .badge.approval_required, .badge.attention_required, .badge.deferred, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed { background: #fff7e6; color: var(--warning); }
     .badge.completed, .badge.approved, .badge.executed, .badge.submitted, .badge.resolved, .badge.validated, .badge.routed, .badge.reconciled, .badge.ok { background: #ecfdf3; color: var(--ok); }
     .badge.ready { background: #ecfdf3; color: var(--ok); }
     .badge.not_configured, .badge.disabled { background: #f1f5f9; color: var(--muted); }
@@ -1279,6 +1279,8 @@ DASHBOARD_TEMPLATE = """
         <div class="summary-item"><span>Attempts</span><strong>{{ metrics.export_attempts }}</strong></div>
         <div class="summary-item"><span>Need approval</span><strong>{{ metrics.export_attempts_needing_approval }}</strong></div>
         <div class="summary-item"><span>Approved</span><strong>{{ metrics.approved_export_attempts }}</strong></div>
+        <div class="summary-item"><span>Needs attention</span><strong>{{ metrics.attention_export_attempts }}</strong></div>
+        <div class="summary-item"><span>Deferred</span><strong>{{ metrics.deferred_export_attempts }}</strong></div>
         <div class="summary-item"><span>Needs supervision</span><strong>{{ metrics.supervised_export_attempts }}</strong></div>
         <div class="summary-item"><span>Executed</span><strong>{{ metrics.executed_export_attempts }}</strong></div>
       </div>
@@ -1324,6 +1326,10 @@ DASHBOARD_TEMPLATE = """
               <td>
                 {{ export.action_id or "-" }}
                 <div class="muted mono">{{ export.operation_id or "-" }}</div>
+                {% if export.external_id %}
+                <div class="muted">Wave ID</div>
+                <div class="muted mono">{{ export.external_id }}</div>
+                {% endif %}
                 {% if export.metadata and export.metadata.masterLedgerDraft %}
                 <div class="muted">Master ledger {{ export.metadata.masterLedgerDraft.draftType }}</div>
                 <div class="muted mono">{{ export.metadata.masterLedgerChecksum[:12] if export.metadata.masterLedgerChecksum else export.metadata.masterLedgerDraft.checksum[:12] }}</div>
@@ -1348,7 +1354,10 @@ DASHBOARD_TEMPLATE = """
                   <button class="compact secondary" type="submit">Regenerate draft</button>
                 </form>
                 {% endif %}
-                {% if export.status in ["approval_required", "prepared"] %}
+                {% if export.status in ["approval_required", "prepared", "attention_required"] %}
+                {% if export.status == "attention_required" %}
+                <div class="muted">Resolve the linked review/configuration issue, then approve again.</div>
+                {% endif %}
                 <form class="table-actions" method="post" action="{{ url_for('approve_export_attempt_form', export_attempt_id=export.id) }}">
                   <input type="text" name="confirmation" placeholder="{{ export_approval_phrase }}">
                   <button class="compact" type="submit">Approve</button>

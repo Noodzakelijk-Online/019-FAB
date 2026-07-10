@@ -685,7 +685,6 @@ class LocalAutonomousService:
 
     def _run_export_execution(self, limit: int) -> Dict[str, Any]:
         service = LocalExportAttemptService(self.ledger, self.config)
-        attempts = self.ledger.list_export_attempts(status="approved", limit=limit)
         batch = service.process_approved_attempts(
             limit=limit,
             actor="local_autonomy",
@@ -693,12 +692,12 @@ class LocalAutonomousService:
             create_backup=True,
         )
         pre_execution_backup = batch.get("preExecutionBackup")
-        if attempts:
+        if batch.get("eligibleCount"):
             self.ledger.record_audit_event({
                 "action": "local_autonomy.export_execution_preflight_backup",
                 "entityType": "autonomous_cycle",
                 "details": {
-                    "attemptCount": len(attempts),
+                    "attemptCount": batch.get("eligibleCount"),
                     "backupPath": (pre_execution_backup or {}).get("backupPath"),
                     "backupFilename": (pre_execution_backup or {}).get("backupFilename"),
                     "ledgerSha256": (pre_execution_backup or {}).get("ledgerSha256"),
@@ -708,8 +707,10 @@ class LocalAutonomousService:
                 },
             })
         export_summaries = []
+        processed_attempts = []
         for execution in batch.get("processed") or []:
             attempt = execution.get("exportAttempt") if isinstance(execution.get("exportAttempt"), dict) else {}
+            processed_attempts.append(attempt)
             export_summaries.append({
                 "exportAttemptId": attempt.get("id"),
                 "targetSystem": _export_target_system(attempt),
@@ -722,8 +723,9 @@ class LocalAutonomousService:
             "status": "completed" if batch.get("success") else "blocked",
             "summary": {
                 "attempted": len(export_summaries),
-                "targetBreakdown": _target_breakdown(attempts, _export_target_system),
+                "targetBreakdown": _target_breakdown(processed_attempts, _export_target_system),
                 "attemptSummaries": export_summaries,
+                "deferredNotDue": batch.get("deferredNotDue", 0),
                 "preExecutionBackup": pre_execution_backup,
                 "batchStatus": batch.get("status"),
             },
@@ -869,6 +871,9 @@ def _compact_health(health: Dict[str, Any]) -> Dict[str, Any]:
         "pendingRoutingDrafts": metrics.get("pendingRoutingDrafts", 0),
         "pendingExportApprovals": metrics.get("pendingExportApprovals", 0),
         "approvedExports": metrics.get("approvedExports", 0),
+        "attentionExports": metrics.get("attention_export_attempts", 0),
+        "deferredExports": metrics.get("deferredExports", 0),
+        "deferredExportsDue": metrics.get("deferredExportsDue", 0),
         "failedExports": metrics.get("failedExports", 0),
         "masterLedgerRows": metrics.get("masterLedgerRows", 0),
         "masterLedgerBlockedRows": metrics.get("masterLedgerBlockedRows", 0),
