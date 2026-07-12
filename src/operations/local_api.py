@@ -37,6 +37,7 @@ from src.operations.local_mijngeldzaken_control import LocalMijngeldzakenControl
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_reporting import LocalFinancialReportingService
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
@@ -354,6 +355,7 @@ DASHBOARD_TEMPLATE = """
       <a href="#duplicates">Duplicates</a>
       <a href="#records">Records</a>
       <a href="#master-ledger">Master Ledger</a>
+      <a href="#reports">Reports</a>
       <a href="#fields">Fields</a>
       <a href="#routing">Routing</a>
       <a href="#exports">Exports</a>
@@ -1157,6 +1159,100 @@ DASHBOARD_TEMPLATE = """
         <summary>Master ledger summary</summary>
         <pre>{{ pretty_json(master_ledger.summary) }}</pre>
       </details>
+    </section>
+
+    <section id="reports">
+      <div class="section-head">
+        <div>
+          <h2>Financial Reports</h2>
+          <p>{{ financial_report.period.fromDate }} through {{ financial_report.period.toDate }} / {{ financial_report.basis }} basis / provisional</p>
+        </div>
+        <div class="inline-actions">
+          <a class="button-link secondary" href="{{ url_for('financial_reports_api') }}">JSON</a>
+          <a class="button-link secondary" href="{{ url_for('financial_reports_api', format='csv') }}">CSV</a>
+        </div>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-item"><span>Included</span><strong>{{ financial_report.summary.includedRecordCount }}</strong></div>
+        <div class="summary-item"><span>Excluded</span><strong>{{ financial_report.summary.excludedRecordCount }}</strong></div>
+        <div class="summary-item"><span>Undated</span><strong>{{ financial_report.summary.undatedRecordCount }}</strong></div>
+        <div class="summary-item"><span>Readiness</span><strong>{{ financial_report.summary.readiness }}</strong></div>
+      </div>
+      {% if financial_report.reports.profitAndLoss.byCurrency %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Currency</th>
+              <th>Revenue net</th>
+              <th>Expenses net</th>
+              <th>Net result</th>
+              <th>Output VAT</th>
+              <th>Input VAT</th>
+              <th>VAT payable</th>
+              <th>Cash movement</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for pnl in financial_report.reports.profitAndLoss.byCurrency %}
+            {% set vat = financial_report.reports.vat.byCurrency | selectattr('currency', 'equalto', pnl.currency) | first %}
+            {% set cash = financial_report.reports.cashFlow.byCurrency | selectattr('currency', 'equalto', pnl.currency) | first %}
+            <tr>
+              <td>{{ pnl.currency }}</td>
+              <td>{{ format_money(pnl.revenueNet) }}</td>
+              <td>{{ format_money(pnl.expensesNet) }}</td>
+              <td>{{ format_money(pnl.netResult) }}</td>
+              <td>{{ format_money(vat.outputVat if vat else 0) }}</td>
+              <td>{{ format_money(vat.inputVat if vat else 0) }}</td>
+              <td>{{ format_money(vat.netVatPayable if vat else 0) }}</td>
+              <td>{{ format_money(cash.netMovement if cash else 0) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">No reportable records in the selected period.</div>
+      {% endif %}
+      <details {% if financial_report.summary.blockers %}open{% endif %}>
+        <summary>Report completeness gates</summary>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Gate</th><th>Records</th></tr></thead>
+            <tbody>
+            {% if financial_report.summary.blockers %}
+            {% for blocker in financial_report.summary.blockers %}
+              <tr><td>{{ blocker.code }}</td><td>{{ blocker.count }}</td></tr>
+            {% endfor %}
+            {% else %}
+              <tr><td>clear</td><td>0</td></tr>
+            {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {% if financial_report.reports.expenses.byCategory %}
+      <details>
+        <summary>Expense breakdown</summary>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Category</th><th>Currency</th><th>Records</th><th>Gross</th><th>VAT</th><th>Net</th></tr></thead>
+            <tbody>
+            {% for item in financial_report.reports.expenses.byCategory[:15] %}
+              <tr>
+                <td>{{ item.category }}</td>
+                <td>{{ item.currency }}</td>
+                <td>{{ item.recordCount }}</td>
+                <td>{{ format_money(item.grossAmount) }}</td>
+                <td>{{ format_money(item.vatAmount) }}</td>
+                <td>{{ format_money(item.netAmount) }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      {% endif %}
     </section>
 
     <section id="fields">
@@ -3249,6 +3345,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         bank_statement_imports = ledger.list_bank_statement_imports(limit=10)
         bookkeeping_records = ledger.list_bookkeeping_records(limit=25)
         master_ledger = LocalMasterLedgerService(ledger, config).project(limit=100)
+        financial_report = LocalFinancialReportingService(ledger, config).generate()
         backups = LocalBackupService(ledger, config).list_backups(limit=10)
         mijngeldzaken_service = LocalMijngeldzakenControlService(config)
         mijngeldzaken_control = mijngeldzaken_service.overview(ledger)
@@ -3305,6 +3402,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "exportAttempts": export_attempts,
             "bookkeepingRecords": bookkeeping_records,
             "masterLedger": master_ledger,
+            "financialReport": financial_report,
             "bankTransactions": bank_transactions,
             "bankStatementImports": bank_statement_imports,
             "mijngeldzakenControl": mijngeldzaken_control,
@@ -3365,6 +3463,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             export_summary=last_export_summary,
             exceptions=exceptions,
             extracted_fields=extracted_fields,
+            financial_report=financial_report,
             format_confidence=_format_confidence,
             format_money=_format_money,
             grouping_summary=session.pop("fab_last_grouping_summary", None),
@@ -4220,6 +4319,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 reconciliation_status=request.args.get("reconciliationStatus") or request.args.get("reconciliation_status"),
                 target_system=request.args.get("targetSystem") or request.args.get("target_system"),
                 source_type=request.args.get("sourceType") or request.args.get("source_type"),
+                from_date=request.args.get("fromDate") or request.args.get("from_date"),
+                to_date=request.args.get("toDate") or request.args.get("to_date"),
                 limit=_limit_arg(),
             )
         })
@@ -4248,6 +4349,67 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         if _bool_value(request.args.get("audit"), default=False):
             service.record_projection_audit(projection, actor=request.args.get("actor") or "local_api")
         return jsonify(projection)
+
+    @app.get("/api/reports")
+    def financial_reports_api():
+        service = LocalFinancialReportingService(ledger, config)
+        report_type = request.args.get("reportType") or request.args.get("report_type") or "overview"
+        basis = request.args.get("basis") or "accrual"
+        from_date = request.args.get("fromDate") or request.args.get("from_date")
+        to_date = request.args.get("toDate") or request.args.get("to_date")
+        target_system = request.args.get("targetSystem") or request.args.get("target_system")
+        export_format = str(request.args.get("format") or "json").strip().lower()
+        try:
+            if export_format == "csv":
+                artifact = service.csv_artifact(
+                    report_type=report_type,
+                    basis=basis,
+                    from_date=from_date,
+                    to_date=to_date,
+                    target_system=target_system,
+                )
+                response = Response(artifact["content"], mimetype=artifact["contentType"])
+                response.headers["Content-Disposition"] = f"attachment; filename={artifact['filename']}"
+                response.headers["X-FAB-External-Submission"] = artifact["externalSubmission"]
+                response.headers["X-FAB-Report-Rows"] = str(artifact["rowCount"])
+                return response
+            if export_format != "json":
+                return jsonify({
+                    "success": False,
+                    "status": "unsupported_format",
+                    "supportedFormats": ["json", "csv"],
+                }), 400
+            return jsonify(service.generate(
+                report_type=report_type,
+                basis=basis,
+                from_date=from_date,
+                to_date=to_date,
+                target_system=target_system,
+                include_rows=_bool_value(request.args.get("includeRows"), default=False),
+            ))
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_request", "error": str(exc)}), 400
+
+    @app.post("/api/reports")
+    def generate_financial_report_api():
+        payload = request.get_json(silent=True) or {}
+        service = LocalFinancialReportingService(ledger, config)
+        try:
+            report = service.generate(
+                report_type=payload.get("reportType") or payload.get("report_type") or "overview",
+                basis=payload.get("basis") or "accrual",
+                from_date=payload.get("fromDate") or payload.get("from_date"),
+                to_date=payload.get("toDate") or payload.get("to_date"),
+                target_system=payload.get("targetSystem") or payload.get("target_system"),
+                include_rows=_bool_value(payload.get("includeRows"), default=False),
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_request", "error": str(exc)}), 400
+        report["auditEventId"] = service.record_generation_audit(
+            report,
+            actor=payload.get("actor") or "local_api",
+        )
+        return jsonify(report)
 
     @app.get("/api/bookkeeping-records/<int:record_id>")
     def bookkeeping_record_detail(record_id: int):

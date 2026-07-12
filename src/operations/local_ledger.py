@@ -1455,6 +1455,8 @@ class LocalOperationsLedger:
         reconciliation_status: Optional[Any] = None,
         target_system: Optional[str] = None,
         source_type: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
         limit: int = 100,
     ) -> list:
         limit = self._bounded_limit(limit)
@@ -1470,6 +1472,12 @@ class LocalOperationsLedger:
         if source_type:
             where.append("source_type = ?")
             params.append(source_type)
+        if from_date:
+            where.append("record_date >= ?")
+            params.append(from_date)
+        if to_date:
+            where.append("record_date <= ?")
+            params.append(to_date)
         if where:
             query = f"{query} WHERE {' AND '.join(where)}"
         query = f"{query} ORDER BY updated_at DESC, id DESC LIMIT ?"
@@ -1477,6 +1485,57 @@ class LocalOperationsLedger:
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
             return [self._bookkeeping_record_with_line_items(connection, row) for row in rows]
+
+    def count_bookkeeping_records(
+        self,
+        target_system: Optional[str] = None,
+        source_type: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> int:
+        query = "SELECT COUNT(*) FROM bookkeeping_records"
+        params = []
+        where = []
+        if target_system:
+            where.append("target_system = ?")
+            params.append(target_system)
+        if source_type:
+            where.append("source_type = ?")
+            params.append(source_type)
+        if from_date:
+            where.append("record_date >= ?")
+            params.append(from_date)
+        if to_date:
+            where.append("record_date <= ?")
+            params.append(to_date)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        with self._connection() as connection:
+            return int(connection.execute(query, params).fetchone()[0])
+
+    def count_undated_bookkeeping_records(
+        self,
+        target_system: Optional[str] = None,
+        source_type: Optional[str] = None,
+        excluded_statuses: Optional[Sequence[str]] = None,
+    ) -> int:
+        query = "SELECT COUNT(*) FROM bookkeeping_records"
+        params = []
+        where = ["(record_date IS NULL OR TRIM(record_date) = '')"]
+        if target_system:
+            where.append("target_system = ?")
+            params.append(target_system)
+        if source_type:
+            where.append("source_type = ?")
+            params.append(source_type)
+        statuses = [str(item) for item in excluded_statuses or [] if item]
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            where.append(f"status NOT IN ({placeholders})")
+            params.extend(statuses)
+        query = f"{query} WHERE {' AND '.join(where)}"
+        with self._connection() as connection:
+            return int(connection.execute(query, params).fetchone()[0])
 
     def replace_bookkeeping_record_line_items(
         self,

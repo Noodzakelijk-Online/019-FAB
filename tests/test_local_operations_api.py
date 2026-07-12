@@ -2170,6 +2170,70 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("waveReportSnapshots", planned_html)
             self.assertIn("not_executed", planned_html)
 
+    def test_financial_reports_api_dashboard_csv_and_explicit_generation_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            ledger.upsert_bookkeeping_record({
+                "documentId": 81,
+                "sourceType": "document",
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "targetSystem": "waveapps",
+                "targetAccount": "Office expenses",
+                "vendorName": "Office Shop",
+                "category": "Office",
+                "recordDate": "2026-07-01",
+                "amount": 121,
+                "vatAmount": 21,
+                "currency": "EUR",
+                "reviewRequired": False,
+                "reconciliationStatus": "reconciled",
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            response = client.get(
+                "/api/reports?reportType=profit_and_loss&fromDate=2026-07-01&toDate=2026-07-31&includeRows=true"
+            )
+            report = response.get_json()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(report["reportType"], "profit_and_loss")
+            self.assertEqual(report["report"]["byCurrency"][0]["expensesNet"], 100.0)
+            self.assertEqual(report["externalSubmission"], "not_executed")
+            self.assertFalse(any(
+                event["action"] == "local_reporting.report_generated"
+                for event in ledger.list_audit_events(limit=20)
+            ))
+
+            csv_response = client.get(
+                "/api/reports?format=csv&fromDate=2026-07-01&toDate=2026-07-31"
+            )
+            self.assertEqual(csv_response.status_code, 200)
+            self.assertEqual(csv_response.headers["X-FAB-External-Submission"], "not_executed")
+            self.assertIn("recordId,recordDate,sourceType", csv_response.data.decode("utf-8"))
+
+            generated = client.post("/api/reports", json={
+                "reportType": "vat",
+                "fromDate": "2026-07-01",
+                "toDate": "2026-07-31",
+                "actor": "test_api",
+            })
+            self.assertEqual(generated.status_code, 200)
+            self.assertIsInstance(generated.get_json()["auditEventId"], int)
+            self.assertEqual(
+                ledger.list_audit_events(limit=1)[0]["action"],
+                "local_reporting.report_generated",
+            )
+
+            dashboard = client.get("/")
+            self.assertEqual(dashboard.status_code, 200)
+            html = dashboard.data.decode("utf-8")
+            self.assertIn("Financial Reports", html)
+            self.assertIn("Report completeness gates", html)
+            self.assertIn("Revenue net", html)
+            self.assertEqual(client.get("/api/reports?basis=guess").status_code, 400)
+
     def test_token_is_required_when_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app({

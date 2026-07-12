@@ -145,13 +145,16 @@ The current repository already contains many module-level foundations for this v
 
 - `src/financial_analysis/financial_analyzer.py`
 - `src/budget/budget_manager.py`
+- `src/operations/local_reporting.py`
+- `src/operations/local_ledger.py`
+- `src/operations/local_api.py`
 - `web/client/src/pages/admin/Overview.tsx`
 
 ### Enhancement Gaps
 
-- Reporting needs durable normalized financial data.
+- The local operations app now exposes provisional P&L, VAT, cash movement, and vendor/category spending from durable normalized records, with reconciliation-aware duplicate suppression, currency separation, CSV output, and completeness gates.
 - Scheduled reporting needs job orchestration and delivery tracking.
-- Dashboards need time-series summaries by category, vendor, account, source, status, and reconciliation state.
+- Reports still need balance-sheet account semantics, statutory Dutch VAT filing rules, comparative periods, and time-series views by account/source/status.
 
 ## 7. Security and Compliance
 
