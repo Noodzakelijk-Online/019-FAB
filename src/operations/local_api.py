@@ -37,7 +37,7 @@ from src.operations.local_mijngeldzaken_control import LocalMijngeldzakenControl
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
-from src.operations.local_reporting import LocalFinancialReportingService
+from src.operations.local_reporting import LocalFinancialReportingService, LocalScheduledReportService
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
@@ -1178,6 +1178,48 @@ DASHBOARD_TEMPLATE = """
         <div class="summary-item"><span>Undated</span><strong>{{ financial_report.summary.undatedRecordCount }}</strong></div>
         <div class="summary-item"><span>Readiness</span><strong>{{ financial_report.summary.readiness }}</strong></div>
       </div>
+      <details open>
+        <summary>Scheduled report generation</summary>
+        <div class="summary-grid">
+          <div class="summary-item"><span>Schedule</span><strong>{{ report_schedule_status.status }}</strong></div>
+          <div class="summary-item"><span>Frequency</span><strong>{{ report_schedule_status.schedule.frequency if report_schedule_status.schedule else "-" }}</strong></div>
+          <div class="summary-item"><span>Current slot</span><strong class="mono">{{ report_schedule_status.slot.scheduleSlot if report_schedule_status.slot else "-" }}</strong></div>
+          <div class="summary-item"><span>Next due</span><strong class="mono">{{ report_schedule_status.slot.nextDueAt if report_schedule_status.slot else "-" }}</strong></div>
+        </div>
+        <div class="inline-actions">
+          <form method="post" action="{{ url_for('run_due_report_schedule_form') }}">
+            <button type="submit" {% if not report_schedule_status.enabled %}disabled{% endif %}>Run due schedule</button>
+          </form>
+        </div>
+        {% if report_schedule_status.error %}<div class="empty">{{ report_schedule_status.error }}</div>{% endif %}
+        {% if scheduled_report_summary %}<pre>{{ pretty_json(scheduled_report_summary) }}</pre>{% endif %}
+        {% if financial_report_runs %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Run</th><th>Slot</th><th>Period</th><th>Status</th><th>Rows</th><th>Gates</th><th>Attempts</th><th>Artifacts</th></tr>
+            </thead>
+            <tbody>
+            {% for run in financial_report_runs %}
+              <tr>
+                <td class="mono">#{{ run.id }}</td>
+                <td class="mono">{{ run.schedule_slot }}</td>
+                <td>{{ run.period_from }} to {{ run.period_to }}</td>
+                <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+                <td>{{ run.row_count }}</td>
+                <td>{{ run.blocker_count }}</td>
+                <td>{{ run.attempt_count }}</td>
+                <td>
+                  {% if run.json_path %}<a href="{{ url_for('financial_report_run_artifact_api', report_run_id=run.id, format='json') }}">JSON</a>{% endif %}
+                  {% if run.csv_path %}<a href="{{ url_for('financial_report_run_artifact_api', report_run_id=run.id, format='csv') }}">CSV</a>{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      </details>
       {% if financial_report.reports.profitAndLoss.byCurrency %}
       <div class="table-wrap">
         <table>
@@ -3346,6 +3388,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         bookkeeping_records = ledger.list_bookkeeping_records(limit=25)
         master_ledger = LocalMasterLedgerService(ledger, config).project(limit=100)
         financial_report = LocalFinancialReportingService(ledger, config).generate()
+        scheduled_report_service = LocalScheduledReportService(ledger, config)
+        try:
+            report_schedule_status = scheduled_report_service.schedule_status()
+        except ValueError as exc:
+            report_schedule_status = {
+                "enabled": False,
+                "status": "invalid",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        financial_report_runs = ledger.list_financial_report_runs(limit=10)
         backups = LocalBackupService(ledger, config).list_backups(limit=10)
         mijngeldzaken_service = LocalMijngeldzakenControlService(config)
         mijngeldzaken_control = mijngeldzaken_service.overview(ledger)
@@ -3377,6 +3430,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_autonomy_summary = session.pop("fab_last_autonomy_summary", None)
         last_backup_summary = session.pop("fab_last_backup_summary", None)
         last_close_pack_summary = session.pop("fab_last_close_pack_summary", None)
+        last_scheduled_report_summary = session.pop("fab_last_scheduled_report_summary", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3403,6 +3457,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "bookkeepingRecords": bookkeeping_records,
             "masterLedger": master_ledger,
             "financialReport": financial_report,
+            "reportScheduleStatus": report_schedule_status,
+            "financialReportRuns": financial_report_runs,
             "bankTransactions": bank_transactions,
             "bankStatementImports": bank_statement_imports,
             "mijngeldzakenControl": mijngeldzaken_control,
@@ -3437,6 +3493,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastAutonomySummary": last_autonomy_summary,
             "lastBackupSummary": last_backup_summary,
             "lastClosePackSummary": last_close_pack_summary,
+            "lastScheduledReportSummary": last_scheduled_report_summary,
         }
         return render_template_string(
             DASHBOARD_TEMPLATE,
@@ -3464,6 +3521,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             exceptions=exceptions,
             extracted_fields=extracted_fields,
             financial_report=financial_report,
+            financial_report_runs=financial_report_runs,
             format_confidence=_format_confidence,
             format_money=_format_money,
             grouping_summary=session.pop("fab_last_grouping_summary", None),
@@ -3493,6 +3551,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 {"label": "Wave Reports", "value": metrics["wave_report_snapshots"]},
                 {"label": "Wave Ops", "value": metrics["wave_operation_snapshots"]},
                 {"label": "Wave Entities", "value": metrics["wave_entities"]},
+                {"label": "Report Runs", "value": metrics["financial_report_runs"]},
                 {"label": "Audit Events", "value": metrics["audit_events"]},
             ],
             metrics=metrics,
@@ -3506,6 +3565,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             readiness=readiness,
             raw_payload=_pretty_json(raw_payload),
             record_refresh_summary=last_record_refresh_summary,
+            report_schedule_status=report_schedule_status,
+            scheduled_report_summary=last_scheduled_report_summary,
             corrections=corrections,
             review_documents=review_documents,
             review_items=review_items,
@@ -4410,6 +4471,69 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             actor=payload.get("actor") or "local_api",
         )
         return jsonify(report)
+
+    @app.get("/api/report-runs")
+    def financial_report_runs_api():
+        service = LocalScheduledReportService(ledger, config)
+        try:
+            schedule_status = service.schedule_status()
+        except ValueError as exc:
+            schedule_status = {
+                "enabled": False,
+                "status": "invalid",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        return jsonify({
+            "scheduleStatus": schedule_status,
+            "reportRuns": ledger.list_financial_report_runs(
+                schedule_id=request.args.get("scheduleId") or request.args.get("schedule_id"),
+                status=request.args.get("status"),
+                limit=_limit_arg(),
+            ),
+            "externalSubmission": "not_executed",
+        })
+
+    @app.post("/api/report-runs/run-due")
+    def run_due_report_schedule_api():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalScheduledReportService(ledger, config).run_due(
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_schedule", "error": str(exc)}), 400
+        return jsonify(result), 200 if result.get("success") else 500
+
+    @app.post("/report-runs/run-due")
+    def run_due_report_schedule_form():
+        try:
+            result = LocalScheduledReportService(ledger, config).run_due(actor="fab_dashboard")
+        except ValueError as exc:
+            result = {"success": False, "status": "invalid_schedule", "error": str(exc)}
+        session["fab_last_scheduled_report_summary"] = result
+        return redirect(url_for("dashboard_page", _anchor="reports"))
+
+    @app.get("/api/report-runs/<int:report_run_id>")
+    def financial_report_run_detail_api(report_run_id: int):
+        result = LocalScheduledReportService(ledger, config).inspect_run(report_run_id)
+        return jsonify(result), 200 if result.get("status") != "not_found" else 404
+
+    @app.get("/api/report-runs/<int:report_run_id>/artifact")
+    def financial_report_run_artifact_api(report_run_id: int):
+        format_name = str(request.args.get("format") or "json").strip().lower()
+        try:
+            artifact = LocalScheduledReportService(ledger, config).read_artifact(
+                report_run_id,
+                format_name,
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_artifact", "error": str(exc)}), 400
+        response = Response(artifact["content"], mimetype=artifact["contentType"])
+        response.headers["Content-Disposition"] = f"attachment; filename={artifact['filename']}"
+        response.headers["X-FAB-External-Submission"] = artifact["externalSubmission"]
+        response.headers["X-FAB-Report-SHA256"] = artifact["sha256"]
+        return response
 
     @app.get("/api/bookkeeping-records/<int:record_id>")
     def bookkeeping_record_detail(record_id: int):

@@ -2190,7 +2190,12 @@ class TestLocalOperationsApi(unittest.TestCase):
                 "reviewRequired": False,
                 "reconciliationStatus": "reconciled",
             })
-            app = create_app({"fab_local_ledger_path": ledger_path})
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_report_dir": os.path.join(temp_dir, "reports"),
+                "report_schedule_frequency": "monthly",
+                "report_schedule_period_mode": "current_year_to_date",
+            })
             client = app.test_client()
 
             response = client.get(
@@ -2226,11 +2231,32 @@ class TestLocalOperationsApi(unittest.TestCase):
                 "local_reporting.report_generated",
             )
 
+            schedule_before = client.get("/api/report-runs")
+            self.assertEqual(schedule_before.status_code, 200)
+            self.assertEqual(schedule_before.get_json()["scheduleStatus"]["status"], "due")
+            scheduled = client.post("/api/report-runs/run-due", json={"actor": "test_api"})
+            self.assertEqual(scheduled.status_code, 200)
+            self.assertTrue(scheduled.get_json()["status"].startswith("prepared"))
+            report_run_id = scheduled.get_json()["reportRun"]["id"]
+            report_run = client.get(f"/api/report-runs/{report_run_id}")
+            self.assertEqual(report_run.status_code, 200)
+            self.assertEqual(report_run.get_json()["status"], "valid")
+            artifact = client.get(f"/api/report-runs/{report_run_id}/artifact?format=json")
+            self.assertEqual(artifact.status_code, 200)
+            self.assertEqual(artifact.headers["X-FAB-External-Submission"], "not_executed")
+            self.assertEqual(len(artifact.headers["X-FAB-Report-SHA256"]), 64)
+            self.assertIn("fab-scheduled-financial-report-v1", artifact.data.decode("utf-8"))
+            duplicate_schedule = client.post("/api/report-runs/run-due")
+            self.assertEqual(duplicate_schedule.get_json()["status"], "already_generated")
+
             dashboard = client.get("/")
             self.assertEqual(dashboard.status_code, 200)
             html = dashboard.data.decode("utf-8")
             self.assertIn("Financial Reports", html)
             self.assertIn("Report completeness gates", html)
+            self.assertIn("Scheduled report generation", html)
+            self.assertIn("Run due schedule", html)
+            self.assertIn("monthly:", html)
             self.assertIn("Revenue net", html)
             self.assertEqual(client.get("/api/reports?basis=guess").status_code, 400)
 

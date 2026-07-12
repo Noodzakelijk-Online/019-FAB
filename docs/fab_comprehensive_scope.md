@@ -153,7 +153,8 @@ The current repository already contains many module-level foundations for this v
 ### Enhancement Gaps
 
 - The local operations app now exposes provisional P&L, VAT, cash movement, and vendor/category spending from durable normalized records, with reconciliation-aware duplicate suppression, currency separation, CSV output, and completeness gates.
-- Scheduled reporting needs job orchestration and delivery tracking.
+- Local scheduled report generation now uses durable worker-driven schedule slots, retry state, checksum-bound JSON/CSV artifacts, and report-run health tracking.
+- External report delivery still needs recipient preferences, approval policy, and delivery-attempt tracking; statutory filing remains out of scope until Dutch tax mappings are complete.
 - Reports still need balance-sheet account semantics, statutory Dutch VAT filing rules, comparative periods, and time-series views by account/source/status.
 
 ## 7. Security and Compliance

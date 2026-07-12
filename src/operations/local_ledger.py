@@ -596,6 +596,45 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_wave_entities_status
                     ON wave_entities(status);
 
+                CREATE TABLE IF NOT EXISTS financial_report_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    schedule_id TEXT NOT NULL,
+                    schedule_slot TEXT NOT NULL,
+                    report_type TEXT NOT NULL DEFAULT 'overview',
+                    basis TEXT NOT NULL DEFAULT 'accrual',
+                    period_from TEXT NOT NULL,
+                    period_to TEXT NOT NULL,
+                    target_system TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    readiness TEXT,
+                    scheduled_for TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    next_retry_at TEXT,
+                    json_path TEXT,
+                    csv_path TEXT,
+                    json_sha256 TEXT,
+                    csv_sha256 TEXT,
+                    json_bytes INTEGER,
+                    csv_bytes INTEGER,
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    blocker_count INTEGER NOT NULL DEFAULT 0,
+                    external_submission TEXT NOT NULL DEFAULT 'not_executed',
+                    error_message TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(schedule_id, schedule_slot)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_financial_reports_status
+                    ON financial_report_runs(status);
+                CREATE INDEX IF NOT EXISTS idx_local_financial_reports_scheduled
+                    ON financial_report_runs(scheduled_for);
+                CREATE INDEX IF NOT EXISTS idx_local_financial_reports_schedule
+                    ON financial_report_runs(schedule_id, schedule_slot);
+
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     actor_user_id INTEGER,
@@ -2365,6 +2404,167 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def claim_financial_report_run(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        schedule_id = str(payload.get("scheduleId") or payload.get("schedule_id") or "").strip()
+        schedule_slot = str(payload.get("scheduleSlot") or payload.get("schedule_slot") or "").strip()
+        if not schedule_id or not schedule_slot:
+            raise ValueError("scheduleId and scheduleSlot are required for a financial report run")
+        now = self._date_text(payload.get("startedAt") or payload.get("started_at")) or self._now()
+        now_value = self._parse_datetime(now) or datetime.now(timezone.utc)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM financial_report_runs
+                WHERE schedule_id = ? AND schedule_slot = ?
+                LIMIT 1
+                """,
+                (schedule_id, schedule_slot),
+            ).fetchone()
+            if row:
+                existing = self._row_to_dict(row)
+                status = str(existing.get("status") or "unknown")
+                retry_at = self._parse_datetime(existing.get("next_retry_at"))
+                retry_due = status == "failed" and (retry_at is None or retry_at <= now_value)
+                if not retry_due:
+                    return {
+                        "acquired": False,
+                        "status": "retry_deferred" if status == "failed" else "already_claimed",
+                        "reportRun": existing,
+                    }
+                report_run_id = int(existing["id"])
+                connection.execute(
+                    """
+                    UPDATE financial_report_runs
+                    SET status = 'running', readiness = NULL, started_at = ?,
+                        finished_at = NULL, attempt_count = ?, next_retry_at = NULL,
+                        error_message = NULL, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, int(existing.get("attempt_count") or 0) + 1, now, report_run_id),
+                )
+            else:
+                report_run_id = self._insert_with_connection(
+                    connection,
+                    "financial_report_runs",
+                    {
+                        "schedule_id": schedule_id,
+                        "schedule_slot": schedule_slot,
+                        "report_type": payload.get("reportType") or payload.get("report_type") or "overview",
+                        "basis": payload.get("basis") or "accrual",
+                        "period_from": payload.get("periodFrom") or payload.get("period_from"),
+                        "period_to": payload.get("periodTo") or payload.get("period_to"),
+                        "target_system": payload.get("targetSystem") or payload.get("target_system"),
+                        "status": "running",
+                        "scheduled_for": self._date_text(
+                            payload.get("scheduledFor") or payload.get("scheduled_for")
+                        ) or now,
+                        "started_at": now,
+                        "attempt_count": 1,
+                        "external_submission": "not_executed",
+                        "metadata_json": self._json(self._redact_sensitive(payload.get("metadata") or {})),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            updated = connection.execute(
+                "SELECT * FROM financial_report_runs WHERE id = ? LIMIT 1",
+                (report_run_id,),
+            ).fetchone()
+        return {
+            "acquired": True,
+            "status": "acquired",
+            "reportRun": self._row_to_dict(updated),
+        }
+
+    def complete_financial_report_run(self, report_run_id: int, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        status = str(payload.get("status") or "prepared").strip()
+        allowed_statuses = {"prepared", "prepared_needs_review", "failed"}
+        if status not in allowed_statuses:
+            raise ValueError(f"Unsupported financial report run status: {status}")
+        now = self._date_text(payload.get("finishedAt") or payload.get("finished_at")) or self._now()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM financial_report_runs WHERE id = ? LIMIT 1",
+                (int(report_run_id),),
+            ).fetchone()
+            if not row:
+                return None
+            existing = self._row_to_dict(row)
+            metadata = dict(existing.get("metadata") or {})
+            if isinstance(payload.get("metadata"), dict):
+                metadata.update(self._redact_sensitive(payload["metadata"]))
+            self._update_with_connection(
+                connection,
+                "financial_report_runs",
+                int(report_run_id),
+                {
+                    "status": status,
+                    "readiness": payload.get("readiness"),
+                    "finished_at": now,
+                    "next_retry_at": self._date_text(payload.get("nextRetryAt") or payload.get("next_retry_at")),
+                    "json_path": payload.get("jsonPath") or payload.get("json_path"),
+                    "csv_path": payload.get("csvPath") or payload.get("csv_path"),
+                    "json_sha256": payload.get("jsonSha256") or payload.get("json_sha256"),
+                    "csv_sha256": payload.get("csvSha256") or payload.get("csv_sha256"),
+                    "json_bytes": self._optional_int(self._first_present(payload.get("jsonBytes"), payload.get("json_bytes"))),
+                    "csv_bytes": self._optional_int(self._first_present(payload.get("csvBytes"), payload.get("csv_bytes"))),
+                    "row_count": self._int(self._first_present(payload.get("rowCount"), payload.get("row_count")), 0),
+                    "blocker_count": self._int(self._first_present(payload.get("blockerCount"), payload.get("blocker_count")), 0),
+                    "external_submission": "not_executed",
+                    "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                    "metadata_json": self._json(metadata),
+                    "updated_at": now,
+                },
+            )
+            updated = connection.execute(
+                "SELECT * FROM financial_report_runs WHERE id = ? LIMIT 1",
+                (int(report_run_id),),
+            ).fetchone()
+        return self._row_to_dict(updated) if updated else None
+
+    def get_financial_report_run(self, report_run_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM financial_report_runs WHERE id = ? LIMIT 1",
+                (int(report_run_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_financial_report_run_by_slot(self, schedule_id: str, schedule_slot: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM financial_report_runs
+                WHERE schedule_id = ? AND schedule_slot = ?
+                LIMIT 1
+                """,
+                (str(schedule_id or "").strip(), str(schedule_slot or "").strip()),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_financial_report_runs(
+        self,
+        schedule_id: Optional[str] = None,
+        status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM financial_report_runs"
+        params = []
+        where = []
+        if schedule_id:
+            where.append("schedule_id = ?")
+            params.append(schedule_id)
+        self._append_status_filter(where, params, "status", status)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY scheduled_for DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def record_audit_event(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         return self._insert(
             "audit_events",
@@ -2481,6 +2681,12 @@ class LocalOperationsLedger:
                     connection,
                     "wave_entities",
                     "presence_status = 'missing_downstream'",
+                ),
+                "financial_report_runs": self._count(connection, "financial_report_runs"),
+                "financial_report_runs_needing_attention": self._count(
+                    connection,
+                    "financial_report_runs",
+                    "status IN ('failed', 'prepared_needs_review')",
                 ),
                 "audit_events": self._count(connection, "audit_events"),
             }

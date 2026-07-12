@@ -17,12 +17,16 @@ class TestOperationsExportWorker(unittest.TestCase):
             "fab_local_ledger_enabled": True,
             "fab_local_ledger_path": os.path.join(temp_dir, "fab-operations.sqlite3"),
             "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+            "fab_local_report_dir": os.path.join(temp_dir, "reports"),
             "mijngeldzaken_export_dir": os.path.join(temp_dir, "mijngeldzaken-exports"),
             "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
             "fab_autonomy_execute_approved_exports": True,
             "worker_run_once": True,
             "worker_process_approved_postings": True,
             "worker_process_due_retries": True,
+            "worker_generate_scheduled_reports": True,
+            "report_schedule_frequency": "monthly",
+            "report_schedule_period_mode": "current_year_to_date",
             "worker_process_legacy_postings": False,
         }
 
@@ -82,9 +86,12 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_worker.autonomy_cycle", audit_actions)
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
+            self.assertIn("local_worker.scheduled_report_cycle", audit_actions)
+            self.assertIn("local_reporting.scheduled_report_prepared", audit_actions)
             self.assertIn("local_export_attempt.batch_execution_preflight_backup", audit_actions)
             self.assertIn("local_export_attempt.supervision_required", audit_actions)
             self.assertEqual(ledger.list_export_attempts(status="approved"), [])
+            self.assertEqual(len(ledger.list_financial_report_runs()), 1)
 
     def test_worker_stage_failure_does_not_suppress_local_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -97,11 +104,15 @@ class TestOperationsExportWorker(unittest.TestCase):
                 side_effect=RuntimeError("connector unavailable"),
             ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
                 worker,
+                "_process_scheduled_reports",
+            ) as scheduled_reports, patch.object(
+                worker,
                 "_process_operations_exports",
             ) as exports:
                 worker.run()
 
             autonomy.assert_called_once()
+            scheduled_reports.assert_called_once()
             exports.assert_called_once()
             ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
             audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
@@ -130,6 +141,34 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_worker.autonomy_cycle", audit_actions)
             self.assertIn("local_worker.cycle_completed", audit_actions)
             self.assertNotIn("local_worker.stage_failed", audit_actions)
+
+    def test_scheduled_report_failure_does_not_suppress_export_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["worker_run_legacy_workflow"] = False
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_run_local_autonomy",
+            ), patch.object(
+                worker,
+                "_process_scheduled_reports",
+                side_effect=RuntimeError("report disk unavailable"),
+            ), patch.object(worker, "_process_operations_exports") as exports:
+                worker.run()
+
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            failed_stages = [
+                event for event in ledger.list_audit_events(limit=30)
+                if event["action"] == "local_worker.stage_failed"
+            ]
+            self.assertEqual(failed_stages[0]["details"]["stage"], "scheduled_reports")
+            self.assertIn(
+                "local_worker.cycle_finished_with_error",
+                {event["action"] for event in ledger.list_audit_events(limit=30)},
+            )
 
     def test_manual_runner_uses_operations_ledger_and_respects_execution_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

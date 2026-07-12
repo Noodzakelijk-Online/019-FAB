@@ -6,6 +6,7 @@ from typing import Any, Dict
 from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_exports import LocalExportAttemptService
+from src.operations.local_reporting import LocalScheduledReportService
 from src.operations.local_runtime import build_local_operations_ledger
 from src.storage.database import Database
 from src.workflow.controller import WorkflowController
@@ -27,6 +28,9 @@ class FabWorker:
         )
         self.include_wave_plan = _as_bool(self.config.get("worker_include_wave_plan", True))
         self.include_wave_sync = _as_bool(self.config.get("worker_include_wave_sync", True))
+        self.generate_scheduled_reports = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_generate_scheduled_reports", True)
+        )
         self.process_legacy_postings = _as_bool(
             self.config.get("worker_process_legacy_postings", self.operations_ledger is None)
         )
@@ -50,6 +54,7 @@ class FabWorker:
             stages = (
                 ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
+                ("scheduled_reports", self._process_scheduled_reports),
                 ("operations_exports", self._process_operations_exports),
                 ("legacy_queue", self._process_legacy_queue),
             )
@@ -140,6 +145,20 @@ class FabWorker:
                 "Operations-ledger approved export cycle completed",
             )
 
+    def _process_scheduled_reports(self) -> None:
+        if not self.generate_scheduled_reports or not self.operations_ledger:
+            return
+        result = LocalScheduledReportService(self.operations_ledger, self.config).run_due(
+            actor="local_worker",
+        )
+        self._record_audit(
+            "scheduled_report_cycle",
+            _compact_scheduled_report(result),
+            f"Scheduled report cycle ended as {result.get('status')}",
+        )
+        if not result.get("success"):
+            raise RuntimeError(result.get("error") or "Scheduled report generation failed")
+
     def _process_legacy_queue(self) -> None:
         if not self.process_legacy_postings:
             return
@@ -225,6 +244,21 @@ def _compact_autonomy_cycle(result: Dict[str, Any]) -> Dict[str, Any]:
         "executedActionIds": [action.get("id") for action in result.get("executedActions") or []],
         "skippedActionIds": [action.get("id") for action in result.get("skippedActions") or []],
         "masterLedger": result.get("masterLedger"),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _compact_scheduled_report(result: Dict[str, Any]) -> Dict[str, Any]:
+    report_run = result.get("reportRun") if isinstance(result.get("reportRun"), dict) else {}
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "reportRunId": report_run.get("id"),
+        "scheduleId": report_run.get("schedule_id"),
+        "scheduleSlot": report_run.get("schedule_slot"),
+        "readiness": report_run.get("readiness"),
+        "rowCount": report_run.get("row_count", 0),
+        "blockerCount": report_run.get("blocker_count", 0),
         "externalSubmission": "not_executed",
     }
 

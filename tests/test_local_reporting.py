@@ -1,9 +1,16 @@
+import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from src.operations.local_ledger import LocalOperationsLedger
-from src.operations.local_reporting import LocalFinancialReportingService
+from src.operations.local_reporting import (
+    SCHEDULED_REPORT_FORMAT,
+    LocalFinancialReportingService,
+    LocalScheduledReportService,
+)
 
 
 class TestLocalFinancialReportingService(unittest.TestCase):
@@ -211,6 +218,146 @@ class TestLocalFinancialReportingService(unittest.TestCase):
                 service.generate(basis="guess")
             with self.assertRaisesRegex(ValueError, "cannot be later"):
                 service.generate(from_date="2026-05-01", to_date="2026-04-01")
+
+    def test_monthly_schedule_writes_idempotent_checksum_bound_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._ledger(temp_dir)
+            ledger.upsert_bookkeeping_record({
+                "documentId": 31,
+                "sourceType": "document",
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "targetSystem": "waveapps",
+                "targetAccount": "Office expenses",
+                "vendorName": "June Office Shop",
+                "category": "Office",
+                "recordDate": "2026-06-15",
+                "amount": 121,
+                "vatAmount": 21,
+                "currency": "EUR",
+                "reviewRequired": False,
+                "reconciliationStatus": "reconciled",
+            })
+            report_dir = os.path.join(temp_dir, "scheduled-reports")
+            service = LocalScheduledReportService(ledger, {
+                "fab_local_report_dir": report_dir,
+                "report_schedule_enabled": True,
+                "report_schedule_frequency": "monthly",
+                "report_schedule_month_day": 1,
+                "report_schedule_hour": 6,
+                "report_schedule_timezone": "Europe/Amsterdam",
+                "report_schedule_period_mode": "previous_month",
+                "report_schedule_formats": "json,csv",
+            })
+            now = datetime(2026, 7, 13, 10, 0, tzinfo=timezone.utc)
+
+            first = service.run_due(now=now, actor="test")
+            second = service.run_due(now=now, actor="test")
+            inspected = service.inspect_run(first["reportRun"]["id"])
+            json_artifact = service.read_artifact(first["reportRun"]["id"], "json")
+
+            self.assertEqual(first["status"], "prepared")
+            self.assertEqual(first["reportRun"]["schedule_slot"], "monthly:2026-07")
+            self.assertEqual(first["reportRun"]["period_from"], "2026-06-01")
+            self.assertEqual(first["reportRun"]["period_to"], "2026-06-30")
+            self.assertEqual(first["reportRun"]["row_count"], 1)
+            self.assertEqual(second["status"], "already_generated")
+            self.assertEqual(len(ledger.list_financial_report_runs()), 1)
+            self.assertTrue(inspected["success"])
+            self.assertTrue(inspected["artifacts"]["json"]["valid"])
+            self.assertTrue(inspected["artifacts"]["csv"]["valid"])
+            self.assertEqual(json.loads(json_artifact["content"])["format"], SCHEDULED_REPORT_FORMAT)
+            self.assertEqual(json.loads(json_artifact["content"])["safety"]["externalSubmission"], "not_executed")
+            self.assertEqual([name for name in os.listdir(report_dir) if name.endswith(".tmp")], [])
+            self.assertEqual(ledger.dashboard_metrics()["financial_report_runs"], 1)
+            self.assertEqual(
+                ledger.list_audit_events(limit=1)[0]["action"],
+                "local_reporting.scheduled_report_prepared",
+            )
+
+    def test_scheduled_report_with_completeness_gates_is_marked_for_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_bookkeeping_record({
+                "bankTransactionId": 41,
+                "sourceType": "bank_transaction",
+                "recordType": "expense",
+                "status": "draft",
+                "targetSystem": "waveapps",
+                "vendorName": "Bank",
+                "category": "Bank fees",
+                "recordDate": "2026-06-20",
+                "amount": -10,
+                "currency": "EUR",
+                "reviewRequired": True,
+                "reconciliationStatus": "not_started",
+            })
+            service = LocalScheduledReportService(ledger, {
+                "fab_local_report_dir": os.path.join(temp_dir, "reports"),
+                "report_schedule_frequency": "monthly",
+                "report_schedule_period_mode": "previous_month",
+            })
+
+            result = service.run_due(now=datetime(2026, 7, 13, tzinfo=timezone.utc))
+
+            self.assertEqual(result["status"], "prepared_needs_review")
+            self.assertEqual(result["reportRun"]["readiness"], "needs_review")
+            self.assertGreater(result["reportRun"]["blocker_count"], 0)
+            self.assertEqual(ledger.dashboard_metrics()["financial_report_runs_needing_attention"], 1)
+
+    def test_failed_schedule_write_is_deferred_then_retried_in_same_slot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._ledger(temp_dir)
+            service = LocalScheduledReportService(ledger, {
+                "fab_local_report_dir": os.path.join(temp_dir, "reports"),
+                "report_schedule_frequency": "monthly",
+                "report_schedule_period_mode": "previous_month",
+                "report_schedule_retry_hours": 2,
+            })
+            now = datetime(2026, 5, 13, 10, 0, tzinfo=timezone.utc)
+
+            with patch.object(service, "_write_artifact", side_effect=OSError("disk full")):
+                failed = service.run_due(now=now)
+            deferred = service.run_due(now=now + timedelta(hours=1))
+            retried = service.run_due(now=now + timedelta(hours=3))
+
+            self.assertFalse(failed["success"])
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(deferred["status"], "retry_deferred")
+            self.assertTrue(retried["success"])
+            self.assertTrue(retried["status"].startswith("prepared"))
+            self.assertEqual(retried["reportRun"]["attempt_count"], 2)
+            self.assertEqual(len(ledger.list_financial_report_runs()), 1)
+
+    def test_schedule_uses_latest_due_local_slot_and_rejects_unsafe_artifact_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._ledger(temp_dir)
+            report_dir = os.path.join(temp_dir, "reports")
+            service = LocalScheduledReportService(ledger, {
+                "fab_local_report_dir": report_dir,
+                "report_schedule_frequency": "daily",
+                "report_schedule_hour": 6,
+                "report_schedule_timezone": "Europe/Amsterdam",
+                "report_schedule_period_mode": "current_month_to_date",
+                "report_schedule_formats": "json",
+            })
+            before_due = datetime(2026, 7, 13, 3, 0, tzinfo=timezone.utc)
+            schedule = service.schedule_status(now=before_due)
+            result = service.run_due(now=before_due)
+            outside = os.path.join(temp_dir, "outside.json")
+            with open(outside, "w", encoding="utf-8") as handle:
+                handle.write("{}")
+            ledger.complete_financial_report_run(result["reportRun"]["id"], {
+                "status": result["status"],
+                "jsonPath": outside,
+                "jsonSha256": "not-the-checksum",
+            })
+            inspected = service.inspect_run(result["reportRun"]["id"])
+
+            self.assertEqual(schedule["slot"]["scheduleSlot"], "daily:2026-07-12")
+            self.assertEqual(schedule["slot"]["period"]["fromDate"], "2026-07-01")
+            self.assertFalse(inspected["success"])
+            self.assertIn("json_artifact_invalid", inspected["errors"])
 
 
 if __name__ == "__main__":

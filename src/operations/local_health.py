@@ -23,6 +23,7 @@ APPROVED_EXPORT_STATUSES = ("approved",)
 SUPERVISED_EXPORT_STATUSES = ("supervision_required",)
 EXECUTING_EXPORT_STATUSES = ("execution_in_progress",)
 DEFERRED_EXPORT_STATUSES = ("deferred",)
+REPORT_ATTENTION_STATUSES = ("failed", "prepared_needs_review", "running")
 
 
 class LocalOperationsHealth:
@@ -87,6 +88,13 @@ class LocalOperationsHealth:
             "wave_entity_sync_stale_hours",
             default=24.0,
         )
+        self.report_stale_hours = _float_config(
+            self.config,
+            "fab_local_report_stale_hours",
+            "operations_report_stale_hours",
+            "report_stale_hours",
+            default=2.0,
+        )
 
     def summarize(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -105,6 +113,7 @@ class LocalOperationsHealth:
         deferred_exports = self.ledger.list_export_attempts(status=DEFERRED_EXPORT_STATUSES, limit=500)
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
         wave_sync_runs = self.ledger.list_wave_sync_runs(limit=100)
+        report_runs = self.ledger.list_financial_report_runs(status=REPORT_ATTENTION_STATUSES, limit=100)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
         rate_limits = get_all_rates()
@@ -292,6 +301,53 @@ class LocalOperationsHealth:
                 {"errorMessage": run.get("error_message")},
             ))
 
+        for report_run in report_runs:
+            report_status = str(report_run.get("status") or "unknown")
+            if report_status == "failed":
+                issues.append(_issue(
+                    "medium",
+                    "failed_financial_report_run",
+                    "financial_report_run",
+                    report_run.get("id"),
+                    f"Scheduled financial report #{report_run.get('id')} failed generation.",
+                    _age_hours(report_run.get("updated_at"), now),
+                    {
+                        "scheduleId": report_run.get("schedule_id"),
+                        "scheduleSlot": report_run.get("schedule_slot"),
+                        "nextRetryAt": report_run.get("next_retry_at"),
+                        "error": report_run.get("error_message"),
+                    },
+                ))
+            elif report_status == "prepared_needs_review":
+                issues.append(_issue(
+                    "low",
+                    "financial_report_needs_review",
+                    "financial_report_run",
+                    report_run.get("id"),
+                    f"Scheduled financial report #{report_run.get('id')} has completeness blockers.",
+                    _age_hours(report_run.get("finished_at") or report_run.get("updated_at"), now),
+                    {
+                        "scheduleId": report_run.get("schedule_id"),
+                        "scheduleSlot": report_run.get("schedule_slot"),
+                        "blockerCount": report_run.get("blocker_count"),
+                    },
+                ))
+            elif report_status == "running":
+                age_hours = _age_hours(report_run.get("started_at"), now)
+                if age_hours is not None and age_hours >= self.report_stale_hours:
+                    issues.append(_issue(
+                        "high",
+                        "stale_financial_report_run",
+                        "financial_report_run",
+                        report_run.get("id"),
+                        f"Scheduled financial report #{report_run.get('id')} has been running for {age_hours:.1f} hours.",
+                        age_hours,
+                        {
+                            "scheduleId": report_run.get("schedule_id"),
+                            "scheduleSlot": report_run.get("schedule_slot"),
+                        },
+                    ))
+
         latest_wave_sync_by_target: Dict[str, Dict[str, Any]] = {}
         for sync_run in wave_sync_runs:
             latest_wave_sync_by_target.setdefault(str(sync_run.get("target_system") or "waveapps"), sync_run)
@@ -362,6 +418,7 @@ class LocalOperationsHealth:
                 "exportApprovedStaleHours": self.export_approved_stale_hours,
                 "exportExecutionStaleHours": self.export_execution_stale_hours,
                 "waveEntitySyncStaleHours": self.wave_entity_sync_stale_hours,
+                "reportStaleHours": self.report_stale_hours,
             },
             "metrics": {
                 **metrics,
@@ -381,6 +438,10 @@ class LocalOperationsHealth:
                 "failedExports": len(failed_exports),
                 "waveEntitySyncRuns": len(wave_sync_runs),
                 "waveEntitySyncFailures": _issue_count(issues, "failed_wave_entity_sync"),
+                "financialReportRuns": metrics.get("financial_report_runs", 0),
+                "financialReportRunsNeedingAttention": metrics.get("financial_report_runs_needing_attention", 0),
+                "failedFinancialReportRuns": _issue_count(issues, "failed_financial_report_run"),
+                "staleFinancialReportRuns": _issue_count(issues, "stale_financial_report_run"),
                 "waveEntities": metrics.get("wave_entities", 0),
                 "waveEntitiesMissingDownstream": missing_wave_entities,
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),

@@ -1,8 +1,17 @@
 import csv
+import hashlib
 import io
-from datetime import date, datetime, timezone
+import json
+import os
+import re
+import tempfile
+from calendar import monthrange
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from dateutil.tz import gettz
 
 from src.operations.local_ledger import LocalOperationsLedger
 
@@ -15,6 +24,15 @@ FINAL_RECONCILIATION_STATUSES = {"approved", "reconciled"}
 LINKED_BANK_RECONCILIATION_STATUSES = FINAL_RECONCILIATION_STATUSES | {"candidate", "needs_review"}
 REPORT_RECORD_LIMIT = 500
 CENT = Decimal("0.01")
+SCHEDULED_REPORT_FORMAT = "fab-scheduled-financial-report-v1"
+SCHEDULE_FREQUENCIES = {"daily", "weekly", "monthly"}
+SCHEDULE_PERIOD_MODES = {
+    "previous_month",
+    "current_month_to_date",
+    "current_year_to_date",
+    "previous_quarter",
+}
+SCHEDULE_ARTIFACT_FORMATS = {"json", "csv"}
 
 
 class LocalFinancialReportingService:
@@ -177,6 +195,576 @@ class LocalFinancialReportingService:
                 "externalSubmission": "not_executed",
             },
         })
+
+
+class LocalScheduledReportService:
+    """Persist due report runs and checksum-bound local artifacts."""
+
+    def __init__(self, ledger: LocalOperationsLedger, config: Optional[Dict[str, Any]] = None):
+        self.ledger = ledger
+        self.config = config or {}
+        self.report_dir = self._report_dir()
+        os.makedirs(self.report_dir, exist_ok=True)
+
+    def schedule_status(self, now: Optional[datetime] = None) -> Dict[str, Any]:
+        schedule = _schedule_config(self.config)
+        if not schedule["enabled"]:
+            return {
+                "enabled": False,
+                "status": "disabled",
+                "schedule": schedule,
+                "externalSubmission": "not_executed",
+            }
+        slot = _schedule_slot(schedule, now=now)
+        existing = self.ledger.get_financial_report_run_by_slot(
+            schedule["scheduleId"],
+            slot["scheduleSlot"],
+        )
+        retry_at = _parse_datetime((existing or {}).get("next_retry_at"))
+        now_value = _aware_utc(now)
+        due = existing is None or (
+            existing.get("status") == "failed"
+            and (retry_at is None or retry_at <= now_value)
+        )
+        return {
+            "enabled": True,
+            "status": "due" if due else _schedule_existing_status(existing),
+            "due": due,
+            "schedule": schedule,
+            "slot": slot,
+            "existingReportRun": existing,
+            "reportDir": self.report_dir,
+            "externalSubmission": "not_executed",
+        }
+
+    def run_due(
+        self,
+        now: Optional[datetime] = None,
+        actor: str = "fab_local_worker",
+    ) -> Dict[str, Any]:
+        status = self.schedule_status(now=now)
+        if not status.get("enabled"):
+            return {
+                "success": True,
+                "status": "disabled",
+                "scheduleStatus": status,
+                "externalSubmission": "not_executed",
+            }
+        schedule = status["schedule"]
+        slot = status["slot"]
+        claimed = self.ledger.claim_financial_report_run({
+            "scheduleId": schedule["scheduleId"],
+            "scheduleSlot": slot["scheduleSlot"],
+            "reportType": schedule["reportType"],
+            "basis": schedule["basis"],
+            "periodFrom": slot["period"]["fromDate"],
+            "periodTo": slot["period"]["toDate"],
+            "targetSystem": schedule.get("targetSystem"),
+            "scheduledFor": slot["scheduledFor"],
+            "startedAt": _iso_utc(_aware_utc(now)),
+            "metadata": {
+                "actor": actor,
+                "frequency": schedule["frequency"],
+                "periodMode": schedule["periodMode"],
+                "timezone": schedule["timezone"],
+                "formats": schedule["formats"],
+                "nextDueAt": slot["nextDueAt"],
+            },
+        })
+        if not claimed.get("acquired"):
+            report_run = claimed.get("reportRun") or {}
+            return {
+                "success": True,
+                "status": (
+                    "retry_deferred"
+                    if claimed.get("status") == "retry_deferred"
+                    else "already_generated"
+                    if str(report_run.get("status") or "").startswith("prepared")
+                    else "already_running"
+                ),
+                "reportRun": report_run,
+                "scheduleStatus": self.schedule_status(now=now),
+                "externalSubmission": "not_executed",
+            }
+
+        report_run = claimed["reportRun"]
+        report_run_id = int(report_run["id"])
+        created_paths = []
+        try:
+            reporting = LocalFinancialReportingService(self.ledger, self.config)
+            report = reporting.generate(
+                report_type=schedule["reportType"],
+                basis=schedule["basis"],
+                from_date=slot["period"]["fromDate"],
+                to_date=slot["period"]["toDate"],
+                target_system=schedule.get("targetSystem"),
+                include_rows=True,
+            )
+            artifact_values: Dict[str, Any] = {}
+            safe_stem = (
+                f"fab-report-{_safe_name(schedule['scheduleId'])}-"
+                f"{_safe_name(slot['scheduleSlot'])}-run-{report_run_id}"
+            )
+            if "json" in schedule["formats"]:
+                json_payload = {
+                    "format": SCHEDULED_REPORT_FORMAT,
+                    "createdAt": _now(),
+                    "schedule": {
+                        "scheduleId": schedule["scheduleId"],
+                        "scheduleSlot": slot["scheduleSlot"],
+                        "scheduledFor": slot["scheduledFor"],
+                        "nextDueAt": slot["nextDueAt"],
+                        "frequency": schedule["frequency"],
+                        "periodMode": schedule["periodMode"],
+                        "timezone": schedule["timezone"],
+                    },
+                    "report": report,
+                    "safety": {
+                        "containsSecrets": False,
+                        "statutoryStatus": "provisional",
+                        "externalSubmission": "not_executed",
+                    },
+                }
+                json_text = json.dumps(json_payload, sort_keys=True, indent=2, default=str) + "\n"
+                json_path = self._write_artifact(f"{safe_stem}.json", json_text)
+                created_paths.append(json_path)
+                artifact_values.update({
+                    "jsonPath": json_path,
+                    "jsonSha256": _sha256_file(json_path),
+                    "jsonBytes": os.path.getsize(json_path),
+                })
+            if "csv" in schedule["formats"]:
+                csv_artifact = reporting.csv_artifact(
+                    report_type=schedule["reportType"],
+                    basis=schedule["basis"],
+                    from_date=slot["period"]["fromDate"],
+                    to_date=slot["period"]["toDate"],
+                    target_system=schedule.get("targetSystem"),
+                )
+                csv_path = self._write_artifact(f"{safe_stem}.csv", csv_artifact["content"])
+                created_paths.append(csv_path)
+                artifact_values.update({
+                    "csvPath": csv_path,
+                    "csvSha256": _sha256_file(csv_path),
+                    "csvBytes": os.path.getsize(csv_path),
+                })
+
+            blockers = (report.get("summary") or {}).get("blockers") or []
+            run_status = "prepared" if not blockers else "prepared_needs_review"
+            completed = self.ledger.complete_financial_report_run(report_run_id, {
+                "status": run_status,
+                "readiness": (report.get("summary") or {}).get("readiness"),
+                "rowCount": (report.get("summary") or {}).get("includedRecordCount", 0),
+                "blockerCount": len(blockers),
+                **artifact_values,
+                "metadata": {
+                    "reportVersion": report.get("reportVersion"),
+                    "statutoryStatus": report.get("statutoryStatus"),
+                    "currencyPolicy": report.get("currencyPolicy"),
+                    "blockers": blockers,
+                },
+            })
+            self.ledger.record_audit_event({
+                "action": "local_reporting.scheduled_report_prepared",
+                "entityType": "financial_report_run",
+                "entityId": str(report_run_id),
+                "details": {
+                    "actor": actor,
+                    "scheduleId": schedule["scheduleId"],
+                    "scheduleSlot": slot["scheduleSlot"],
+                    "status": run_status,
+                    "readiness": completed.get("readiness") if completed else None,
+                    "rowCount": completed.get("row_count") if completed else 0,
+                    "blockerCount": completed.get("blocker_count") if completed else 0,
+                    "artifactChecksums": {
+                        "json": artifact_values.get("jsonSha256"),
+                        "csv": artifact_values.get("csvSha256"),
+                    },
+                    "externalSubmission": "not_executed",
+                },
+            })
+            return {
+                "success": True,
+                "status": run_status,
+                "reportRun": completed,
+                "scheduleStatus": self.schedule_status(now=now),
+                "externalSubmission": "not_executed",
+            }
+        except Exception as exc:
+            for path in created_paths:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            retry_at = _aware_utc(now) + timedelta(hours=schedule["retryHours"])
+            failed = self.ledger.complete_financial_report_run(report_run_id, {
+                "status": "failed",
+                "readiness": "failed",
+                "nextRetryAt": _iso_utc(retry_at),
+                "errorMessage": str(exc),
+                "metadata": {"failureType": type(exc).__name__},
+            })
+            self.ledger.record_audit_event({
+                "action": "local_reporting.scheduled_report_failed",
+                "entityType": "financial_report_run",
+                "entityId": str(report_run_id),
+                "details": {
+                    "actor": actor,
+                    "scheduleId": schedule["scheduleId"],
+                    "scheduleSlot": slot["scheduleSlot"],
+                    "error": str(exc),
+                    "nextRetryAt": _iso_utc(retry_at),
+                    "externalSubmission": "not_executed",
+                },
+            })
+            return {
+                "success": False,
+                "status": "failed",
+                "error": str(exc),
+                "reportRun": failed,
+                "externalSubmission": "not_executed",
+            }
+
+    def inspect_run(self, report_run_id: int) -> Dict[str, Any]:
+        report_run = self.ledger.get_financial_report_run(report_run_id)
+        if not report_run:
+            return {"success": False, "status": "not_found", "error": "Financial report run not found"}
+        artifacts = {}
+        errors = []
+        for format_name in ("json", "csv"):
+            path = report_run.get(f"{format_name}_path")
+            expected = report_run.get(f"{format_name}_sha256")
+            if not path:
+                continue
+            try:
+                resolved = self._resolve_artifact_path(path)
+                actual = _sha256_file(resolved)
+                valid = bool(expected and actual == expected)
+                artifacts[format_name] = {
+                    "path": resolved,
+                    "filename": os.path.basename(resolved),
+                    "sha256": actual,
+                    "expectedSha256": expected,
+                    "sizeBytes": os.path.getsize(resolved),
+                    "valid": valid,
+                }
+                if not valid:
+                    errors.append(f"{format_name}_checksum_mismatch")
+            except (OSError, ValueError) as exc:
+                artifacts[format_name] = {"path": path, "valid": False, "error": str(exc)}
+                errors.append(f"{format_name}_artifact_invalid")
+        return {
+            "success": not errors,
+            "status": "valid" if not errors else "invalid",
+            "reportRun": report_run,
+            "artifacts": artifacts,
+            "errors": errors,
+            "externalSubmission": "not_executed",
+        }
+
+    def read_artifact(self, report_run_id: int, format_name: str) -> Dict[str, Any]:
+        format_name = str(format_name or "json").strip().lower()
+        if format_name not in SCHEDULE_ARTIFACT_FORMATS:
+            raise ValueError(f"Unsupported scheduled report artifact format: {format_name}")
+        inspected = self.inspect_run(report_run_id)
+        if not inspected.get("success"):
+            raise ValueError("Scheduled report artifact integrity check failed")
+        artifact = (inspected.get("artifacts") or {}).get(format_name)
+        if not artifact:
+            raise ValueError(f"Scheduled report has no {format_name} artifact")
+        with open(artifact["path"], "r", encoding="utf-8") as handle:
+            content = handle.read()
+        return {
+            "success": True,
+            "format": format_name,
+            "filename": artifact["filename"],
+            "contentType": "application/json" if format_name == "json" else "text/csv",
+            "content": content,
+            "sha256": artifact["sha256"],
+            "externalSubmission": "not_executed",
+        }
+
+    def _write_artifact(self, filename: str, content: str) -> str:
+        path = self._resolve_artifact_path(filename)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=self.report_dir,
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        temp_path = handle.name
+        try:
+            with handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def _report_dir(self) -> str:
+        value = _config_value(
+            self.config,
+            "fab_local_report_dir",
+            "operations_report_dir",
+            "report_export_dir",
+        )
+        if not value:
+            value = os.path.join(os.path.dirname(os.path.abspath(self.ledger.path)), "reports")
+        return os.path.abspath(os.path.expanduser(str(value)))
+
+    def _resolve_artifact_path(self, path: str) -> str:
+        candidate = os.path.expanduser(str(path or ""))
+        if not candidate:
+            raise ValueError("Scheduled report artifact path is required")
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(self.report_dir, candidate)
+        candidate = os.path.abspath(candidate)
+        if os.path.commonpath([candidate, self.report_dir]) != self.report_dir:
+            raise ValueError("Scheduled report artifact must stay inside the configured report directory")
+        if os.path.isdir(candidate):
+            raise ValueError("Scheduled report artifact path cannot be a directory")
+        return candidate
+
+
+def _schedule_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    enabled = _bool_config(config, "report_schedule_enabled", "worker_generate_scheduled_reports", default=True)
+    frequency = str(_config_value(config, "report_schedule_frequency") or "monthly").strip().lower()
+    if frequency not in SCHEDULE_FREQUENCIES:
+        raise ValueError(f"Unsupported report schedule frequency: {frequency}")
+    period_mode = str(_config_value(config, "report_schedule_period_mode") or "previous_month").strip().lower()
+    if period_mode not in SCHEDULE_PERIOD_MODES:
+        raise ValueError(f"Unsupported report schedule period mode: {period_mode}")
+    report_type = _report_type(_config_value(config, "report_schedule_report_type") or "overview")
+    basis = _basis(_config_value(config, "report_schedule_basis") or "accrual")
+    timezone_name = str(_config_value(config, "report_schedule_timezone") or "Europe/Amsterdam").strip()
+    _load_timezone(timezone_name)
+    formats = _list_config(_config_value(config, "report_schedule_formats") or "json,csv")
+    formats = list(dict.fromkeys(item.lower() for item in formats))
+    unsupported_formats = [item for item in formats if item not in SCHEDULE_ARTIFACT_FORMATS]
+    if unsupported_formats or not formats:
+        raise ValueError(f"Unsupported report schedule formats: {unsupported_formats or formats}")
+    schedule_id = str(_config_value(config, "report_schedule_id") or "default-financial-report").strip()
+    return {
+        "enabled": enabled,
+        "scheduleId": schedule_id or "default-financial-report",
+        "frequency": frequency,
+        "weekday": _bounded_int(_config_value(config, "report_schedule_weekday"), 0, 0, 6),
+        "monthDay": _bounded_int(_config_value(config, "report_schedule_month_day"), 1, 1, 28),
+        "hour": _bounded_int(_config_value(config, "report_schedule_hour"), 6, 0, 23),
+        "minute": _bounded_int(_config_value(config, "report_schedule_minute"), 0, 0, 59),
+        "timezone": timezone_name,
+        "periodMode": period_mode,
+        "reportType": report_type,
+        "basis": basis,
+        "targetSystem": str(_config_value(config, "report_schedule_target_system") or "").strip() or None,
+        "formats": formats,
+        "retryHours": _bounded_float(_config_value(config, "report_schedule_retry_hours"), 6.0, 0.1, 168.0),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _schedule_slot(schedule: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    zone = _load_timezone(schedule["timezone"])
+    local_now = _aware_utc(now).astimezone(zone)
+    due_local = _latest_due_local(schedule, local_now)
+    next_due_local = _next_due_local(schedule, due_local)
+    period_from, period_to = _scheduled_period(schedule["periodMode"], due_local.date(), local_now.date())
+    if schedule["frequency"] == "daily":
+        schedule_slot = f"daily:{due_local.date().isoformat()}"
+    elif schedule["frequency"] == "weekly":
+        iso_year, iso_week, _ = due_local.date().isocalendar()
+        schedule_slot = f"weekly:{iso_year}-W{iso_week:02d}"
+    else:
+        schedule_slot = f"monthly:{due_local.year}-{due_local.month:02d}"
+    return {
+        "scheduleSlot": schedule_slot,
+        "scheduledFor": _iso_utc(due_local.astimezone(timezone.utc)),
+        "nextDueAt": _iso_utc(next_due_local.astimezone(timezone.utc)),
+        "period": {"fromDate": period_from.isoformat(), "toDate": period_to.isoformat()},
+    }
+
+
+def _latest_due_local(schedule: Dict[str, Any], local_now: datetime) -> datetime:
+    scheduled_time = time(schedule["hour"], schedule["minute"])
+    frequency = schedule["frequency"]
+    if frequency == "daily":
+        due = datetime.combine(local_now.date(), scheduled_time, tzinfo=local_now.tzinfo)
+        return due if local_now >= due else due - timedelta(days=1)
+    if frequency == "weekly":
+        week_start = local_now.date() - timedelta(days=local_now.weekday())
+        due_date = week_start + timedelta(days=schedule["weekday"])
+        due = datetime.combine(due_date, scheduled_time, tzinfo=local_now.tzinfo)
+        return due if local_now >= due else due - timedelta(days=7)
+    due_date = date(local_now.year, local_now.month, schedule["monthDay"])
+    due = datetime.combine(due_date, scheduled_time, tzinfo=local_now.tzinfo)
+    if local_now >= due:
+        return due
+    previous_month = _month_shift(due_date, -1)
+    return datetime.combine(
+        previous_month.replace(day=min(schedule["monthDay"], monthrange(previous_month.year, previous_month.month)[1])),
+        scheduled_time,
+        tzinfo=local_now.tzinfo,
+    )
+
+
+def _next_due_local(schedule: Dict[str, Any], due_local: datetime) -> datetime:
+    if schedule["frequency"] == "daily":
+        return due_local + timedelta(days=1)
+    if schedule["frequency"] == "weekly":
+        return due_local + timedelta(days=7)
+    next_month = _month_shift(due_local.date(), 1)
+    next_date = next_month.replace(
+        day=min(schedule["monthDay"], monthrange(next_month.year, next_month.month)[1])
+    )
+    return datetime.combine(next_date, due_local.timetz().replace(tzinfo=None), tzinfo=due_local.tzinfo)
+
+
+def _scheduled_period(period_mode: str, due_date: date, local_today: date) -> tuple[date, date]:
+    if period_mode == "previous_month":
+        previous = _month_shift(due_date.replace(day=1), -1)
+        return previous, previous.replace(day=monthrange(previous.year, previous.month)[1])
+    if period_mode == "current_month_to_date":
+        return local_today.replace(day=1), local_today
+    if period_mode == "current_year_to_date":
+        return date(local_today.year, 1, 1), local_today
+    quarter = (due_date.month - 1) // 3
+    previous_quarter_end_month = quarter * 3
+    if previous_quarter_end_month == 0:
+        year = due_date.year - 1
+        previous_quarter_end_month = 12
+    else:
+        year = due_date.year
+    start_month = previous_quarter_end_month - 2
+    return (
+        date(year, start_month, 1),
+        date(year, previous_quarter_end_month, monthrange(year, previous_quarter_end_month)[1]),
+    )
+
+
+def _month_shift(value: date, months: int) -> date:
+    month_index = value.year * 12 + (value.month - 1) + months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    return date(year, month, min(value.day, monthrange(year, month)[1]))
+
+
+def _schedule_existing_status(report_run: Optional[Dict[str, Any]]) -> str:
+    if not report_run:
+        return "due"
+    status = str(report_run.get("status") or "unknown")
+    if status.startswith("prepared"):
+        return "current"
+    if status == "running":
+        return "running"
+    if status == "failed":
+        return "retry_deferred"
+    return status
+
+
+def _load_timezone(timezone_name: str):
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        fallback = gettz(timezone_name)
+        if fallback is None:
+            raise ValueError(f"Unknown report schedule timezone: {timezone_name}")
+        return fallback
+
+
+def _config_value(config: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = config.get(key)
+        if value not in (None, ""):
+            return value
+    for key in keys:
+        if "_" not in key:
+            continue
+        section, option = key.split("_", 1)
+        values = config.get(section)
+        if isinstance(values, dict):
+            value = values.get(option)
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _list_config(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = str(value or "").replace(";", ",").split(",")
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _bool_config(config: Dict[str, Any], *keys: str, default: bool) -> bool:
+    value = _config_value(config, *keys)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _aware_utc(value: Optional[datetime]) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_name(value: Any) -> str:
+    text = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(value or "").strip())
+    return text.strip("-._") or "report"
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _evaluate_record(record: Dict[str, Any], basis: str) -> Dict[str, Any]:

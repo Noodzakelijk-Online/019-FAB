@@ -10,6 +10,7 @@ scikit-learn # For ML categorizer
 joblib # For ML model persistence
 playwright # For MijngeldzakenHandler
 langdetect # For BilingualProcessor
+python-dateutil # Windows-compatible IANA timezone data for local scheduling
 pandas # For DataMigration and FinancialAnalyzer
 openpyxl # For reading .xlsx files with pandas
 Flask # For MobileDocumentCapture and ManualReviewInterface (if web-based)
