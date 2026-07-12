@@ -50,6 +50,7 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(payload["closeReadiness"]["status"], "blocked")
             self.assertGreater(payload["counts"]["closeBlockingGates"], 0)
             self.assertIn("Autonomous Cycle", page.data.decode("utf-8"))
+            self.assertIn("Cycle lease", page.data.decode("utf-8"))
 
     def test_autonomy_plan_includes_operating_exception_queue(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -125,6 +126,53 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertIn("Open record", html)
             self.assertIn("Open full exception queue", html)
 
+    def test_autonomy_api_rejects_overlapping_cycle_with_public_lease_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            lease = ledger.acquire_runtime_lease(
+                "local_autonomous_cycle",
+                "existing-owner",
+                ttl_seconds=60,
+                metadata={"trigger": "worker"},
+            )
+            app = create_app({"fab_local_ledger_path": ledger_path})
+
+            response = app.test_client().post("/api/autonomy/run", json={
+                "includeWavePlan": False,
+                "includeWaveSync": False,
+            })
+
+            self.assertTrue(lease["acquired"])
+            self.assertEqual(response.status_code, 409)
+            payload = response.get_json()
+            self.assertFalse(payload["success"])
+            self.assertEqual(payload["status"], "already_running")
+            self.assertTrue(payload["runtimeLease"]["active"])
+            self.assertNotIn("owner_token", payload["runtimeLease"])
+            self.assertEqual(ledger.list_workflow_runs(), [])
+            self.assertIn(
+                "local_autonomy.cycle_skipped_already_running",
+                [event["action"] for event in ledger.list_audit_events(limit=10)],
+            )
+            self.assertTrue(
+                ledger.release_runtime_lease("local_autonomous_cycle", "existing-owner")
+            )
+
+    def test_autonomy_dry_run_does_not_acquire_runtime_lease(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                dry_run=True,
+            )
+
+            self.assertEqual(result["status"], "dry_run")
+            self.assertIsNone(ledger.get_runtime_lease("local_autonomous_cycle"))
+
     def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")
@@ -154,6 +202,8 @@ class TestLocalAutonomousService(unittest.TestCase):
             executed_ids = {action["id"] for action in payload["executedActions"]}
             self.assertTrue(payload["success"])
             self.assertEqual(payload["externalSubmission"], "not_executed")
+            self.assertTrue(payload["runtimeLease"]["released"])
+            self.assertFalse(payload["runtimeLease"]["active"])
             self.assertIn("rescan_intake", executed_ids)
             self.assertIn("process_imported", executed_ids)
             self.assertIn("prepare_wave_drafts", executed_ids)

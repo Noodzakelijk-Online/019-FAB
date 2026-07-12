@@ -7,6 +7,43 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_runtime_lease_is_atomic_owner_checked_and_redacted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            first = ledger.acquire_runtime_lease(
+                "autonomy",
+                "owner-one",
+                ttl_seconds=60,
+                metadata={"trigger": "worker", "accessToken": "secret"},
+            )
+            blocked = ledger.acquire_runtime_lease("autonomy", "owner-two", ttl_seconds=60)
+
+            self.assertTrue(first["acquired"])
+            self.assertTrue(first["lease"]["active"])
+            self.assertNotIn("owner_token", first["lease"])
+            self.assertEqual(first["lease"]["metadata"]["accessToken"], "<redacted>")
+            self.assertFalse(blocked["acquired"])
+            self.assertEqual(blocked["status"], "already_held")
+            self.assertFalse(ledger.release_runtime_lease("autonomy", "owner-two"))
+            connection = sqlite3.connect(ledger.path)
+            try:
+                connection.execute(
+                    "UPDATE runtime_leases SET expires_at = ? WHERE lease_name = ?",
+                    ("2000-01-01T00:00:00+00:00", "autonomy"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            recovered = ledger.acquire_runtime_lease("autonomy", "owner-two", ttl_seconds=60)
+            self.assertTrue(recovered["acquired"])
+            self.assertFalse(ledger.release_runtime_lease("autonomy", "owner-one"))
+            self.assertTrue(ledger.release_runtime_lease("autonomy", "owner-two"))
+            self.assertIsNone(ledger.get_runtime_lease("autonomy"))
+            self.assertTrue(
+                ledger.acquire_runtime_lease("autonomy", "owner-three", ttl_seconds=60)["acquired"]
+            )
+
     def test_source_accounts_are_upserted_and_counted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

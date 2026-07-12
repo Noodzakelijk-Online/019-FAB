@@ -82,7 +82,13 @@ Local deployment is suitable for development, testing, and running the solution 
     ```bash
     python src/main.py
     ```
-    For continuous operation, use Windows Task Scheduler on Windows or process managers like `systemd` (Linux) or `Supervisor` to keep the script running and restart it on failures.
+    For continuous operation, run the recurring worker rather than repeatedly launching the one-shot command:
+    ```bash
+    python -m src.run_worker
+    ```
+    The worker runs legacy connector ingestion, the policy-gated local autonomous cycle, operations-ledger export processing, and optional compatibility retries as independent audited stages. One failed connector stage does not suppress the remaining local bookkeeping stages. Set `worker_run_legacy_workflow=false` for local-folder-only installations that do not configure the legacy Gmail/Drive/Photos/Freshdesk pipeline. `worker_interval_seconds` controls the interval; `worker_run_once=true` is useful when Windows Task Scheduler supplies the recurrence. A SQLite runtime lease prevents the worker, Task Scheduler, and `/api/autonomy/run` from overlapping the local autonomous cycle. Expired leases recover after `fab_autonomy_lease_seconds`.
+
+    On Windows Task Scheduler, set **Program/script** to the virtual environment's `python.exe`, **Add arguments** to `-m src.run_worker`, and **Start in** to the repository directory. Use either one long-running worker with restart-on-failure or `worker_run_once=true` with a recurring task, not both recurrence models at once.
 
 6.  **Run the Local Operations API (optional):**
 

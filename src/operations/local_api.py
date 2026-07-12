@@ -632,16 +632,17 @@ DASHBOARD_TEMPLATE = """
       <div class="section-head">
         <div>
           <h2>Autonomous Cycle</h2>
-          <p>Runs only local, policy-gated bookkeeping work: intake, processing, draft preparation, reconciliation candidates, and read-only Wave planning.</p>
+          <p>Runs local, policy-gated bookkeeping work from the dashboard or recurring worker without overlapping cycles.</p>
         </div>
         <form class="inline-actions" method="post" action="{{ url_for('run_autonomy_form') }}">
-          <button type="submit" {% if not autonomy_plan.canRunAutonomously %}disabled{% endif %}>Run safe cycle</button>
+          <button type="submit" {% if not autonomy_plan.canRunAutonomously or (autonomy_plan.runtimeLease and autonomy_plan.runtimeLease.active) %}disabled{% endif %}>Run safe cycle</button>
         </form>
       </div>
       <div class="summary-grid">
         <div class="summary-item"><span>Status</span><strong>{{ autonomy_plan.status }}</strong></div>
         <div class="summary-item"><span>Runnable</span><strong>{{ autonomy_plan.runnableActionIds|length }}</strong></div>
         <div class="summary-item"><span>Manual gates</span><strong>{{ autonomy_plan.manualActionIds|length }}</strong></div>
+        <div class="summary-item"><span>Cycle lease</span><strong>{{ "active" if autonomy_plan.runtimeLease and autonomy_plan.runtimeLease.active else "free" }}</strong></div>
         <div class="summary-item"><span>Exceptions</span><strong>{{ autonomy_plan.exceptions.total }}</strong></div>
         <div class="summary-item"><span>Imported</span><strong>{{ autonomy_plan.counts.importedDocuments }}</strong></div>
         <div class="summary-item"><span>Routable</span><strong>{{ autonomy_plan.counts.routableDocuments }}</strong></div>
@@ -3620,7 +3621,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             include_wave_sync=_bool_value(payload.get("includeWaveSync"), default=True),
             dry_run=bool(payload.get("dryRun", False)),
         )
-        status_code = 400 if result.get("status") == "blocked" else 200
+        if result.get("status") == "already_running":
+            status_code = 409
+        elif result.get("status") == "blocked":
+            status_code = 400
+        else:
+            status_code = 200
         return jsonify(result), status_code
 
     @app.post("/autonomy/run")

@@ -547,6 +547,20 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS runtime_leases (
+                    lease_name TEXT PRIMARY KEY,
+                    owner_token TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_runtime_leases_expiry
+                    ON runtime_leases(expires_at);
+
                 CREATE INDEX IF NOT EXISTS idx_local_wave_sync_target
                     ON wave_sync_runs(target_system);
                 CREATE INDEX IF NOT EXISTS idx_local_wave_sync_status
@@ -622,6 +636,98 @@ class LocalOperationsLedger:
             self._ensure_export_attempt_schema(connection)
             self._ensure_wave_operation_snapshot_schema(connection)
             self._ensure_wave_entity_mirror_schema(connection)
+
+    def acquire_runtime_lease(
+        self,
+        lease_name: str,
+        owner_token: str,
+        ttl_seconds: float = 21600,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        lease_name = str(lease_name or "").strip()
+        owner_token = str(owner_token or "").strip()
+        if not lease_name or not owner_token:
+            raise ValueError("lease_name and owner_token are required")
+        try:
+            ttl_seconds = max(float(ttl_seconds), 1.0)
+        except (TypeError, ValueError):
+            ttl_seconds = 21600.0
+        now_value = datetime.now(timezone.utc)
+        now = now_value.isoformat()
+        expires_at = datetime.fromtimestamp(
+            now_value.timestamp() + ttl_seconds,
+            tz=timezone.utc,
+        ).isoformat()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM runtime_leases WHERE lease_name = ? LIMIT 1",
+                (lease_name,),
+            ).fetchone()
+            existing = self._row_to_dict(row) if row else None
+            if existing and existing.get("owner_token") != owner_token:
+                existing_expiry = self._parse_datetime(existing.get("expires_at"))
+                if existing_expiry is None or existing_expiry > now_value:
+                    return {
+                        "acquired": False,
+                        "status": "already_held" if existing_expiry else "invalid_lease",
+                        "lease": self._public_runtime_lease(existing, now_value),
+                    }
+            values = (
+                lease_name,
+                owner_token,
+                now,
+                now,
+                expires_at,
+                self._json(self._redact_sensitive(metadata or {})),
+                now,
+                now,
+            )
+            connection.execute(
+                """
+                INSERT INTO runtime_leases (
+                    lease_name, owner_token, acquired_at, heartbeat_at,
+                    expires_at, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lease_name) DO UPDATE SET
+                    owner_token = excluded.owner_token,
+                    acquired_at = excluded.acquired_at,
+                    heartbeat_at = excluded.heartbeat_at,
+                    expires_at = excluded.expires_at,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                values,
+            )
+            row = connection.execute(
+                "SELECT * FROM runtime_leases WHERE lease_name = ? LIMIT 1",
+                (lease_name,),
+            ).fetchone()
+        lease = self._row_to_dict(row) if row else None
+        return {
+            "acquired": True,
+            "status": "acquired",
+            "lease": self._public_runtime_lease(lease or {}, now_value),
+        }
+
+    def release_runtime_lease(self, lease_name: str, owner_token: str) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM runtime_leases WHERE lease_name = ? AND owner_token = ?",
+                (str(lease_name or "").strip(), str(owner_token or "").strip()),
+            )
+            return int(cursor.rowcount) == 1
+
+    def get_runtime_lease(self, lease_name: str) -> Optional[Dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_leases WHERE lease_name = ? LIMIT 1",
+                (str(lease_name or "").strip(),),
+            ).fetchone()
+        if not row:
+            return None
+        return self._public_runtime_lease(self._row_to_dict(row), now)
 
     def upsert_source_account(self, payload: Dict[str, Any]) -> int:
         source_type = str(payload.get("sourceType") or payload.get("source_type") or "unknown").strip()
@@ -3724,6 +3830,30 @@ class LocalOperationsLedger:
         if isinstance(value, (date, datetime)):
             return value.isoformat()
         return str(value)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _public_runtime_lease(cls, lease: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+        expires_at = cls._parse_datetime(lease.get("expires_at"))
+        return {
+            "leaseName": lease.get("lease_name"),
+            "active": bool(expires_at and expires_at > now),
+            "acquiredAt": lease.get("acquired_at"),
+            "heartbeatAt": lease.get("heartbeat_at"),
+            "expiresAt": lease.get("expires_at"),
+            "metadata": lease.get("metadata") or {},
+        }
 
     @staticmethod
     def _normalize_text(value: str) -> str:

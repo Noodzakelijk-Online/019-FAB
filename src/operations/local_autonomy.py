@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from src.data_entry.waveapps_account_discovery import resolve_wave_target_config
 from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
@@ -31,6 +32,7 @@ IMPORTED_DOCUMENT_STATUSES = ("imported",)
 PENDING_ROUTE_STATUSES = ("draft_prepared", "needs_confirmation", "queued")
 RECONCILIATION_REVIEW_STATUSES = ("candidate", "missing_receipt", "unmatched_document")
 AUTONOMOUS_TRIGGER = "local_autonomous_cycle"
+AUTONOMY_LEASE_NAME = "local_autonomous_cycle"
 WAVE_ENTITY_TARGETS = ("waveapps_business", "waveapps_personal")
 WAVE_ENTITY_TYPES = ("customer", "product", "invoice")
 
@@ -382,6 +384,7 @@ class LocalAutonomousService:
             "health": _compact_health(health),
             "exceptions": _compact_exceptions(exceptions),
             "closeReadiness": _compact_close_readiness(close_readiness),
+            "runtimeLease": self.ledger.get_runtime_lease(AUTONOMY_LEASE_NAME),
             "actions": actions,
             "runnableActionIds": [action["id"] for action in runnable_actions],
             "manualActionIds": [action["id"] for action in manual_actions],
@@ -389,6 +392,88 @@ class LocalAutonomousService:
         }
 
     def run_cycle(
+        self,
+        limit: int = 25,
+        bank_transactions: Optional[List[Dict[str, Any]]] = None,
+        include_wave_plan: bool = True,
+        dry_run: bool = False,
+        include_wave_sync: bool = True,
+    ) -> Dict[str, Any]:
+        if dry_run:
+            return self._run_cycle_once(
+                limit=limit,
+                bank_transactions=bank_transactions,
+                include_wave_plan=include_wave_plan,
+                dry_run=True,
+                include_wave_sync=include_wave_sync,
+            )
+        owner_token = uuid4().hex
+        lease = self.ledger.acquire_runtime_lease(
+            AUTONOMY_LEASE_NAME,
+            owner_token,
+            ttl_seconds=_positive_float_config(
+                self.config,
+                "fab_autonomy_lease_seconds",
+                "operations_autonomy_lease_seconds",
+                default=21600.0,
+            ),
+            metadata={"trigger": AUTONOMOUS_TRIGGER},
+        )
+        if not lease.get("acquired"):
+            plan = self.plan(
+                limit=limit,
+                bank_transactions=bank_transactions,
+                include_wave_plan=include_wave_plan,
+                include_wave_sync=include_wave_sync,
+            )
+            self.ledger.record_audit_event({
+                "action": "local_autonomy.cycle_skipped_already_running",
+                "entityType": "runtime_lease",
+                "entityId": AUTONOMY_LEASE_NAME,
+                "details": {
+                    "lease": lease.get("lease"),
+                    "externalSubmission": "not_executed",
+                },
+            })
+            return {
+                "success": False,
+                "status": "already_running",
+                "externalSubmission": "not_executed",
+                "plan": plan,
+                "runtimeLease": lease.get("lease"),
+                "executedActions": [],
+                "skippedActions": plan["actions"],
+            }
+        result = None
+        try:
+            result = self._run_cycle_once(
+                limit=limit,
+                bank_transactions=bank_transactions,
+                include_wave_plan=include_wave_plan,
+                dry_run=False,
+                include_wave_sync=include_wave_sync,
+            )
+            return result
+        finally:
+            released = self.ledger.release_runtime_lease(AUTONOMY_LEASE_NAME, owner_token)
+            released_lease = {
+                **(lease.get("lease") or {}),
+                "active": False if released else (lease.get("lease") or {}).get("active"),
+                "released": released,
+            }
+            if isinstance(result, dict):
+                result["runtimeLease"] = released_lease
+                if isinstance(result.get("plan"), dict):
+                    result["plan"]["runtimeLease"] = released_lease
+            if not released:
+                self.ledger.record_audit_event({
+                    "action": "local_autonomy.lease_release_failed",
+                    "entityType": "runtime_lease",
+                    "entityId": AUTONOMY_LEASE_NAME,
+                    "details": {"externalSubmission": "not_executed"},
+                })
+
+    def _run_cycle_once(
         self,
         limit: int = 25,
         bank_transactions: Optional[List[Dict[str, Any]]] = None,

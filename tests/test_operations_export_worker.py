@@ -79,10 +79,57 @@ class TestOperationsExportWorker(unittest.TestCase):
             reviews = ledger.list_review_items(document_id=document_id)
             self.assertEqual(reviews[0]["reason"], "mijngeldzaken_supervision_required")
             audit_actions = {event["action"] for event in ledger.list_audit_events(limit=100)}
+            self.assertIn("local_worker.autonomy_cycle", audit_actions)
+            self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
             self.assertIn("local_export_attempt.batch_execution_preflight_backup", audit_actions)
             self.assertIn("local_export_attempt.supervision_required", audit_actions)
             self.assertEqual(ledger.list_export_attempts(status="approved"), [])
+
+    def test_worker_stage_failure_does_not_suppress_local_autonomy_or_exports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_run_legacy_workflow",
+                side_effect=RuntimeError("connector unavailable"),
+            ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
+                worker,
+                "_process_operations_exports",
+            ) as exports:
+                worker.run()
+
+            autonomy.assert_called_once()
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
+            self.assertIn("local_worker.stage_failed", audit_actions)
+            self.assertIn("local_worker.cycle_finished_with_error", audit_actions)
+
+    def test_worker_can_disable_legacy_pipeline_for_local_only_operation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config.update({
+                "worker_run_legacy_workflow": False,
+                "worker_process_approved_postings": False,
+                "worker_include_wave_plan": False,
+                "worker_include_wave_sync": False,
+            })
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch(
+                "src.worker.scheduler.WorkflowController"
+            ) as workflow_controller:
+                worker.run()
+
+            workflow_controller.assert_not_called()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
+            self.assertIn("local_worker.autonomy_cycle", audit_actions)
+            self.assertIn("local_worker.cycle_completed", audit_actions)
+            self.assertNotIn("local_worker.stage_failed", audit_actions)
 
     def test_manual_runner_uses_operations_ledger_and_respects_execution_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:
