@@ -3588,13 +3588,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def autonomy_plan():
         limit = _bounded_positive_int(request.args.get("limit"), default=25, maximum=100)
         include_wave_plan = _bool_value(request.args.get("includeWavePlan"), default=True)
+        include_wave_sync = _bool_value(request.args.get("includeWaveSync"), default=True)
         return jsonify(_autonomy_service(
             ledger,
             config,
             _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
             intake_paths,
             intake_extensions,
-        ).plan(limit=limit, include_wave_plan=include_wave_plan))
+        ).plan(
+            limit=limit,
+            include_wave_plan=include_wave_plan,
+            include_wave_sync=include_wave_sync,
+        ))
 
     @app.post("/api/autonomy/run")
     def run_autonomy():
@@ -3612,6 +3617,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
             bank_transactions=bank_transactions,
             include_wave_plan=_bool_value(payload.get("includeWavePlan"), default=True),
+            include_wave_sync=_bool_value(payload.get("includeWaveSync"), default=True),
             dry_run=bool(payload.get("dryRun", False)),
         )
         status_code = 400 if result.get("status") == "blocked" else 200
@@ -3625,7 +3631,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
             intake_paths,
             intake_extensions,
-        ).run_cycle(limit=25, include_wave_plan=True)
+        ).run_cycle(limit=25, include_wave_plan=True, include_wave_sync=True)
         return redirect(url_for("dashboard_page", _anchor="autonomy"))
 
     @app.get("/api/wave")

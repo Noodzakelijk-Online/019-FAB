@@ -1,6 +1,8 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from src.data_entry.waveapps_account_discovery import resolve_wave_target_config
+from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
@@ -29,6 +31,8 @@ IMPORTED_DOCUMENT_STATUSES = ("imported",)
 PENDING_ROUTE_STATUSES = ("draft_prepared", "needs_confirmation", "queued")
 RECONCILIATION_REVIEW_STATUSES = ("candidate", "missing_receipt", "unmatched_document")
 AUTONOMOUS_TRIGGER = "local_autonomous_cycle"
+WAVE_ENTITY_TARGETS = ("waveapps_business", "waveapps_personal")
+WAVE_ENTITY_TYPES = ("customer", "product", "invoice")
 
 
 class LocalAutonomousService:
@@ -60,6 +64,7 @@ class LocalAutonomousService:
         limit: int = 25,
         bank_transactions: Optional[List[Dict[str, Any]]] = None,
         include_wave_plan: bool = True,
+        include_wave_sync: bool = True,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
         readiness = self._readiness_summary()
@@ -86,6 +91,9 @@ class LocalAutonomousService:
         stale_rows = _regenerable_stale_master_ledger_rows(master_ledger)
         counts["staleMasterLedgerDrafts"] = len(stale_rows)
         counts["staleMasterLedgerTargets"] = _target_breakdown(stale_rows, _master_row_target_system)
+        wave_entity_sync = self._wave_entity_sync_plan(include_wave_sync)
+        counts["waveEntitySyncConfiguredTargets"] = len(wave_entity_sync["configuredTargets"])
+        counts["waveEntitySyncTargetsDue"] = len(wave_entity_sync["dueTargets"])
         blocked_reasons = self._blocked_reasons(readiness, health)
         blocked = bool(blocked_reasons)
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
@@ -100,6 +108,22 @@ class LocalAutonomousService:
                 bool(self.intake_paths) and not blocked,
                 "No intake folders are configured." if not self.intake_paths else None,
                 {"intakePaths": self.intake_paths, "allowedExtensions": self.intake_extensions},
+            ),
+            _action(
+                "refresh_wave_entity_mirror",
+                "Refresh stale Wave customers, products/services, and invoices before downstream draft work",
+                "collect",
+                "low",
+                "read_only",
+                bool(wave_entity_sync["dueTargets"]) and wave_entity_sync["enabled"] and not blocked,
+                _wave_entity_sync_blocked_reason(wave_entity_sync),
+                {
+                    "configuredTargets": wave_entity_sync["configuredTargets"],
+                    "dueTargets": wave_entity_sync["dueTargets"],
+                    "entityTypes": wave_entity_sync["entityTypes"],
+                    "targetStates": wave_entity_sync["targetStates"],
+                    "externalSubmission": "not_executed",
+                },
             ),
             _action(
                 "process_imported",
@@ -370,10 +394,16 @@ class LocalAutonomousService:
         bank_transactions: Optional[List[Dict[str, Any]]] = None,
         include_wave_plan: bool = True,
         dry_run: bool = False,
+        include_wave_sync: bool = True,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
-        plan = self.plan(limit=limit, bank_transactions=bank_transactions, include_wave_plan=include_wave_plan)
+        plan = self.plan(
+            limit=limit,
+            bank_transactions=bank_transactions,
+            include_wave_plan=include_wave_plan,
+            include_wave_sync=include_wave_sync,
+        )
         if dry_run:
             return {
                 "success": True,
@@ -447,6 +477,15 @@ class LocalAutonomousService:
                 executed.append(self._run_reconciliation(bank_transactions, limit))
             else:
                 skipped.append(self._skip(plan, "run_reconciliation"))
+
+            if self._can_run(plan, "refresh_wave_entity_mirror"):
+                sync_action = next(
+                    action for action in plan["actions"]
+                    if action["id"] == "refresh_wave_entity_mirror"
+                )
+                executed.append(self._run_wave_entity_sync(sync_action["evidence"]["dueTargets"]))
+            else:
+                skipped.append(self._skip(plan, "refresh_wave_entity_mirror"))
 
             routing_should_run = (
                 self._can_run(plan, "prepare_wave_drafts")
@@ -607,6 +646,77 @@ class LocalAutonomousService:
         ):
             reasons.append("operations_health_blocked")
         return reasons
+
+    def _wave_entity_sync_plan(self, include_wave_sync: bool) -> Dict[str, Any]:
+        enabled = include_wave_sync and _bool_config(
+            self.config,
+            "fab_autonomy_sync_wave_entities",
+            "operations_autonomy_sync_wave_entities",
+            default=True,
+        )
+        stale_hours = _positive_float_config(
+            self.config,
+            "fab_local_wave_entity_sync_stale_hours",
+            "operations_wave_entity_sync_stale_hours",
+            "wave_entity_sync_stale_hours",
+            default=24.0,
+        )
+        retry_hours = _positive_float_config(
+            self.config,
+            "fab_local_wave_entity_sync_retry_hours",
+            "operations_wave_entity_sync_retry_hours",
+            "wave_entity_sync_retry_hours",
+            default=1.0,
+        )
+        configured_targets = []
+        due_targets = []
+        target_states = []
+        now = datetime.now(timezone.utc)
+        for target_system in WAVE_ENTITY_TARGETS:
+            target = resolve_wave_target_config(self.config, target_system)
+            configured = bool(
+                target
+                and target.get("access_token") not in (None, "")
+                and target.get("business_id") not in (None, "")
+            )
+            if configured:
+                configured_targets.append(target_system)
+            runs = self.ledger.list_wave_sync_runs(target_system=target_system, limit=1)
+            latest = runs[0] if runs else None
+            status = str((latest or {}).get("status") or "never_synced")
+            age_hours = _timestamp_age_hours(
+                (latest or {}).get("finished_at") or (latest or {}).get("started_at"),
+                now,
+            )
+            if status == "completed":
+                due = configured and (age_hours is None or age_hours >= stale_hours)
+                reason = "stale" if due else "current"
+            elif status == "never_synced":
+                due = configured
+                reason = "never_synced" if configured else "not_configured"
+            else:
+                due = configured and (age_hours is None or age_hours >= retry_hours)
+                reason = "retry_due" if due else "retry_backoff"
+            if enabled and due:
+                due_targets.append(target_system)
+            target_states.append({
+                "targetSystem": target_system,
+                "configured": configured,
+                "latestStatus": status,
+                "ageHours": round(age_hours, 2) if age_hours is not None else None,
+                "due": bool(enabled and due),
+                "reason": reason,
+            })
+        return {
+            "enabled": enabled,
+            "requested": bool(include_wave_sync),
+            "configuredTargets": configured_targets,
+            "dueTargets": due_targets,
+            "entityTypes": list(WAVE_ENTITY_TYPES),
+            "staleHours": stale_hours,
+            "retryHours": retry_hours,
+            "targetStates": target_states,
+        }
 
     def _can_run(self, plan: Dict[str, Any], action_id: str) -> bool:
         return action_id in set(plan.get("runnableActionIds") or [])
@@ -805,6 +915,49 @@ class LocalAutonomousService:
             "blockingCount": report_controls.get("blockingCount"),
         }
         return {"id": "plan_wave_daily_reconciliation", "status": "completed", "summary": summary}
+
+    def _run_wave_entity_sync(self, target_systems: List[str]) -> Dict[str, Any]:
+        service = WaveappsEntitySyncService(self.config)
+        results = []
+        for target_system in target_systems:
+            result = service.sync(
+                self.ledger,
+                target_system,
+                entity_types=list(WAVE_ENTITY_TYPES),
+            )
+            summary = {
+                "targetSystem": target_system,
+                "syncRunId": result.get("syncRunId"),
+                "success": bool(result.get("success")),
+                "status": result.get("status"),
+                "pagesFetched": result.get("pagesFetched", 0),
+                "entitiesSeen": result.get("entitiesSeen", 0),
+                "missingMarked": result.get("missingMarked", 0),
+                "message": result.get("message"),
+                "externalSubmission": "not_executed",
+            }
+            results.append(summary)
+            self.ledger.record_audit_event({
+                "action": "local_autonomy.wave_entity_mirror_refreshed",
+                "entityType": "wave_sync_run",
+                "entityId": str(result.get("syncRunId") or target_system),
+                "details": summary,
+            })
+        failed = [result for result in results if not result["success"]]
+        return {
+            "id": "refresh_wave_entity_mirror",
+            "status": "completed" if not failed else "attention_required",
+            "summary": {
+                "requestedTargets": len(target_systems),
+                "successfulTargets": len(results) - len(failed),
+                "failedTargets": len(failed),
+                "pagesFetched": sum(int(result.get("pagesFetched") or 0) for result in results),
+                "entitiesSeen": sum(int(result.get("entitiesSeen") or 0) for result in results),
+                "missingMarked": sum(int(result.get("missingMarked") or 0) for result in results),
+                "targetResults": results,
+                "externalSubmission": "not_executed",
+            },
+        }
 
     def _run_period_close_pack(self) -> Dict[str, Any]:
         close_pack = LocalClosePackService(self.ledger, self.config).prepare(actor="local_autonomy")
@@ -1024,6 +1177,51 @@ def _truthy_config(config: Dict[str, Any], *keys: str) -> bool:
             continue
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
     return False
+
+
+def _bool_config(config: Dict[str, Any], *keys: str, default: bool) -> bool:
+    for key in keys:
+        value = config.get(key)
+        if value in (None, ""):
+            continue
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _positive_float_config(config: Dict[str, Any], *keys: str, default: float) -> float:
+    for key in keys:
+        value = config.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _timestamp_age_hours(value: Any, now: datetime) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max((now - parsed.astimezone(timezone.utc)).total_seconds() / 3600.0, 0.0)
+
+
+def _wave_entity_sync_blocked_reason(sync_plan: Dict[str, Any]) -> Optional[str]:
+    if not sync_plan.get("requested"):
+        return "Wave entity mirror refresh was disabled for this request."
+    if not sync_plan.get("enabled"):
+        return "Autonomous Wave entity mirror refresh is disabled in configuration."
+    if not sync_plan.get("configuredTargets"):
+        return "No Wave target has both an access token and business id configured."
+    if not sync_plan.get("dueTargets"):
+        return "Every configured Wave entity mirror is current or waiting for its retry window."
+    return None
 
 
 def _registered_documents(executed: List[Dict[str, Any]]) -> bool:

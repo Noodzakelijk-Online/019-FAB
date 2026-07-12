@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
@@ -10,6 +11,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 
 
 class TestLocalAutonomousService(unittest.TestCase):
@@ -24,6 +26,7 @@ class TestLocalAutonomousService(unittest.TestCase):
             client = app.test_client()
 
             response = client.get("/api/autonomy/plan")
+            wave_sync_disabled = client.get("/api/autonomy/plan?includeWaveSync=false")
             page = client.get("/")
 
             self.assertEqual(response.status_code, 200)
@@ -32,6 +35,12 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(payload["status"], "ready")
             self.assertIn("rescan_intake", payload["runnableActionIds"])
             self.assertIn("plan_wave_daily_reconciliation", payload["runnableActionIds"])
+            self.assertIn("refresh_wave_entity_mirror", {action["id"] for action in payload["actions"]})
+            disabled_action = next(
+                action for action in wave_sync_disabled.get_json()["actions"]
+                if action["id"] == "refresh_wave_entity_mirror"
+            )
+            self.assertIn("disabled for this request", disabled_action["blockedReason"])
             self.assertIn("review_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("exception_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("approve_export_attempts", {action["id"] for action in payload["actions"]})
@@ -309,6 +318,122 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertIn("account-transactions", {snapshot["report_type"] for snapshot in snapshots})
             self.assertEqual(snapshots[0]["external_submission"], "not_executed")
 
+    @patch("src.data_entry.waveapps_entity_sync.requests.post")
+    def test_autonomy_refreshes_due_wave_entity_mirror_once(self, mock_post):
+        reset_all_limiters()
+        set_rate_limiter(
+            "waveapps",
+            limiter=RateLimiter(calls_per_second=100, calls_per_day=1000, name="WaveApps"),
+        )
+        self.addCleanup(reset_all_limiters)
+
+        def response_for_request(*args, **kwargs):
+            query = kwargs["json"]["query"]
+            if "customers(" in query:
+                return _wave_entity_response("customers", [{
+                    "id": "customer-autonomy-1",
+                    "name": "Autonomy Customer",
+                    "email": "billing@example.test",
+                    "currency": {"code": "EUR"},
+                }])
+            if "products(" in query:
+                return _wave_entity_response("products", [{
+                    "id": "product-autonomy-1",
+                    "name": "Autonomy Service",
+                    "unitPrice": "100.00",
+                    "isArchived": False,
+                }])
+            return _wave_entity_response("invoices", [{
+                "id": "invoice-autonomy-1",
+                "invoiceNumber": "AUTO-1",
+                "status": "DRAFT",
+                "invoiceDate": "2026-07-12",
+                "dueDate": "2026-08-11",
+                "currency": {"code": "EUR"},
+                "total": {"value": "100.00"},
+            }])
+
+        mock_post.side_effect = response_for_request
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(ledger, {
+                "waveapps_business_access_token": "business-secret-token",
+                "waveapps_business_id": "business-1",
+                "wave_entity_sync_max_wait_seconds": 0,
+            }, intake_paths=[])
+
+            plan = service.plan(include_wave_plan=False)
+            result = service.run_cycle(include_wave_plan=False)
+            current_plan = service.plan(include_wave_plan=False)
+            disabled_plan = service.plan(include_wave_plan=False, include_wave_sync=False)
+
+            self.assertIn("refresh_wave_entity_mirror", plan["runnableActionIds"])
+            self.assertEqual(plan["counts"]["waveEntitySyncTargetsDue"], 1)
+            self.assertTrue(result["success"])
+            action = next(
+                item for item in result["executedActions"]
+                if item["id"] == "refresh_wave_entity_mirror"
+            )
+            self.assertEqual(action["status"], "completed")
+            self.assertEqual(action["summary"]["entitiesSeen"], 3)
+            self.assertEqual(action["summary"]["successfulTargets"], 1)
+            self.assertEqual(mock_post.call_count, 3)
+            self.assertEqual(len(ledger.list_wave_entities(limit=20)), 3)
+            self.assertNotIn("refresh_wave_entity_mirror", current_plan["runnableActionIds"])
+            self.assertEqual(current_plan["counts"]["waveEntitySyncTargetsDue"], 0)
+            self.assertNotIn("refresh_wave_entity_mirror", disabled_plan["runnableActionIds"])
+            disabled_action = next(
+                item for item in disabled_plan["actions"]
+                if item["id"] == "refresh_wave_entity_mirror"
+            )
+            self.assertIn("disabled for this request", disabled_action["blockedReason"])
+            self.assertNotIn("business-secret-token", str(result))
+            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
+            self.assertIn("local_autonomy.wave_entity_mirror_refreshed", audit_actions)
+
+    @patch("src.data_entry.waveapps_entity_sync.requests.post")
+    def test_autonomy_holds_failed_wave_sync_inside_retry_window(self, mock_post):
+        reset_all_limiters()
+        set_rate_limiter(
+            "waveapps",
+            limiter=RateLimiter(calls_per_second=100, calls_per_day=1000, name="WaveApps"),
+        )
+        self.addCleanup(reset_all_limiters)
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"errors": [{"message": "temporary provider error"}]}
+        mock_post.return_value = response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(ledger, {
+                "waveapps_business_access_token": "business-secret-token",
+                "waveapps_business_id": "business-1",
+                "wave_entity_sync_max_wait_seconds": 0,
+                "wave_entity_sync_retry_hours": 1,
+            }, intake_paths=[])
+
+            result = service.run_cycle(include_wave_plan=False)
+            retry_plan = service.plan(include_wave_plan=False)
+
+            action = next(
+                item for item in result["executedActions"]
+                if item["id"] == "refresh_wave_entity_mirror"
+            )
+            self.assertTrue(result["success"])
+            self.assertEqual(action["status"], "attention_required")
+            self.assertEqual(action["summary"]["failedTargets"], 1)
+            self.assertNotIn("refresh_wave_entity_mirror", retry_plan["runnableActionIds"])
+            target_state = next(
+                state for state in next(
+                    item for item in retry_plan["actions"]
+                    if item["id"] == "refresh_wave_entity_mirror"
+                )["evidence"]["targetStates"]
+                if state["targetSystem"] == "waveapps_business"
+            )
+            self.assertEqual(target_state["reason"], "retry_backoff")
+            self.assertEqual(mock_post.call_count, 1)
+
     def test_autonomy_run_prepares_period_close_pack_when_close_ready(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -550,6 +675,27 @@ def _capture_zero_activity_wave_result(ledger: LocalOperationsLedger):
             "totalCredits": 0,
         },
     })
+
+
+def _wave_entity_response(collection, nodes):
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "data": {
+            "business": {
+                "id": "business-1",
+                collection: {
+                    "pageInfo": {
+                        "currentPage": 1,
+                        "totalPages": 1,
+                        "totalCount": len(nodes),
+                    },
+                    "edges": [{"node": node} for node in nodes],
+                },
+            }
+        }
+    }
+    return response
 
 
 if __name__ == "__main__":
