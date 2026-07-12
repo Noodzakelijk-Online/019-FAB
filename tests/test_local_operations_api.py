@@ -7,7 +7,7 @@ from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
 from src.operations.local_ledger import LocalOperationsLedger
-from src.utils.rate_limiter import reset_all_limiters
+from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 
 
 class TestLocalOperationsApi(unittest.TestCase):
@@ -1833,6 +1833,85 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Verified account mappings", dashboard.data.decode("utf-8"))
             self.assertIn("anchor-1", dashboard.data.decode("utf-8"))
             self.assertIn("/wave/accounts/discover", dashboard.data.decode("utf-8"))
+
+    @patch("src.data_entry.waveapps_entity_sync.requests.post")
+    def test_api_syncs_and_exposes_wave_entity_mirror(self, mock_post):
+        reset_all_limiters()
+        set_rate_limiter(
+            "waveapps",
+            limiter=RateLimiter(calls_per_second=100, calls_per_day=1000, name="WaveApps"),
+        )
+        self.addCleanup(reset_all_limiters)
+
+        def response_for_request(*args, **kwargs):
+            query = kwargs["json"]["query"]
+            if "customers(" in query:
+                collection = "customers"
+                nodes = [{"id": "customer-1", "name": "Acme", "email": "billing@acme.test", "currency": {"code": "EUR"}}]
+            elif "products(" in query:
+                collection = "products"
+                nodes = [{"id": "product-1", "name": "Consulting", "unitPrice": "125.00", "isArchived": False}]
+            else:
+                collection = "invoices"
+                nodes = [{
+                    "id": "invoice-1",
+                    "invoiceNumber": "INV-1",
+                    "status": "DRAFT",
+                    "invoiceDate": "2026-07-10",
+                    "dueDate": "2026-08-09",
+                    "currency": {"code": "EUR"},
+                    "total": {"value": "250.00"},
+                }]
+            response = MagicMock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {
+                "data": {
+                    "business": {
+                        "id": "business-1",
+                        collection: {
+                            "pageInfo": {"currentPage": 1, "totalPages": 1, "totalCount": 1},
+                            "edges": [{"node": node} for node in nodes],
+                        },
+                    }
+                }
+            }
+            return response
+
+        mock_post.side_effect = response_for_request
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "waveapps_business_access_token": "business-secret-token",
+                "waveapps_business_id": "business-1",
+                "wave_entity_sync_max_wait_seconds": 0,
+            })
+            client = app.test_client()
+
+            synced = client.post("/api/wave/entities/sync", json={
+                "targetSystem": "waveapps_business",
+                "entityTypes": ["customer", "product", "invoice"],
+            })
+            customers = client.get("/api/wave/entities?entityType=customer")
+            runs = client.get("/api/wave/entity-sync-runs")
+            overview = client.get("/api/wave")
+            dashboard = client.get("/")
+
+            self.assertEqual(synced.status_code, 200)
+            self.assertTrue(synced.get_json()["success"])
+            self.assertEqual(synced.get_json()["entitiesSeen"], 3)
+            self.assertEqual(len(customers.get_json()["waveEntities"]), 1)
+            self.assertEqual(customers.get_json()["waveEntities"][0]["external_id"], "customer-1")
+            self.assertEqual(runs.get_json()["waveSyncRuns"][0]["status"], "completed")
+            self.assertEqual(overview.get_json()["entityMirror"]["entityCount"], 3)
+            self.assertEqual(overview.get_json()["entityMirror"]["status"], "ready")
+            self.assertNotIn("business-secret-token", synced.data.decode("utf-8"))
+            html = dashboard.data.decode("utf-8")
+            self.assertIn("Wave entity mirror", html)
+            self.assertIn("Sync Wave records", html)
+            self.assertIn("INV-1", html)
+            self.assertIn("customer-1", html)
+            audit_actions = [event["action"] for event in client.get("/api/audit").get_json()["auditEvents"]]
+            self.assertIn("local_wave.entity_sync_completed", audit_actions)
 
     def test_api_prepares_lists_and_inspects_close_pack_after_wave_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

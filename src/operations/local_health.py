@@ -80,6 +80,13 @@ class LocalOperationsHealth:
             "export_execution_stale_hours",
             default=1.0,
         )
+        self.wave_entity_sync_stale_hours = _float_config(
+            self.config,
+            "fab_local_wave_entity_sync_stale_hours",
+            "operations_wave_entity_sync_stale_hours",
+            "wave_entity_sync_stale_hours",
+            default=24.0,
+        )
 
     def summarize(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -97,6 +104,7 @@ class LocalOperationsHealth:
         executing_exports = self.ledger.list_export_attempts(status=EXECUTING_EXPORT_STATUSES, limit=500)
         deferred_exports = self.ledger.list_export_attempts(status=DEFERRED_EXPORT_STATUSES, limit=500)
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
+        wave_sync_runs = self.ledger.list_wave_sync_runs(limit=100)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
         rate_limits = get_all_rates()
@@ -284,6 +292,45 @@ class LocalOperationsHealth:
                 {"errorMessage": run.get("error_message")},
             ))
 
+        latest_wave_sync_by_target: Dict[str, Dict[str, Any]] = {}
+        for sync_run in wave_sync_runs:
+            latest_wave_sync_by_target.setdefault(str(sync_run.get("target_system") or "waveapps"), sync_run)
+        for target_system, sync_run in latest_wave_sync_by_target.items():
+            sync_status = str(sync_run.get("status") or "unknown")
+            age_hours = _age_hours(sync_run.get("finished_at") or sync_run.get("started_at"), now)
+            if sync_status not in {"completed", "running"}:
+                issues.append(_issue(
+                    "medium",
+                    "failed_wave_entity_sync",
+                    "wave_sync_run",
+                    sync_run.get("id"),
+                    f"Latest Wave entity sync for {target_system} ended as {sync_status}.",
+                    age_hours,
+                    {"targetSystem": target_system, "status": sync_status, "error": sync_run.get("error_message")},
+                ))
+            elif age_hours is not None and age_hours >= self.wave_entity_sync_stale_hours:
+                issues.append(_issue(
+                    "low",
+                    "stale_wave_entity_sync",
+                    "wave_sync_run",
+                    sync_run.get("id"),
+                    f"Wave entity mirror for {target_system} is {age_hours:.1f} hours old.",
+                    age_hours,
+                    {"targetSystem": target_system, "status": sync_status},
+                ))
+
+        missing_wave_entities = int(metrics.get("wave_entities_missing_downstream") or 0)
+        if missing_wave_entities:
+            issues.append(_issue(
+                "medium",
+                "wave_entities_missing_downstream",
+                "wave_entity",
+                "missing_downstream",
+                f"{missing_wave_entities} mirrored Wave record(s) are no longer present downstream.",
+                None,
+                {"count": missing_wave_entities},
+            ))
+
         exhausted_limiters = [name for name, rate in rate_limits.items() if rate.get("quotaExhausted")]
         if exhausted_limiters:
             issues.append(_issue(
@@ -314,6 +361,7 @@ class LocalOperationsHealth:
                 "exportApprovalStaleHours": self.export_approval_stale_hours,
                 "exportApprovedStaleHours": self.export_approved_stale_hours,
                 "exportExecutionStaleHours": self.export_execution_stale_hours,
+                "waveEntitySyncStaleHours": self.wave_entity_sync_stale_hours,
             },
             "metrics": {
                 **metrics,
@@ -331,6 +379,10 @@ class LocalOperationsHealth:
                 "deferredExports": len(deferred_exports),
                 "deferredExportsDue": _issue_count(issues, "deferred_export_retry_due"),
                 "failedExports": len(failed_exports),
+                "waveEntitySyncRuns": len(wave_sync_runs),
+                "waveEntitySyncFailures": _issue_count(issues, "failed_wave_entity_sync"),
+                "waveEntities": metrics.get("wave_entities", 0),
+                "waveEntitiesMissingDownstream": missing_wave_entities,
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),
                 "masterLedgerBlockedRows": master_ledger_summary.get("blockedRows", 0),
                 "masterLedgerReadyForDraft": master_ledger_summary.get("readyForDraft", 0),
@@ -408,6 +460,10 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Run the approved-export worker to retry due quota-deferred Wave attempts.")
     if "failed_export_attempt" in issue_types:
         actions.append("Inspect failed export attempts and retry after fixing the source issue.")
+    if "failed_wave_entity_sync" in issue_types or "stale_wave_entity_sync" in issue_types:
+        actions.append("Refresh the Wave entity mirror and inspect the latest sync run before creating downstream records.")
+    if "wave_entities_missing_downstream" in issue_types:
+        actions.append("Review Wave records marked missing downstream before reusing their customer, product, or invoice IDs.")
     if "master_ledger_blockers" in issue_types:
         actions.append("Open the master ledger projection and resolve blocked rows before close or downstream execution.")
     if "api_quota_exhausted" in issue_types:

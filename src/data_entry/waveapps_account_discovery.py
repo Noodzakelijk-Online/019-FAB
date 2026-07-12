@@ -196,6 +196,19 @@ def _target_config(config: Dict[str, Any], target_system: str) -> Optional[Dict[
     }
 
 
+def resolve_wave_target_config(config: Dict[str, Any], target_system: str) -> Optional[Dict[str, Any]]:
+    """Return the private target descriptor used by Wave API services."""
+    return _target_config(config, target_system)
+
+
+def wave_graph_errors(payload: Any) -> str:
+    return _graph_errors(payload)
+
+
+def wave_timeout_seconds(value: Any) -> float:
+    return _timeout_seconds(value)
+
+
 def _config_value(config: Dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = config.get(key)

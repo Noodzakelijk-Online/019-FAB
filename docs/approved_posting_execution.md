@@ -143,5 +143,10 @@ to read the current chart of accounts. FAB records the read as an audited Wave
 operation snapshot and shows whether each configured anchor/category ID still
 exists before an approved export is dispatched.
 
+Use **Sync Wave records** or `POST /api/wave/entities/sync` to refresh the
+read-only customer, product/service, and invoice mirror. Future invoice and
+customer mutations must resolve their external IDs from this durable mirror;
+records marked `missing_downstream` must be reviewed instead of reused.
+
 MijnGeldzaken execution remains supervised. FAB prepares the artifact and
 review state locally; the user-owned session performs the external import.

@@ -531,6 +531,57 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_wave_ops_workflow
                     ON wave_operation_snapshots(workflow_id);
 
+                CREATE TABLE IF NOT EXISTS wave_sync_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_system TEXT NOT NULL,
+                    entity_types_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    page_size INTEGER NOT NULL DEFAULT 50,
+                    pages_fetched INTEGER NOT NULL DEFAULT 0,
+                    entities_seen INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    metadata_json TEXT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_wave_sync_target
+                    ON wave_sync_runs(target_system);
+                CREATE INDEX IF NOT EXISTS idx_local_wave_sync_status
+                    ON wave_sync_runs(status);
+
+                CREATE TABLE IF NOT EXISTS wave_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_system TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    external_id TEXT NOT NULL,
+                    name TEXT,
+                    status TEXT,
+                    email TEXT,
+                    currency TEXT,
+                    amount REAL,
+                    entity_date TEXT,
+                    due_date TEXT,
+                    modified_at TEXT,
+                    presence_status TEXT NOT NULL DEFAULT 'present',
+                    last_sync_run_id INTEGER,
+                    payload_json TEXT,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(target_system, entity_type, external_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_target_type
+                    ON wave_entities(target_system, entity_type);
+                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_presence
+                    ON wave_entities(presence_status);
+                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_status
+                    ON wave_entities(status);
+
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     actor_user_id INTEGER,
@@ -570,6 +621,7 @@ class LocalOperationsLedger:
             self._ensure_routing_attempt_schema(connection)
             self._ensure_export_attempt_schema(connection)
             self._ensure_wave_operation_snapshot_schema(connection)
+            self._ensure_wave_entity_mirror_schema(connection)
 
     def upsert_source_account(self, payload: Dict[str, Any]) -> int:
         source_type = str(payload.get("sourceType") or payload.get("source_type") or "unknown").strip()
@@ -1854,6 +1906,73 @@ class LocalOperationsLedger:
             """
         )
 
+    def _ensure_wave_entity_mirror_schema(self, connection: sqlite3.Connection) -> None:
+        sync_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(wave_sync_runs)").fetchall()
+        }
+        sync_required = {
+            "target_system": "TEXT NOT NULL DEFAULT 'waveapps_business'",
+            "entity_types_json": "TEXT NOT NULL DEFAULT '[]'",
+            "status": "TEXT NOT NULL DEFAULT 'running'",
+            "page_size": "INTEGER NOT NULL DEFAULT 50",
+            "pages_fetched": "INTEGER NOT NULL DEFAULT 0",
+            "entities_seen": "INTEGER NOT NULL DEFAULT 0",
+            "error_message": "TEXT",
+            "metadata_json": "TEXT",
+            "started_at": "TEXT NOT NULL DEFAULT ''",
+            "finished_at": "TEXT",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "updated_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in sync_required.items():
+            if column not in sync_columns:
+                connection.execute(f"ALTER TABLE wave_sync_runs ADD COLUMN {column} {definition}")
+
+        entity_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(wave_entities)").fetchall()
+        }
+        entity_required = {
+            "target_system": "TEXT NOT NULL DEFAULT 'waveapps_business'",
+            "entity_type": "TEXT NOT NULL DEFAULT 'unknown'",
+            "external_id": "TEXT NOT NULL DEFAULT ''",
+            "name": "TEXT",
+            "status": "TEXT",
+            "email": "TEXT",
+            "currency": "TEXT",
+            "amount": "REAL",
+            "entity_date": "TEXT",
+            "due_date": "TEXT",
+            "modified_at": "TEXT",
+            "presence_status": "TEXT NOT NULL DEFAULT 'present'",
+            "last_sync_run_id": "INTEGER",
+            "payload_json": "TEXT",
+            "first_seen_at": "TEXT NOT NULL DEFAULT ''",
+            "last_seen_at": "TEXT NOT NULL DEFAULT ''",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "updated_at": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in entity_required.items():
+            if column not in entity_columns:
+                connection.execute(f"ALTER TABLE wave_entities ADD COLUMN {column} {definition}")
+        connection.executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_local_wave_entities_unique
+                ON wave_entities(target_system, entity_type, external_id);
+            CREATE INDEX IF NOT EXISTS idx_local_wave_entities_target_type
+                ON wave_entities(target_system, entity_type);
+            CREATE INDEX IF NOT EXISTS idx_local_wave_entities_presence
+                ON wave_entities(presence_status);
+            CREATE INDEX IF NOT EXISTS idx_local_wave_entities_status
+                ON wave_entities(status);
+            CREATE INDEX IF NOT EXISTS idx_local_wave_sync_target
+                ON wave_sync_runs(target_system);
+            CREATE INDEX IF NOT EXISTS idx_local_wave_sync_status
+                ON wave_sync_runs(status);
+            """
+        )
+
     def get_wave_operation_snapshot(self, operation_id: str) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(
@@ -1903,6 +2022,176 @@ class LocalOperationsLedger:
         if operation_id:
             where.append("operation_id = ?")
             params.append(operation_id)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def create_wave_sync_run(self, payload: Dict[str, Any]) -> int:
+        now = self._now()
+        return self._insert(
+            "wave_sync_runs",
+            {
+                "target_system": payload.get("targetSystem") or payload.get("target_system"),
+                "entity_types_json": self._json(payload.get("entityTypes") or payload.get("entity_types") or []),
+                "status": payload.get("status") or "running",
+                "page_size": self._int(payload.get("pageSize") or payload.get("page_size"), 50),
+                "pages_fetched": self._int(payload.get("pagesFetched") or payload.get("pages_fetched"), 0),
+                "entities_seen": self._int(payload.get("entitiesSeen") or payload.get("entities_seen"), 0),
+                "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
+                "started_at": self._date_text(payload.get("startedAt") or payload.get("started_at")) or now,
+                "finished_at": self._date_text(payload.get("finishedAt") or payload.get("finished_at")),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+
+    def update_wave_sync_run(self, sync_run_id: int, payload: Dict[str, Any]) -> None:
+        pages_fetched = self._payload_value(payload, "pagesFetched", "pages_fetched")
+        entities_seen = self._payload_value(payload, "entitiesSeen", "entities_seen")
+        self._update(
+            "wave_sync_runs",
+            int(sync_run_id),
+            {
+                "status": payload.get("status"),
+                "pages_fetched": self._optional_int(pages_fetched),
+                "entities_seen": self._optional_int(entities_seen),
+                "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))) if "metadata" in payload else None,
+                "finished_at": self._date_text(payload.get("finishedAt") or payload.get("finished_at")),
+                "updated_at": self._now(),
+            },
+        )
+
+    def get_wave_sync_run(self, sync_run_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM wave_sync_runs WHERE id = ? LIMIT 1",
+                (int(sync_run_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_wave_sync_runs(
+        self,
+        target_system: Optional[str] = None,
+        status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM wave_sync_runs"
+        params = []
+        where = []
+        if target_system:
+            where.append("target_system = ?")
+            params.append(target_system)
+        self._append_status_filter(where, params, "status", status)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY started_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def upsert_wave_entity(self, payload: Dict[str, Any]) -> int:
+        target_system = str(payload.get("targetSystem") or payload.get("target_system") or "").strip()
+        entity_type = str(payload.get("entityType") or payload.get("entity_type") or "").strip()
+        external_id = str(payload.get("externalId") or payload.get("external_id") or "").strip()
+        if not target_system or not entity_type or not external_id:
+            raise ValueError("targetSystem, entityType, and externalId are required for a Wave entity")
+        now = self._now()
+        values = {
+            "target_system": target_system,
+            "entity_type": entity_type,
+            "external_id": external_id,
+            "name": payload.get("name"),
+            "status": payload.get("status"),
+            "email": payload.get("email"),
+            "currency": payload.get("currency"),
+            "amount": self._float(payload.get("amount")),
+            "entity_date": self._date_text(payload.get("entityDate") or payload.get("entity_date")),
+            "due_date": self._date_text(payload.get("dueDate") or payload.get("due_date")),
+            "modified_at": self._date_text(payload.get("modifiedAt") or payload.get("modified_at")),
+            "presence_status": payload.get("presenceStatus") or payload.get("presence_status") or "present",
+            "last_sync_run_id": self._optional_int(payload.get("lastSyncRunId") or payload.get("last_sync_run_id")),
+            "payload_json": self._json(self._redact_sensitive(payload.get("payload"))),
+            "last_seen_at": self._date_text(payload.get("lastSeenAt") or payload.get("last_seen_at")) or now,
+            "updated_at": now,
+        }
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM wave_entities
+                WHERE target_system = ? AND entity_type = ? AND external_id = ?
+                LIMIT 1
+                """,
+                (target_system, entity_type, external_id),
+            ).fetchone()
+            if row:
+                entity_id = int(row["id"])
+                self._update_with_connection(connection, "wave_entities", entity_id, values)
+                return entity_id
+            return self._insert_with_connection(
+                connection,
+                "wave_entities",
+                {
+                    **values,
+                    "first_seen_at": now,
+                    "created_at": now,
+                },
+            )
+
+    def mark_wave_entities_missing(
+        self,
+        target_system: str,
+        entity_type: str,
+        sync_run_id: int,
+    ) -> int:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE wave_entities
+                SET presence_status = 'missing_downstream', updated_at = ?
+                WHERE target_system = ? AND entity_type = ?
+                  AND (last_sync_run_id IS NULL OR last_sync_run_id != ?)
+                  AND presence_status != 'missing_downstream'
+                """,
+                (self._now(), target_system, entity_type, int(sync_run_id)),
+            )
+            return int(cursor.rowcount)
+
+    def get_wave_entity(self, entity_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM wave_entities WHERE id = ? LIMIT 1",
+                (int(entity_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_wave_entities(
+        self,
+        target_system: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        status: Optional[Any] = None,
+        presence_status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM wave_entities"
+        params = []
+        where = []
+        if target_system:
+            where.append("target_system = ?")
+            params.append(target_system)
+        if entity_type:
+            where.append("entity_type = ?")
+            params.append(entity_type)
+        self._append_status_filter(where, params, "status", status)
+        self._append_status_filter(where, params, "presence_status", presence_status)
         if where:
             query = f"{query} WHERE {' AND '.join(where)}"
         query = f"{query} ORDER BY updated_at DESC, id DESC LIMIT ?"
@@ -2021,6 +2310,13 @@ class LocalOperationsLedger:
                 ),
                 "wave_report_snapshots": self._count(connection, "wave_report_snapshots"),
                 "wave_operation_snapshots": self._count(connection, "wave_operation_snapshots"),
+                "wave_sync_runs": self._count(connection, "wave_sync_runs"),
+                "wave_entities": self._count(connection, "wave_entities"),
+                "wave_entities_missing_downstream": self._count(
+                    connection,
+                    "wave_entities",
+                    "presence_status = 'missing_downstream'",
+                ),
                 "audit_events": self._count(connection, "audit_events"),
             }
 

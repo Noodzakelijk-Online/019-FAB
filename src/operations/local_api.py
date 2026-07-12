@@ -7,6 +7,7 @@ from flask import Flask, Response, jsonify, redirect, render_template_string, re
 
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
+from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
@@ -1554,6 +1555,77 @@ DASHBOARD_TEMPLATE = """
           </tbody>
         </table>
       </div>
+      <div class="section-head" style="padding: 14px 18px 0;">
+        <div>
+          <h3>Wave entity mirror</h3>
+          <p>Read customers, products/services, and invoices into FAB so downstream IDs and drift remain inspectable.</p>
+        </div>
+        <form class="inline-actions" method="post" action="{{ url_for('sync_wave_entities_form') }}">
+          <select name="targetSystem" aria-label="Wave mirror target account">
+            <option value="waveapps_business">Wave Business</option>
+            <option value="waveapps_personal">Wave Personal</option>
+          </select>
+          <select name="entityTypes" aria-label="Wave entity type">
+            <option value="all">Customers, products, invoices</option>
+            <option value="customer">Customers</option>
+            <option value="product">Products &amp; services</option>
+            <option value="invoice">Invoices</option>
+          </select>
+          <button type="submit">Sync Wave records</button>
+        </form>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-item"><span>Mirrored entities</span><strong>{{ metrics.wave_entities }}</strong></div>
+        <div class="summary-item"><span>Missing downstream</span><strong>{{ metrics.wave_entities_missing_downstream }}</strong></div>
+        <div class="summary-item"><span>Sync runs</span><strong>{{ metrics.wave_sync_runs }}</strong></div>
+      </div>
+      {% if wave_entity_sync_summary %}
+      <details open>
+        <summary>Last Wave entity sync</summary>
+        <pre>{{ pretty_json(wave_entity_sync_summary) }}</pre>
+      </details>
+      {% endif %}
+      {% if wave_sync_runs %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Sync target</th><th>Entities</th><th>Pages</th><th>Seen</th><th>Status</th><th>Finished</th></tr></thead>
+          <tbody>
+          {% for run in wave_sync_runs %}
+            <tr>
+              <td>{{ run.target_system }}</td>
+              <td>{{ ", ".join(run.entity_types) }}</td>
+              <td>{{ run.pages_fetched }}</td>
+              <td>{{ run.entities_seen }}</td>
+              <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+              <td class="mono">{{ run.finished_at or run.started_at }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      {% if wave_entities %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Wave record</th><th>Type</th><th>Target</th><th>Status</th><th>Amount</th><th>Presence</th><th>Updated</th></tr></thead>
+          <tbody>
+          {% for entity in wave_entities %}
+            <tr>
+              <td><strong>{{ entity.name or entity.external_id }}</strong><div class="muted mono">{{ entity.external_id }}</div>{% if entity.email %}<div class="muted">{{ entity.email }}</div>{% endif %}</td>
+              <td>{{ entity.entity_type }}</td>
+              <td>{{ entity.target_system }}</td>
+              <td><span class="badge {{ entity.status or 'unknown' }}">{{ entity.status or '-' }}</span></td>
+              <td>{% if entity.amount is not none %}{{ format_money(entity.amount) }} {{ entity.currency or 'EUR' }}{% else %}-{% endif %}</td>
+              <td><span class="badge {{ entity.presence_status }}">{{ entity.presence_status }}</span></td>
+              <td class="mono">{{ entity.modified_at or entity.updated_at }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">No Wave customers, products, or invoices have been mirrored yet.</div>
+      {% endif %}
       {% if wave_account_discovery_summary %}
       <details open>
         <summary>Last Wave account discovery</summary>
@@ -3181,9 +3253,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         mijngeldzaken_control = mijngeldzaken_service.overview(ledger)
         mijngeldzaken_controls = mijngeldzaken_control.get("masterLedgerControls")
         wave_service = LocalWaveControlService(config)
-        wave_control = wave_service.overview()
+        wave_control = wave_service.overview(ledger)
         wave_report_snapshots = ledger.list_wave_report_snapshots(limit=20)
         wave_operation_snapshots = ledger.list_wave_operation_snapshots(limit=20)
+        wave_entities = ledger.list_wave_entities(limit=25)
+        wave_sync_runs = ledger.list_wave_sync_runs(limit=10)
         wave_report_controls = wave_service.evaluate_report_controls(ledger)
         close_readiness = LocalCloseReadinessService(ledger, config).assess()
         close_packs = LocalClosePackService(ledger, config).list_packs(limit=10)
@@ -3198,6 +3272,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_export_summary = session.pop("fab_last_export_summary", None)
         last_mijngeldzaken_plan = session.pop("fab_last_mijngeldzaken_plan", None)
         last_wave_plan = session.pop("fab_last_wave_plan", None)
+        last_wave_entity_sync = session.pop("fab_last_wave_entity_sync", None)
         last_reconciliation_summary = session.pop("fab_last_reconciliation_summary", None)
         last_bank_import_summary = session.pop("fab_last_bank_import_summary", None)
         last_record_refresh_summary = session.pop("fab_last_record_refresh_summary", None)
@@ -3236,6 +3311,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "waveControl": wave_control,
             "waveReportSnapshots": wave_report_snapshots,
             "waveOperationSnapshots": wave_operation_snapshots,
+            "waveEntities": wave_entities,
+            "waveSyncRuns": wave_sync_runs,
             "waveReportControls": wave_report_controls,
             "closeReadiness": close_readiness,
             "closePacks": close_packs,
@@ -3254,6 +3331,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastExportSummary": last_export_summary,
             "lastMijngeldzakenPlan": last_mijngeldzaken_plan,
             "lastWavePlan": last_wave_plan,
+            "lastWaveEntitySync": last_wave_entity_sync,
             "lastReconciliationSummary": last_reconciliation_summary,
             "lastBankImportSummary": last_bank_import_summary,
             "lastRecordRefreshSummary": last_record_refresh_summary,
@@ -3314,6 +3392,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 {"label": "Failed", "value": metrics["failed_documents"]},
                 {"label": "Wave Reports", "value": metrics["wave_report_snapshots"]},
                 {"label": "Wave Ops", "value": metrics["wave_operation_snapshots"]},
+                {"label": "Wave Entities", "value": metrics["wave_entities"]},
                 {"label": "Audit Events", "value": metrics["audit_events"]},
             ],
             metrics=metrics,
@@ -3343,6 +3422,9 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             wave_plan_summary=last_wave_plan,
             wave_report_snapshots=wave_report_snapshots,
             wave_operation_snapshots=wave_operation_snapshots,
+            wave_entities=wave_entities,
+            wave_sync_runs=wave_sync_runs,
+            wave_entity_sync_summary=last_wave_entity_sync,
             wave_report_controls=wave_report_controls,
         )
 
@@ -3548,7 +3630,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/wave")
     def wave_overview():
-        return jsonify(LocalWaveControlService(config).overview())
+        return jsonify(LocalWaveControlService(config).overview(ledger))
 
     @app.get("/api/wave/actions")
     def wave_actions():
@@ -3605,8 +3687,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         status_code = 200 if result.get("success") else 400
         if result.get("status") in {"rate_limited", "quota_exhausted"}:
             status_code = 429
-        elif result.get("status") == "provider_error":
+        elif result.get("status") in {"provider_error", "pagination_incomplete"}:
             status_code = 502
+        elif result.get("status") == "internal_error":
+            status_code = 500
         return jsonify(result), status_code
 
     @app.post("/wave/accounts/discover")
@@ -3623,6 +3707,94 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "message": result.get("message"),
             "externalSubmission": "not_executed",
         }
+        return redirect(url_for("dashboard_page", _anchor="wave"))
+
+    def run_wave_entity_sync(
+        target_system: str,
+        entity_types: Any,
+        page_size: int,
+        max_pages: int,
+        actor: str,
+    ) -> Dict[str, Any]:
+        result = WaveappsEntitySyncService(config).sync(
+            ledger,
+            target_system,
+            entity_types=entity_types,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+        ledger.record_audit_event({
+            "action": "local_wave.entity_sync_completed",
+            "entityType": "wave_sync_run",
+            "entityId": str(result.get("syncRunId") or target_system),
+            "details": {
+                "actor": actor,
+                "targetSystem": target_system,
+                "entityTypes": result.get("entityTypes") or entity_types,
+                "success": result.get("success"),
+                "status": result.get("status"),
+                "pagesFetched": result.get("pagesFetched"),
+                "entitiesSeen": result.get("entitiesSeen"),
+                "missingMarked": result.get("missingMarked"),
+                "externalSubmission": "not_executed",
+            },
+        })
+        return result
+
+    @app.get("/api/wave/entities")
+    def wave_entities_api():
+        return jsonify({
+            "waveEntities": ledger.list_wave_entities(
+                target_system=request.args.get("targetSystem") or request.args.get("target_system"),
+                entity_type=request.args.get("entityType") or request.args.get("entity_type"),
+                status=request.args.get("status"),
+                presence_status=request.args.get("presenceStatus") or request.args.get("presence_status"),
+                limit=_limit_arg(),
+            )
+        })
+
+    @app.get("/api/wave/entity-sync-runs")
+    def wave_entity_sync_runs_api():
+        return jsonify({
+            "waveSyncRuns": ledger.list_wave_sync_runs(
+                target_system=request.args.get("targetSystem") or request.args.get("target_system"),
+                status=request.args.get("status"),
+                limit=_limit_arg(),
+            )
+        })
+
+    @app.post("/api/wave/entities/sync")
+    def sync_wave_entities_api():
+        payload = request.get_json(silent=True) or {}
+        entity_types = payload.get("entityTypes") or payload.get("entity_types")
+        if entity_types is not None and not isinstance(entity_types, (list, str)):
+            return jsonify({"error": "entityTypes must be a list or comma-separated string"}), 400
+        target_system = str(payload.get("targetSystem") or payload.get("target_system") or "waveapps_business")
+        result = run_wave_entity_sync(
+            target_system,
+            entity_types,
+            _bounded_positive_int(payload.get("pageSize"), default=50, maximum=100),
+            _bounded_positive_int(payload.get("maxPages"), default=100, maximum=500),
+            str(payload.get("actor") or "api"),
+        )
+        status_code = 200 if result.get("success") else 400
+        if result.get("status") in {"rate_limited", "quota_exhausted"}:
+            status_code = 429
+        elif result.get("status") == "provider_error":
+            status_code = 502
+        return jsonify(result), status_code
+
+    @app.post("/wave/entities/sync")
+    def sync_wave_entities_form():
+        requested = str(request.form.get("entityTypes") or "").strip()
+        result = run_wave_entity_sync(
+            str(request.form.get("targetSystem") or "waveapps_business"),
+            None if requested in {"", "all"} else [requested],
+            50,
+            100,
+            "dashboard",
+        )
+        session["fab_last_wave_entity_sync"] = result
         return redirect(url_for("dashboard_page", _anchor="wave"))
 
     @app.get("/api/wave/reports")

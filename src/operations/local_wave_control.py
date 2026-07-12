@@ -53,7 +53,7 @@ class LocalWaveControlService:
         self.operator = operator or WaveappsAutonomousOperator(self.config)
         self.playbook = AutonomousBookkeeperPlaybook(self.config)
 
-    def overview(self) -> Dict[str, Any]:
+    def overview(self, ledger: Any = None) -> Dict[str, Any]:
         parity = summarize_wave_parity()
         report_sections = list_wave_report_sections()
         reports = list_wave_reports()
@@ -63,6 +63,7 @@ class LocalWaveControlService:
             "summary": parity,
             "credentials": _credential_status(self.config),
             "accountMappings": WaveappsAccountDiscoveryService(self.config).mapping_status(),
+            "entityMirror": _entity_mirror_summary(ledger),
             "safetyPolicy": {
                 "read_only": "FAB may plan and read report/list state without changing Wave.",
                 "safe_draft": "FAB may prepare drafts, but still records the operation before execution.",
@@ -92,6 +93,7 @@ class LocalWaveControlService:
             "nextActions": [
                 "Use /api/wave/account-mappings to inspect the anchor and category-account mappings required for verified exports.",
                 "Use /api/wave/accounts/discover for an audited, read-only Wave chart-of-accounts refresh before enabling export execution.",
+                "Use /api/wave/entities/sync to mirror customers, products/services, and invoices before resolving downstream IDs.",
                 "Use /api/wave/workflows/plan for general-ledger reconciliation or close-pack planning.",
                 "Use /api/wave/plan to prepare a single Wave action with policy gates and idempotency.",
                 "Connect an approved Wave API or browser executor only after the operation plan is reviewed.",
@@ -831,6 +833,46 @@ def _list_value(value: Any) -> List[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(item) for item in value if str(item)]
     return [item.strip() for item in str(value).replace(";", ",").split(",") if item.strip()]
+
+
+def _entity_mirror_summary(ledger: Any) -> Dict[str, Any]:
+    if ledger is None:
+        return {
+            "status": "ledger_not_attached",
+            "entityCount": 0,
+            "missingDownstream": 0,
+            "byType": {},
+            "byTarget": {},
+            "latestSyncByTarget": {},
+        }
+    entities = ledger.list_wave_entities(limit=500)
+    sync_runs = ledger.list_wave_sync_runs(limit=100)
+    by_type: Dict[str, int] = {}
+    by_target: Dict[str, int] = {}
+    for entity in entities:
+        entity_type = str(entity.get("entity_type") or "unknown")
+        target_system = str(entity.get("target_system") or "waveapps")
+        by_type[entity_type] = by_type.get(entity_type, 0) + 1
+        by_target[target_system] = by_target.get(target_system, 0) + 1
+    latest_sync_by_target = {}
+    for sync_run in sync_runs:
+        target_system = str(sync_run.get("target_system") or "waveapps")
+        if target_system not in latest_sync_by_target:
+            latest_sync_by_target[target_system] = {
+                "syncRunId": sync_run.get("id"),
+                "status": sync_run.get("status"),
+                "entitiesSeen": sync_run.get("entities_seen"),
+                "finishedAt": sync_run.get("finished_at"),
+            }
+    missing = sum(1 for entity in entities if entity.get("presence_status") == "missing_downstream")
+    return {
+        "status": "attention" if missing else ("ready" if sync_runs else "not_synced"),
+        "entityCount": len(entities),
+        "missingDownstream": missing,
+        "byType": dict(sorted(by_type.items())),
+        "byTarget": dict(sorted(by_target.items())),
+        "latestSyncByTarget": latest_sync_by_target,
+    }
 
 
 def _today() -> str:

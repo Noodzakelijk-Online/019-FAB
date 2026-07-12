@@ -357,6 +357,9 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     "executed_export_attempts": 0,
                     "wave_report_snapshots": 0,
                     "wave_operation_snapshots": 0,
+                    "wave_sync_runs": 0,
+                    "wave_entities": 0,
+                    "wave_entities_missing_downstream": 0,
                     "audit_events": 1,
                 },
             )

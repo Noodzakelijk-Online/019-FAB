@@ -263,6 +263,45 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(issue["entityId"], str(export_id))
             self.assertIn("approved-export worker", " ".join(health["nextActions"]))
 
+    def test_health_surfaces_wave_mirror_failures_staleness_and_missing_entities(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.create_wave_sync_run({
+                "targetSystem": "waveapps_business",
+                "entityTypes": ["customer"],
+                "status": "provider_error",
+                "startedAt": _hours_ago(2),
+                "errorMessage": "Wave unavailable",
+            })
+            ledger.create_wave_sync_run({
+                "targetSystem": "waveapps_personal",
+                "entityTypes": ["invoice"],
+                "status": "completed",
+                "startedAt": _hours_ago(72),
+                "finishedAt": _hours_ago(72),
+            })
+            ledger.upsert_wave_entity({
+                "targetSystem": "waveapps_business",
+                "entityType": "customer",
+                "externalId": "customer-missing",
+                "name": "Removed Customer",
+                "presenceStatus": "missing_downstream",
+            })
+
+            health = LocalOperationsHealth(
+                ledger,
+                {"wave_entity_sync_stale_hours": 24},
+            ).summarize()
+
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertIn("failed_wave_entity_sync", issue_types)
+            self.assertIn("stale_wave_entity_sync", issue_types)
+            self.assertIn("wave_entities_missing_downstream", issue_types)
+            self.assertEqual(health["metrics"]["waveEntitySyncRuns"], 2)
+            self.assertEqual(health["metrics"]["waveEntities"], 1)
+            self.assertEqual(health["metrics"]["waveEntitiesMissingDownstream"], 1)
+            self.assertIn("Refresh the Wave entity mirror", " ".join(health["nextActions"]))
+
 
 def _hours_ago(hours: int) -> str:
     value = datetime.now(timezone.utc) - timedelta(hours=hours)
