@@ -963,7 +963,7 @@ class LocalOperationsLedger:
             "documents_processed": self._int(payload.get("documentsProcessed"), 0),
             "documents_needing_review": self._int(payload.get("documentsNeedingReview"), 0),
             "error_message": payload.get("errorMessage"),
-            "metadata_json": self._json(payload.get("metadata")),
+            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
             "started_at": self._date_text(payload.get("startedAt")) or now,
             "finished_at": self._date_text(payload.get("finishedAt")),
             "created_at": now,
@@ -978,6 +978,11 @@ class LocalOperationsLedger:
             "documents_processed": payload.get("documentsProcessed"),
             "documents_needing_review": payload.get("documentsNeedingReview"),
             "error_message": payload.get("errorMessage"),
+            "metadata_json": (
+                self._json(self._redact_sensitive(payload.get("metadata")))
+                if "metadata" in payload
+                else None
+            ),
             "started_at": self._date_text(payload.get("startedAt")),
             "finished_at": self._date_text(payload.get("finishedAt")),
             "updated_at": self._now(),
@@ -1006,8 +1011,8 @@ class LocalOperationsLedger:
             "confidence_score": self._float(payload.get("confidenceScore")),
             "reconciliation_status": payload.get("reconciliationStatus", "not_started"),
             "ocr_text": payload.get("ocrText"),
-            "extracted_data_json": self._json(payload.get("extractedData")),
-            "metadata_json": self._json(payload.get("metadata")),
+            "extracted_data_json": self._json(self._redact_sensitive(payload.get("extractedData"))),
+            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
             "created_at": now,
             "updated_at": now,
         }
@@ -1041,8 +1046,8 @@ class LocalOperationsLedger:
             "confidence_score": self._float(payload.get("confidenceScore")),
             "reconciliation_status": payload.get("reconciliationStatus"),
             "ocr_text": payload.get("ocrText"),
-            "extracted_data_json": self._json(payload.get("extractedData")),
-            "metadata_json": self._json(payload.get("metadata")),
+            "extracted_data_json": self._json(self._redact_sensitive(payload.get("extractedData"))),
+            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
             "updated_at": self._now(),
         }
         self._update("bookkeeping_documents", document_id, fields)

@@ -146,26 +146,91 @@ class LocalFolderIntake:
                     continue
                 yield path
 
-    def _register_file(self, root: str, path: str, source_account_id: Optional[int] = None) -> Dict[str, Any]:
+    def register_fetched_document(
+        self,
+        document: Dict[str, Any],
+        source_account_id: Optional[int] = None,
+        root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a downloaded connector document through the local intake ledger."""
+        path_value = document.get("local_path") or document.get("storage_path")
+        if not str(path_value or "").strip():
+            return {"skipped": {"path": None, "reason": "local_path_missing"}}
+        path = _normalize_path(path_value)
+        source_root = _normalize_path(root or os.path.dirname(path))
+        try:
+            if os.path.commonpath((source_root, path)) != source_root:
+                return {"skipped": {"path": path, "reason": "path_outside_source_root"}}
+        except ValueError:
+            return {"skipped": {"path": path, "reason": "path_outside_source_root"}}
+        return self._register_file(
+            source_root,
+            path,
+            source_account_id,
+            source_document=document,
+        )
+
+    def _register_file(
+        self,
+        root: str,
+        path: str,
+        source_account_id: Optional[int] = None,
+        source_document: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         try:
             stat = os.stat(path)
             content_hash = _sha256_file(path)
         except OSError as exc:
             return {"skipped": {"path": path, "reason": "read_error", "message": str(exc)}}
 
-        mime_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        original_filename = os.path.basename(path)
+        source_document = dict(source_document or {})
+        source_metadata = source_document.get("metadata") if isinstance(source_document.get("metadata"), dict) else {}
+        mime_type = (
+            source_document.get("mime_type")
+            or source_metadata.get("mime_type")
+            or mimetypes.guess_type(path)[0]
+            or "application/octet-stream"
+        )
+        original_filename = os.path.basename(
+            str(source_document.get("original_filename") or source_document.get("filename") or path)
+        )
         modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
-        source_document = {
+        identity_document = {
+            **source_document,
             "local_path": path,
             "original_filename": original_filename,
             "mime_type": mime_type,
             "modified_time": modified_at,
             "size": stat.st_size,
         }
-        source_id = source_document_id(source_document)
+        source_id = source_document_id(identity_document)
         existing = self.ledger.get_document_by_source(self.source, source_id) if source_id else None
         if existing:
+            existing_hash = str(existing.get("duplicate_fingerprint") or "")
+            if existing_hash and existing_hash != content_hash:
+                revision_source_id = source_document_id({
+                    "id": f"{source_id}:revision:{content_hash[:16]}",
+                })
+                existing_revision = self.ledger.get_document_by_source(self.source, revision_source_id)
+                if existing_revision:
+                    return {
+                        "status": "already_registered",
+                        "document": {
+                            "id": existing_revision["id"],
+                            "path": path,
+                            "sourceAccountId": source_account_id or existing_revision.get("source_account_id"),
+                            "sourceDocumentId": revision_source_id,
+                            "status": existing_revision["processing_status"],
+                        },
+                    }
+                source_id = revision_source_id
+                revision_of_document_id = int(existing["id"])
+            else:
+                revision_of_document_id = None
+        else:
+            revision_of_document_id = None
+
+        if existing and revision_of_document_id is None:
             if source_account_id and not existing.get("source_account_id"):
                 self.ledger.update_document(int(existing["id"]), {"sourceAccountId": source_account_id})
             return {
@@ -184,7 +249,11 @@ class LocalFolderIntake:
             exclude_source_document_id=source_id,
         )
         duplicate_of_document_id = duplicate["id"] if duplicate else None
-        processing_status = "needs_review" if duplicate_of_document_id else "imported"
+        processing_status = "needs_review" if duplicate_of_document_id or revision_of_document_id else "imported"
+        try:
+            relative_path = os.path.relpath(path, root)
+        except ValueError:
+            relative_path = original_filename
         payload = {
             "sourceAccountId": source_account_id,
             "source": self.source,
@@ -199,12 +268,22 @@ class LocalFolderIntake:
             "metadata": {
                 "contentSha256": content_hash,
                 "folder": root,
-                "relativePath": os.path.relpath(path, root),
+                "relativePath": relative_path,
                 "sizeBytes": stat.st_size,
                 "modifiedAt": modified_at,
                 "intakeSource": self.source,
                 "sourceAccountId": source_account_id,
                 "sourceIdentifier": root,
+                "providerMetadata": source_metadata,
+                "providerTimestamp": source_document.get("timestamp"),
+                "sourceRevision": (
+                    {
+                        "revisionOfDocumentId": revision_of_document_id,
+                        "baseSourceDocumentId": source_document_id(identity_document),
+                    }
+                    if revision_of_document_id
+                    else None
+                ),
             },
         }
         document_id = self.ledger.register_document(payload)
@@ -248,6 +327,29 @@ class LocalFolderIntake:
                 },
             })
             status = "duplicate"
+        elif revision_of_document_id:
+            self.ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "source_revision_detected",
+                "details": f"The provider document changed after document #{revision_of_document_id} was imported.",
+                "correctedData": {
+                    "revisionOfDocumentId": revision_of_document_id,
+                    "contentSha256": content_hash,
+                    "sourceDocumentId": source_id,
+                },
+            })
+            self.ledger.record_audit_event({
+                "action": "local_intake.source_revision_detected",
+                "entityType": "bookkeeping_document",
+                "entityId": str(document_id),
+                "details": {
+                    "revisionOfDocumentId": revision_of_document_id,
+                    "contentSha256": content_hash,
+                    "sourceDocumentId": source_id,
+                    "path": path,
+                },
+            })
+            status = "revision"
         else:
             self.ledger.record_audit_event({
                 "action": "local_intake.document_imported",

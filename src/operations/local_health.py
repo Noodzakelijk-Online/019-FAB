@@ -102,10 +102,18 @@ class LocalOperationsHealth:
             "invoice_due_soon_days",
             default=7.0,
         )
+        self.source_stale_hours = _float_config(
+            self.config,
+            "fab_local_source_stale_hours",
+            "operations_source_stale_hours",
+            "source_stale_hours",
+            default=24.0,
+        )
 
     def summarize(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         metrics = self.ledger.dashboard_metrics()
+        source_accounts = self.ledger.list_source_accounts(limit=500)
         review_items = self.ledger.list_review_items(status=OPEN_REVIEW_STATUSES, limit=500)
         stuck_documents = self.ledger.list_documents(status=STUCK_DOCUMENT_STATUSES, limit=500)
         failed_documents = self.ledger.list_documents(status="failed", limit=500)
@@ -138,6 +146,43 @@ class LocalOperationsHealth:
         rate_limits = get_all_rates()
 
         issues: List[Dict[str, Any]] = []
+        for source in source_accounts:
+            source_status = str(source.get("status") or "unknown").strip().lower()
+            if source_status in {"failed", "error", "partial", "missing", "needs_configuration"}:
+                severity = "high" if source_status in {"failed", "error"} else "medium"
+                issues.append(_issue(
+                    severity,
+                    "source_connector_unavailable",
+                    "source_account",
+                    source.get("id"),
+                    f"{source.get('label') or source.get('source_type')} source is {source_status}.",
+                    _age_hours(source.get("last_scan_at") or source.get("updated_at"), now),
+                    {
+                        "sourceType": source.get("source_type"),
+                        "sourceIdentifier": source.get("source_identifier"),
+                        "status": source_status,
+                    },
+                ))
+                continue
+            age_hours = _age_hours(source.get("last_scan_at"), now)
+            if (
+                source_status in {"ready", "active", "syncing"}
+                and age_hours is not None
+                and age_hours >= self.source_stale_hours
+            ):
+                issues.append(_issue(
+                    "medium",
+                    "stale_source_connector",
+                    "source_account",
+                    source.get("id"),
+                    f"{source.get('label') or source.get('source_type')} has not completed a scan for {age_hours:.1f} hours.",
+                    age_hours,
+                    {
+                        "sourceType": source.get("source_type"),
+                        "sourceIdentifier": source.get("source_identifier"),
+                        "status": source_status,
+                    },
+                ))
         if int(master_ledger_summary.get("blockedRows") or 0) > 0:
             issues.append(_issue(
                 "medium",
@@ -505,9 +550,13 @@ class LocalOperationsHealth:
                 "waveEntitySyncStaleHours": self.wave_entity_sync_stale_hours,
                 "reportStaleHours": self.report_stale_hours,
                 "invoiceDueSoonDays": self.invoice_due_soon_days,
+                "sourceStaleHours": self.source_stale_hours,
             },
             "metrics": {
                 **metrics,
+                "sourceAccounts": len(source_accounts),
+                "sourceConnectorsUnavailable": _issue_count(issues, "source_connector_unavailable"),
+                "staleSourceConnectors": _issue_count(issues, "stale_source_connector"),
                 "openReviewItems": len(review_items),
                 "staleReviewItems": _issue_count(issues, "stale_review_item"),
                 "stuckDocuments": _issue_count(issues, "stuck_document"),
@@ -595,6 +644,10 @@ def _issue_count(issues: List[Dict[str, Any]], issue_type: str) -> int:
 def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
     issue_types = {issue.get("type") for issue in issues}
     actions = []
+    if "source_connector_unavailable" in issue_types:
+        actions.append("Open Sources, repair the connector configuration, and run a read-only sync.")
+    if "stale_source_connector" in issue_types:
+        actions.append("Run the configured source sync before relying on document completeness.")
     if "failed_document" in issue_types:
         actions.append("Open failed documents, inspect processing errors, and re-run after fixing the source issue.")
     if "stale_workflow_run" in issue_types:

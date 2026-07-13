@@ -75,6 +75,20 @@ class TestConfigLoader(unittest.TestCase):
         self.assertEqual(config["waveapps_business"]["access_token"], "environment-token")
         self.assertEqual(config["waveapps_default_target"], "waveapps_business")
 
+    def test_template_keeps_web_api_and_connector_settings_in_their_own_sections(self):
+        template_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "config", "config_template.ini")
+        )
+
+        config = ConfigLoader(config_file=template_path).get_all_config()
+
+        self.assertEqual(config["operations_api_url"], "")
+        self.assertEqual(config["operations_timeout_seconds"], "5")
+        self.assertNotIn("api_url", config["google_photos"])
+        self.assertFalse(config["gmail_enabled"])
+        self.assertFalse(config["google_drive_enabled"])
+        self.assertEqual(config["google_photos_mode"], "picker")
+
 
 if __name__ == "__main__":
     unittest.main()

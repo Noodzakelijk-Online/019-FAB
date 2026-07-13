@@ -28,6 +28,44 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["issues"], [])
             self.assertEqual(health["metrics"]["openReviewItems"], 0)
 
+    def test_health_flags_failed_and_stale_source_connectors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_source_account({
+                "sourceType": "gmail",
+                "sourceIdentifier": "me",
+                "label": "Gmail",
+                "status": "failed",
+                "lastScanAt": _hours_ago(1),
+            })
+            ledger.upsert_source_account({
+                "sourceType": "google_drive",
+                "sourceIdentifier": "folder-1",
+                "label": "Google Drive",
+                "status": "ready",
+                "lastScanAt": _hours_ago(48),
+            })
+            ledger.upsert_source_account({
+                "sourceType": "freshdesk",
+                "sourceIdentifier": "disabled",
+                "label": "Freshdesk",
+                "status": "disabled",
+            })
+
+            health = LocalOperationsHealth(
+                ledger,
+                {"operations_source_stale_hours": 24},
+            ).summarize()
+
+            self.assertEqual(health["status"], "blocked")
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertIn("source_connector_unavailable", issue_types)
+            self.assertIn("stale_source_connector", issue_types)
+            self.assertEqual(health["metrics"]["sourceAccounts"], 3)
+            self.assertEqual(health["metrics"]["sourceConnectorsUnavailable"], 1)
+            self.assertEqual(health["metrics"]["staleSourceConnectors"], 1)
+            self.assertTrue(any("Open Sources" in action for action in health["nextActions"]))
+
     def test_health_flags_stale_review_failed_document_and_running_workflow(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

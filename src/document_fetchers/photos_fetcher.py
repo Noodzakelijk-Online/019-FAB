@@ -32,7 +32,7 @@ class PhotosFetcher(BaseFetcher):
         self.auth_error = None
         try:
             self._authenticate()
-        except ImportError as exc:
+        except Exception as exc:
             self.auth_error = exc
 
     def _authenticate(self):
@@ -50,6 +50,10 @@ class PhotosFetcher(BaseFetcher):
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(Request())
             else:
+                if not self._interactive_auth_enabled("google_photos"):
+                    raise RuntimeError(
+                        "Google Photos OAuth requires a valid token; interactive authorization is disabled for autonomous runs."
+                    )
                 flow = InstalledAppFlow.from_client_secrets_file(
                     credentials_path, self.SCOPES
                 )
@@ -60,8 +64,9 @@ class PhotosFetcher(BaseFetcher):
         self.service = build("photoslibrary", "v1", credentials=self.creds, static_discovery=False)
 
     def fetch_documents(self) -> List[Dict[str, Any]]:
+        self._start_run()
         if self.auth_error:
-            print(f"Photos fetcher unavailable: {self.auth_error}")
+            self._fail_run(self.auth_error)
             return []
 
         attachments_dir = self.config.get("google_photos_download_dir") or self.config.get("attachments_save_dir", "/tmp/photos_attachments")
@@ -69,6 +74,8 @@ class PhotosFetcher(BaseFetcher):
 
         documents = []
         page_token = None
+        pages = 0
+        skipped = 0
         try:
             while True:
                 album_name = self.config.get("google_photos_album_name")
@@ -76,14 +83,15 @@ class PhotosFetcher(BaseFetcher):
                     albums = self.service.albums().list(pageSize=50).execute().get("albums", [])
                     album = next((item for item in albums if item.get("title") == album_name), None)
                     if not album:
+                        self._finish_run(0, skipped=0, pages=pages)
                         return []
                     results = self.service.mediaItems().search(body={"albumId": album["id"], "pageSize": 100, "pageToken": page_token}).execute()
                 else:
                     results = self.service.mediaItems().list(pageSize=100, pageToken=page_token).execute()
                 items = results.get("mediaItems", [])
+                pages += 1
 
                 if not items:
-                    print("No media items found in Google Photos.")
                     break
 
                 for item in items:
@@ -93,10 +101,14 @@ class PhotosFetcher(BaseFetcher):
                     file_name = item["filename"]
                     
                     try:
-                        response = requests.get(download_url, stream=True)
+                        response = requests.get(
+                            download_url,
+                            stream=True,
+                            timeout=self._request_timeout(),
+                        )
                         response.raise_for_status()
-                        
-                        local_path = os.path.join(attachments_dir, file_name)
+
+                        local_path = self._download_path(attachments_dir, file_name, item["id"])
                         with open(local_path, "wb") as f:
                             for chunk in response.iter_content(chunk_size=8192):
                                 f.write(chunk)
@@ -112,15 +124,15 @@ class PhotosFetcher(BaseFetcher):
                                 "product_url": item.get("productUrl")
                             }
                         })
-                    except requests.exceptions.RequestException as e:
-                        print(f"Error downloading {file_name}: {e}")
+                    except requests.exceptions.RequestException:
+                        skipped += 1
 
                 page_token = results.get("nextPageToken")
                 if not page_token:
                     break
-
-        except HttpError as error:
-            print(f"An error occurred: {error}")
+            self._finish_run(len(documents), skipped=skipped, pages=pages)
+        except Exception as error:
+            self._fail_run(error, fetched=len(documents), skipped=skipped, pages=pages)
         return documents
 
 

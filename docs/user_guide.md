@@ -91,6 +91,10 @@ Local operating ledger and optional web operations API settings.
 *   `document_stale_hours`: Age at which imported, processing, or review documents are flagged as stuck. Default: `24`.
 *   `routing_stale_hours`: Age at which prepared routing drafts are flagged as waiting too long for approval/export. Default: `24`.
 *   `workflow_stale_hours`: Age at which a running workflow is treated as stale. Default: `6`.
+*   `source_stale_hours`: Age at which a previously ready connector is considered stale. Default: `24`.
+*   `worker_sync_source_connectors`: Run durable enabled-source intake before the autonomous cycle. Default: `true`.
+*   `worker_source_connectors`: Optional comma-separated allowlist of enabled connector names; blank means all enabled connectors.
+*   `worker_run_legacy_workflow`: Compatibility switch for the old checkpoint pipeline. Default: `false`.
 *   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
 *   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
 *   `api_url`: Base URL for the optional web operations API, such as `http://127.0.0.1:3000`.
@@ -109,16 +113,17 @@ Use the Notification Center to refresh current operating alerts, open their evid
 
 Use VAT & Compliance to assess the current quarter or call `POST /api/compliance/assessments` with an explicit `fromDate` and `toDate`. FAB stores a source-checksummed provisional assessment, VAT totals by currency, record-linked findings, source-file presence, and seven-year retain-until dates. Correct the underlying record and assess again, or acknowledge a finding; resolving or accepting an exception requires a written reason. Restored source files change the checksum and replace the old finding snapshot. `/api/compliance/assessments`, `/api/compliance/assessments/{id}`, `/api/compliance/findings`, `/api/compliance/findings/{id}/status`, and `/api/compliance/retention` expose the evidence. This is a review aid, not a Dutch tax return: FAB does not map every Belastingdienst return box, file a return, make a legal conclusion, or authorize deletion of source documents.
 
-The Sources panel and `/api/sources` show observed folder or connector sources, their latest status, last scan time, seen/imported/duplicate counters, and source identifiers. Connector metadata that looks like tokens, passwords, secrets, credentials, authorization headers, or API keys is redacted before it is stored.
+The Sources panel and `/api/sources` show observed folder or connector sources, their latest status, last scan time, seen/imported/duplicate counters, and source identifiers. `GET /api/sources/readiness` shows whether each connector is configured, enabled, syncable, or requires supervision. `POST /api/sources/sync` synchronizes selected enabled Gmail, Google Drive, and Freshdesk sources into the durable document ledger without running OCR or posting downstream. Exact-content duplicates are idempotent; a changed provider item creates a new revision and review item instead of overwriting prior evidence. Connector metadata and errors that look like tokens, passwords, secrets, credentials, authorization headers, or API keys are redacted before they are stored.
 
 ### 4.2. `[gmail]` Section
 
 Configuration for fetching documents from Gmail.
 
+*   `enabled`: Opt in to connector intake. Defaults to `false`.
 *   `credentials_file`: Path to your Google API credentials JSON file (downloaded from Google Cloud Console). (e.g., `credentials/gmail_credentials.json`)
-*   `token_file`: Path where the OAuth 2.0 token will be stored after first authentication. (e.g., `tokens/gmail_token.json`)
+*   `token_file`: Path to a token created during supervised OAuth setup. Workers do not open an OAuth browser by default.
 *   `attachment_download_dir`: Directory to save downloaded Gmail attachments. (e.g., `downloads/gmail`)
-*   `search_query`: Gmail search query to filter emails. Examples:
+*   `query`: Gmail search query to filter emails. Examples:
     *   `has:attachment from:"example@vendor.com" subject:"Invoice"`
     *   `label:receipts after:2025/01/01`
 
@@ -126,8 +131,9 @@ Configuration for fetching documents from Gmail.
 
 Configuration for fetching documents from Google Drive.
 
+*   `enabled`: Opt in to connector intake. Defaults to `false`.
 *   `credentials_file`: Path to your Google API credentials JSON file. (e.g., `credentials/drive_credentials.json`)
-*   `token_file`: Path where the OAuth 2.0 token will be stored. (e.g., `tokens/drive_token.json`)
+*   `token_file`: Path to a token created during supervised OAuth setup. Workers do not open an OAuth browser by default.
 *   `download_dir`: Directory to save downloaded Drive files. (e.g., `downloads/drive`)
 *   `folder_id`: The ID of the specific Google Drive folder to monitor. You can find this in the URL when viewing the folder in Google Drive.
 *   `file_types`: Comma-separated list of file extensions to download (e.g., `pdf,jpg,png`).
@@ -136,6 +142,7 @@ Configuration for fetching documents from Google Drive.
 
 Configuration for fetching documents from Freshdesk.
 
+*   `enabled`: Opt in to connector intake. Defaults to `false`.
 *   `api_key`: Your Freshdesk API key.
 *   `domain`: Your Freshdesk domain (e.g., `yourcompany.freshdesk.com`).
 *   `download_dir`: Directory to save downloaded Freshdesk attachments. (e.g., `downloads/freshdesk`)
@@ -143,12 +150,12 @@ Configuration for fetching documents from Freshdesk.
 
 ### 4.5. `[google_photos]` Section
 
-Configuration for fetching documents from Google Photos.
+Google Photos is a supervised source. Google no longer permits the previous whole-library background read model, so FAB does not run Photos from the worker.
 
-*   `credentials_file`: Path to your Google API credentials JSON file. (e.g., `credentials/photos_credentials.json`)
-*   `token_file`: Path where the OAuth 2.0 token will be stored. (e.g., `tokens/photos_token.json`)
-*   `album_name`: The name of the Google Photos album to monitor for receipts/documents.
-*   `download_dir`: Directory to save downloaded Google Photos media. (e.g., `downloads/photos`)
+*   `enabled`: Expose Google Photos readiness. Defaults to `false`.
+*   `mode`: Must be `picker` for new installations.
+*   `credentials_file`: Path to Google Photos Picker credentials.
+*   `picker_token_file`: Path to Picker authorization state. Even when configured, the source remains `supervision_required` until the user-selectable Picker-session executor is implemented.
 
 ### 4.6. `[processor]` Section
 
@@ -320,14 +327,14 @@ The system is designed with a modular architecture. You can extend its capabilit
 
 ### 6.4. Manual Review Interface
 
-Documents that cannot be automatically processed or categorized with high confidence are flagged for manual review. The `ManualReviewInterface` (though currently a placeholder in this version) is intended to provide a web-based interface to review these documents, correct errors, and provide feedback to the learning system.
+Documents that cannot be automatically processed or categorized with high confidence are flagged for manual review. The local dashboard's Manual Review panel exposes document and linked bank evidence, correction controls, approval/rejection/resolution actions, and suggested-rule feedback. Provider-side source revisions also appear here so changed evidence cannot silently replace an earlier document.
 
 ## 7. Troubleshooting
 
 *   **Check Logs**: Always start by examining the `app.log` file (or the path specified in `config.ini`) for error messages and warnings.
 *   **Configuration Errors**: Double-check your `config.ini` file for typos, incorrect paths, or missing credentials. Ensure sensitive information is correctly set via environment variables if you choose that method.
 *   **Dependency Issues**: If you encounter `ModuleNotFoundError` or similar, ensure all dependencies are installed (`pip install -r requirements.txt`) and your virtual environment is activated.
-*   **Google API Authentication**: For Gmail, Drive, and Photos fetchers, the first run will typically open a browser window for OAuth 2.0 authentication. Ensure you complete this process. If issues persist, delete the `token.json` files and try again.
+*   **Google API Authentication**: Create or refresh Gmail/Drive token files during a supervised setup run with `interactive_auth=true`, verify readiness, then restore `interactive_auth=false` for workers. Never delete a valid token as a first troubleshooting step; inspect the recorded connector error and credential/token paths. Google Photos uses a supervised Picker model and is not an unattended worker source.
 *   **Playwright Issues**: If mijngeldzaken.nl automation fails, ensure Playwright browsers are installed (`playwright install --with-deps chromium`) and that your internet connection is stable.
 
 ## 8. Support

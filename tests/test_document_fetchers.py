@@ -21,6 +21,7 @@ class TestDocumentFetchers(unittest.TestCase):
             "google_drive_credentials_file": os.path.join(self.temp_dir.name, "drive_credentials.json"),
             "google_drive_token_file": os.path.join(self.temp_dir.name, "drive_token.json"),
             "google_drive_download_dir": os.path.join(self.temp_dir.name, "drive_downloads"),
+            "google_drive_folder_id": "sort-out-folder",
             "freshdesk_api_key": "test_api_key",
             "freshdesk_domain": "test_domain",
             "freshdesk_download_dir": os.path.join(self.temp_dir.name, "freshdesk_downloads"),
@@ -80,6 +81,45 @@ class TestDocumentFetchers(unittest.TestCase):
         self.assertTrue(os.path.exists(documents[0]["local_path"]))
         os.remove(documents[0]["local_path"])
 
+    @patch("src.document_fetchers.gmail_fetcher.build")
+    @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.gmail_fetcher.Request")
+    @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
+    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    def test_gmail_fetcher_follows_next_page_token(
+        self,
+        mock_pickle,
+        mock_exists,
+        mock_Request,
+        mock_InstalledAppFlow,
+        mock_build,
+    ):
+        mock_exists.return_value = True
+        mock_pickle.load.return_value = MagicMock()
+        service = MagicMock()
+        mock_build.return_value = service
+        service.users.return_value.messages.return_value.list.return_value.execute.side_effect = [
+            {"messages": [{"id": "msg1"}], "nextPageToken": "page-2"},
+            {"messages": [{"id": "msg2"}]},
+        ]
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = [
+            _gmail_message("att1", "one.pdf"),
+            _gmail_message("att2", "two.pdf"),
+        ]
+        service.users.return_value.messages.return_value.attachments.return_value.get.return_value.execute.side_effect = [
+            {"data": "JVBERi0xLjQK"},
+            {"data": "JVBERi0xLjUK"},
+        ]
+
+        fetcher = GmailFetcher(self.config)
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(len(documents), 2)
+        self.assertEqual(fetcher.last_run["pages"], 2)
+        self.assertEqual(service.users.return_value.messages.return_value.list.call_count, 2)
+        for document in documents:
+            os.remove(document["local_path"])
+
     @patch("src.document_fetchers.drive_fetcher.build")
     @patch("src.document_fetchers.drive_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
@@ -111,6 +151,45 @@ class TestDocumentFetchers(unittest.TestCase):
         self.assertTrue(os.path.exists(documents[0]["local_path"]))
         os.remove(documents[0]["local_path"])
 
+    @patch("src.document_fetchers.drive_fetcher.build")
+    @patch("src.document_fetchers.drive_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
+    @patch("src.document_fetchers.drive_fetcher.Request")
+    @patch("src.document_fetchers.drive_fetcher.os.path.exists")
+    @patch("src.document_fetchers.drive_fetcher.pickle")
+    def test_drive_fetcher_follows_next_page_token(
+        self,
+        mock_pickle,
+        mock_exists,
+        mock_Request,
+        mock_MediaIoBaseDownload,
+        mock_InstalledAppFlow,
+        mock_build,
+    ):
+        mock_exists.return_value = True
+        mock_pickle.load.return_value = MagicMock()
+        service = MagicMock()
+        mock_build.return_value = service
+        service.files.return_value.list.return_value.execute.side_effect = [
+            {
+                "files": [{"id": "file1", "name": "one.pdf", "mimeType": "application/pdf"}],
+                "nextPageToken": "page-2",
+            },
+            {"files": [{"id": "file2", "name": "two.pdf", "mimeType": "application/pdf"}]},
+        ]
+        downloader = MagicMock()
+        downloader.next_chunk.return_value = (None, True)
+        mock_MediaIoBaseDownload.return_value = downloader
+
+        fetcher = DriveFetcher(self.config)
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(len(documents), 2)
+        self.assertEqual(fetcher.last_run["pages"], 2)
+        self.assertEqual(service.files.return_value.list.call_count, 2)
+        for document in documents:
+            os.remove(document["local_path"])
+
     @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
     def test_freshdesk_fetcher(self, mock_requests_get):
         mock_response = MagicMock()
@@ -120,7 +199,10 @@ class TestDocumentFetchers(unittest.TestCase):
                 {"id": 1, "attachments": [{"id": 101, "name": "report.pdf", "attachment_url": "http://example.com/report.pdf"}]}
             ]
         }
-        mock_requests_get.side_effect = [mock_response, MagicMock(content=b"dummy_pdf_content")]
+        conversations_response = MagicMock()
+        conversations_response.json.return_value = []
+        attachment_response = MagicMock(content=b"dummy_pdf_content")
+        mock_requests_get.side_effect = [mock_response, conversations_response, attachment_response]
 
         fetcher = FreshdeskFetcher(self.config)
         documents = fetcher.fetch_documents()
@@ -184,6 +266,20 @@ class TestDocumentFetchers(unittest.TestCase):
         ]:
             if os.path.exists(self.config[key]):
                 shutil.rmtree(self.config[key])
+
+def _gmail_message(attachment_id, filename):
+    return {
+        "internalDate": "1735689600000",
+        "payload": {
+            "headers": [],
+            "parts": [{
+                "filename": filename,
+                "body": {"attachmentId": attachment_id},
+                "mimeType": "application/pdf",
+            }],
+        },
+    }
+
 
 if __name__ == "__main__":
     unittest.main()

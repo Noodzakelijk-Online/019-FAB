@@ -4,7 +4,7 @@
 This project aims to develop a fully automated system to fetch financial documents from various sources, extract relevant data, categorize them based on predefined rules, and enter the data into mijngeldzaken.nl and Waveapps accounts.
 
 ## Features
-- **Document Fetching**: Integrates with Gmail, Google Drive, Google Photos, and Freshdesk to fetch financial documents.
+- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Google Photos intake is fail-closed until a user completes a supervised Picker session.
 - **Advanced Document Processing**: Utilizes OCR (Tesseract, Google Cloud Vision), including Dutch OCR, handwritten recognition, template matching, and line item extraction.
 - **Intelligent Categorization**: Employs rule-based, machine learning, and hybrid categorization approaches.
 - **Automated Data Entry**: Supports data entry into mijngeldzaken.nl (via browser automation) and Waveapps (via API).

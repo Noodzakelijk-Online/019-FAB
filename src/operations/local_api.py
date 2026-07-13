@@ -18,6 +18,7 @@ from src.operations.local_bookkeeping_records import (
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
+from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -194,7 +195,7 @@ DASHBOARD_TEMPLATE = """
     .badge.attention, .badge.medium, .badge.low { background: #fff7e6; color: var(--warning); }
     .badge.needs_attention, .badge.needs_auth { background: #fff7e6; color: var(--warning); }
     .badge.safe_auto, .badge.safe_draft, .badge.read_only { background: #ecfdf3; color: var(--ok); }
-    .badge.review_required, .badge.approval_required, .badge.attention_required, .badge.deferred, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed { background: #fff7e6; color: var(--warning); }
+    .badge.review_required, .badge.approval_required, .badge.attention_required, .badge.deferred, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed, .badge.supervision_required, .badge.needs_configuration, .badge.partial, .badge.syncing { background: #fff7e6; color: var(--warning); }
     .badge.completed, .badge.approved, .badge.executed, .badge.submitted, .badge.resolved, .badge.validated, .badge.routed, .badge.reconciled, .badge.ok { background: #ecfdf3; color: var(--ok); }
     .badge.ready { background: #ecfdf3; color: var(--ok); }
     .badge.not_configured, .badge.disabled { background: #f1f5f9; color: var(--muted); }
@@ -693,6 +694,28 @@ DASHBOARD_TEMPLATE = """
           <h2>Sources</h2>
           <p>Configured and observed document sources with scan provenance, counts, and status.</p>
         </div>
+        <form class="inline-actions" method="post" action="{{ url_for('sync_sources_form') }}">
+          <button type="submit" {% if not connector_plan.canSync %}disabled{% endif %}>Sync configured sources</button>
+        </form>
+      </div>
+      {% if connector_sync_summary %}
+      <pre>{{ pretty_json(connector_sync_summary) }}</pre>
+      {% endif %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Connector</th><th>Status</th><th>Mode</th><th>Configured</th><th>Next action</th></tr></thead>
+          <tbody>
+          {% for connector in connector_plan.sources %}
+            <tr>
+              <td>{{ connector.label }}</td>
+              <td><span class="badge {{ connector.status }}">{{ connector.status }}</span></td>
+              <td>{{ connector.mode }}</td>
+              <td>{{ "yes" if connector.configured else "no" }}</td>
+              <td>{{ connector.nextAction or "Ready for read-only sync." }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
       </div>
       {% if sources %}
       <div class="table-wrap">
@@ -3594,6 +3617,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             intake_extensions,
         ).plan()
         documents = ledger.list_documents(limit=25)
+        connector_plan = LocalConnectorIntakeService(ledger, config).plan()
         sources = ledger.list_source_accounts(limit=25)
         document_groups = ledger.list_document_groups(limit=25)
         extracted_fields = ledger.list_extracted_fields(limit=40)
@@ -3669,6 +3693,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_scheduled_report_summary = session.pop("fab_last_scheduled_report_summary", None)
         last_notification_refresh_summary = session.pop("fab_last_notification_refresh_summary", None)
         last_compliance_summary = session.pop("fab_last_compliance_summary", None)
+        last_connector_sync = session.pop("fab_last_connector_sync", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3684,6 +3709,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "exceptions": exceptions,
             "readiness": readiness,
             "autonomyPlan": autonomy_plan,
+            "connectorPlan": connector_plan,
             "sources": sources,
             "documents": documents,
             "documentGroups": document_groups,
@@ -3741,6 +3767,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastScheduledReportSummary": last_scheduled_report_summary,
             "lastNotificationRefreshSummary": last_notification_refresh_summary,
             "lastComplianceSummary": last_compliance_summary,
+            "lastConnectorSync": last_connector_sync,
         }
         return render_template_string(
             DASHBOARD_TEMPLATE,
@@ -3754,6 +3781,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             bank_transactions=bank_transactions,
             bookkeeping_records=bookkeeping_records,
             compact_json=_compact_json,
+            connector_plan=connector_plan,
+            connector_sync_summary=last_connector_sync,
             close_pack_summary=last_close_pack_summary,
             close_packs=close_packs,
             close_readiness=close_readiness,
@@ -4061,6 +4090,38 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 limit=_limit_arg(),
             )
         })
+
+    @app.get("/api/sources/readiness")
+    def source_connector_readiness():
+        return jsonify(LocalConnectorIntakeService(ledger, config).plan())
+
+    @app.post("/api/sources/sync")
+    def sync_sources_api():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalConnectorIntakeService(ledger, config).sync(
+                sources=payload.get("sources"),
+                actor=payload.get("actor") or "api",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(result)
+
+    @app.post("/sources/sync")
+    def sync_sources_form():
+        try:
+            result = LocalConnectorIntakeService(ledger, config).sync(
+                actor="local_user",
+            )
+            session["fab_last_connector_sync"] = _compact_connector_sync(result)
+        except ValueError as exc:
+            session["fab_last_connector_sync"] = {
+                "success": False,
+                "status": "invalid_request",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        return redirect(url_for("dashboard_page") + "#sources")
 
     @app.post("/api/sources")
     def upsert_source():
@@ -6305,6 +6366,27 @@ def _bookkeeping_record_corrections_from_mapping(values: Any) -> Dict[str, Any]:
         if value not in (None, ""):
             corrections[key] = value
     return corrections
+
+
+def _compact_connector_sync(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "workflowRunId": result.get("workflowRunId"),
+        "summary": result.get("summary") or {},
+        "sources": [
+            {
+                "source": item.get("source"),
+                "status": item.get("status"),
+                "registered": item.get("registered", 0),
+                "duplicates": item.get("duplicates", 0),
+                "revisions": item.get("revisions", 0),
+                "nextAction": item.get("nextAction"),
+            }
+            for item in result.get("results") or []
+        ],
+        "externalSubmission": "not_executed",
+    }
 
 
 def _list_config(config: Dict[str, Any], *keys: str) -> list:

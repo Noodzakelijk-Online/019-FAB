@@ -218,6 +218,8 @@ def _title(event_type: str) -> str:
 
 
 def _dashboard_path(event_type: str) -> str:
+    if "source_connector" in event_type:
+        return "#sources"
     if event_type.startswith("compliance_"):
         return "#compliance"
     if "report" in event_type:

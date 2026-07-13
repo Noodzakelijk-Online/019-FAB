@@ -110,6 +110,23 @@ class TestLocalNotificationService(unittest.TestCase):
             self.assertEqual(audit["action"], "local_notifications.status_changed")
             self.assertEqual(audit["details"]["actor"], "tester")
 
+    def test_source_connector_alert_links_to_sources_dashboard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_source_account({
+                "sourceType": "gmail",
+                "sourceIdentifier": "me",
+                "label": "Gmail",
+                "status": "failed",
+            })
+
+            result = LocalNotificationService(ledger).refresh(actor="test")
+
+            self.assertEqual(result["created"], 1)
+            notification = ledger.list_notifications()[0]
+            self.assertEqual(notification["event_type"], "source_connector_unavailable")
+            self.assertEqual(notification["payload"]["dashboardPath"], "#sources")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1568,6 +1568,60 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(sources[0]["documents_seen"], 1)
             self.assertEqual(sources[0]["documents_imported"], 1)
 
+    def test_source_connector_readiness_sync_api_and_dashboard_form(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+            sync_result = {
+                "success": True,
+                "status": "completed",
+                "workflowRunId": 7,
+                "summary": {
+                    "sources": 1,
+                    "seen": 1,
+                    "registered": 1,
+                    "duplicates": 0,
+                    "revisions": 0,
+                    "alreadyRegistered": 0,
+                    "skipped": 0,
+                    "failedSources": 0,
+                },
+                "results": [{
+                    "source": "gmail",
+                    "status": "ready",
+                    "registered": 1,
+                    "duplicates": 0,
+                    "revisions": 0,
+                }],
+                "externalSubmission": "not_executed",
+            }
+
+            readiness = client.get("/api/sources/readiness")
+            with patch(
+                "src.operations.local_api.LocalConnectorIntakeService.sync",
+                return_value=sync_result,
+            ) as sync:
+                api_response = client.post(
+                    "/api/sources/sync",
+                    json={"sources": ["gmail"], "actor": "tester"},
+                )
+                page = client.post("/sources/sync", follow_redirects=True)
+
+            self.assertEqual(readiness.status_code, 200)
+            photos = next(
+                item for item in readiness.get_json()["sources"]
+                if item["source"] == "google_photos"
+            )
+            self.assertEqual(photos["mode"], "picker_required")
+            self.assertEqual(api_response.status_code, 200)
+            self.assertEqual(api_response.get_json()["externalSubmission"], "not_executed")
+            self.assertEqual(sync.call_args_list[0].kwargs["sources"], ["gmail"])
+            html = page.data.decode("utf-8")
+            self.assertIn("Sync configured sources", html)
+            self.assertIn("Google Photos Picker", html)
+            self.assertIn("&#34;workflowRunId&#34;: 7", html)
+
     def test_api_exposes_duplicate_candidates_from_intake(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

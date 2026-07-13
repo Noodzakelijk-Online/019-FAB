@@ -527,6 +527,34 @@ class TestWorkflow(unittest.TestCase):
             documentsNeedingReview=0,
         )
 
+    def test_connector_initialization_failure_does_not_suppress_other_sources(self):
+        self._configure_successful_run()
+        self.mocks["FreshdeskFetcher"].side_effect = ValueError("Freshdesk unavailable")
+
+        controller = WorkflowController(self.config)
+        controller.run_workflow()
+
+        self.mocks["GmailFetcher"].return_value.fetch_documents.assert_called_once()
+        self.mocks["ProcessorPipeline"].return_value.process_document.assert_called_once()
+        operations = self.mocks["OperationsClient"].return_value
+        operations.record_audit_event.assert_any_call(
+            "workflow.error",
+            "workflow_run",
+            "34",
+            {
+                "operation": "initialize_freshdesk",
+                "error": "Freshdesk unavailable",
+                "source": "freshdesk",
+            },
+        )
+        operations.update_workflow_run.assert_called_with(
+            34,
+            status="failed",
+            documentsImported=1,
+            documentsProcessed=1,
+            documentsNeedingReview=0,
+        )
+
     def test_checkpoint_persistence_failure_marks_run_failed(self):
         self._configure_successful_run()
 

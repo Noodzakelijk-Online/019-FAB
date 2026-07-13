@@ -201,7 +201,7 @@ class LocalReadinessService:
             _credential_file("drive_credentials", "Google Drive OAuth credentials", self.config, "google_drive_credentials_file", "google_drive.credentials_file", "drive.credentials_file", "drive_credentials_path"),
             _credential_file("drive_token", "Google Drive OAuth token", self.config, "google_drive_token_file", "google_drive.token_file", "drive.token_file", "drive_token_path"),
             _credential_file("photos_credentials", "Google Photos OAuth credentials", self.config, "google_photos_credentials_file", "google_photos.credentials_file", "photos.credentials_file", "photos_credentials_path"),
-            _credential_file("photos_token", "Google Photos OAuth token", self.config, "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path"),
+            _credential_file("photos_token", "Google Photos Picker OAuth token", self.config, "google_photos_picker_token_file", "google_photos.picker_token_file", "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path"),
             _credential_file("vision_credentials", "Google Vision credentials", self.config, "google_vision_credentials_file", "google_vision.credentials_file"),
             _credential_value("freshdesk_api_key", "Freshdesk API key", self.config, "freshdesk_api_key", "freshdesk.api_key"),
             _credential_value("freshdesk_domain", "Freshdesk domain", self.config, "freshdesk_domain", "freshdesk.domain", secret=False),
@@ -227,8 +227,12 @@ class LocalReadinessService:
                 details="Reads configured local_intake_paths into the local ledger.",
             ),
             _oauth_source("gmail", "Gmail", credential_map["gmail_credentials"], credential_map["gmail_token"]),
-            _oauth_source("google_drive", "Google Drive", credential_map["drive_credentials"], credential_map["drive_token"]),
-            _oauth_source("google_photos", "Google Photos", credential_map["photos_credentials"], credential_map["photos_token"]),
+            _drive_source(
+                credential_map["drive_credentials"],
+                credential_map["drive_token"],
+                self.config,
+            ),
+            _photos_picker_source(credential_map["photos_credentials"], credential_map["photos_token"]),
             _pair_source(
                 "freshdesk",
                 "Freshdesk",
@@ -504,6 +508,49 @@ def _oauth_source(identifier: str, label: str, credentials: Dict[str, Any], toke
     if credentials["exists"] and not token["exists"]:
         source["status"] = "needs_auth"
         source["details"] = "Credentials exist; finish OAuth login to create the token file."
+    return source
+
+
+def _photos_picker_source(credentials: Dict[str, Any], token: Dict[str, Any]) -> Dict[str, Any]:
+    source = _oauth_source(
+        "google_photos",
+        "Google Photos Picker",
+        credentials,
+        token,
+    )
+    if source["ready"]:
+        source["status"] = "supervision_required"
+        source["details"] = (
+            "Credentials are ready. A user must select receipt images in a supervised Picker session; "
+            "background whole-library access is unavailable."
+        )
+    return source
+
+
+def _drive_source(
+    credentials: Dict[str, Any],
+    token: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    source = _oauth_source("google_drive", "Google Drive", credentials, token)
+    folder_id = str(
+        _config_value(
+            config,
+            "google_drive_folder_id",
+            "google_drive.folder_id",
+            "drive_folder_id",
+            default="",
+        )
+        or ""
+    ).strip()
+    if source["ready"] and not folder_id:
+        source["ready"] = False
+        source["status"] = "needs_attention"
+        source["details"] = (
+            "OAuth is ready, but an approved folder_id is required; FAB will not scan the whole Drive."
+        )
+    elif folder_id:
+        source["details"] = "Read-only ingestion is restricted to the configured Drive folder_id."
     return source
 
 

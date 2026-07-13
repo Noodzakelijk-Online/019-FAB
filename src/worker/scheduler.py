@@ -6,6 +6,7 @@ from typing import Any, Dict
 from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_compliance import LocalComplianceService
+from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.local_exports import LocalExportAttemptService
 from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
@@ -25,6 +26,14 @@ class FabWorker:
         self.process_retries = _as_bool(self.config.get("worker_process_due_retries", True))
         self.operations_ledger = build_local_operations_ledger(self.config)
         self.run_legacy_workflow = _as_bool(self.config.get("worker_run_legacy_workflow", True))
+        self.sync_source_connectors = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_sync_source_connectors", True)
+        )
+        self.source_connectors = _list_config(
+            self.config,
+            "worker_source_connectors",
+            "source_connectors",
+        )
         self.run_local_autonomy = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_run_local_autonomy", True)
         )
@@ -60,6 +69,7 @@ class FabWorker:
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")
             stage_errors = []
             stages = (
+                ("connector_intake", self._sync_source_connectors),
                 ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
                 ("scheduled_reports", self._process_scheduled_reports),
@@ -104,6 +114,24 @@ class FabWorker:
         if not self.run_legacy_workflow:
             return
         WorkflowController(self.config).run_workflow()
+
+    def _sync_source_connectors(self) -> None:
+        if not self.sync_source_connectors or not self.operations_ledger:
+            return
+        result = LocalConnectorIntakeService(
+            self.operations_ledger,
+            self.config,
+        ).sync(
+            sources=self.source_connectors or None,
+            actor="local_worker",
+        )
+        self._record_audit(
+            "connector_intake_cycle",
+            _compact_connector_intake(result),
+            f"Connector intake cycle ended as {result.get('status')}",
+        )
+        if not result.get("success"):
+            raise RuntimeError("One or more configured source connectors failed")
 
     def _run_local_autonomy(self) -> None:
         if not self.run_local_autonomy or not self.operations_ledger:
@@ -278,6 +306,26 @@ def _compact_autonomy_cycle(result: Dict[str, Any]) -> Dict[str, Any]:
         "executedActionIds": [action.get("id") for action in result.get("executedActions") or []],
         "skippedActionIds": [action.get("id") for action in result.get("skippedActions") or []],
         "masterLedger": result.get("masterLedger"),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _compact_connector_intake(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "workflowRunId": result.get("workflowRunId"),
+        "summary": result.get("summary") or {},
+        "sources": [
+            {
+                "source": item.get("source"),
+                "status": item.get("status"),
+                "registered": item.get("registered", 0),
+                "duplicates": item.get("duplicates", 0),
+                "revisions": item.get("revisions", 0),
+            }
+            for item in result.get("results") or []
+        ],
         "externalSubmission": "not_executed",
     }
 

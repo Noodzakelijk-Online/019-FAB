@@ -35,12 +35,20 @@ class WorkflowController:
         self.config = config
         self.logger = AppLogger(log_file=self.config.get("log_file")).get_logger()
 
-        self.fetchers = {
-            "gmail": GmailFetcher(config),
-            "drive": DriveFetcher(config),
-            "freshdesk": FreshdeskFetcher(config),
-            "photos": PhotosFetcher(config)
-        }
+        self.fetchers = {}
+        self.fetcher_initialization_errors = {}
+        for source, factory in (
+            ("gmail", GmailFetcher),
+            ("drive", DriveFetcher),
+            ("freshdesk", FreshdeskFetcher),
+            ("photos", PhotosFetcher),
+        ):
+            if not _legacy_source_enabled(self.config, source):
+                continue
+            try:
+                self.fetchers[source] = factory(config)
+            except Exception as exc:
+                self.fetcher_initialization_errors[source] = exc
         self.processor_pipeline = ProcessorPipeline(config)
         self.categorizer = HybridCategorizer(config)
         self.data_entry_handlers = {
@@ -353,7 +361,10 @@ class WorkflowController:
         operations_documents = {}
         workflow_run_id = self.operations_client.create_workflow_run(
             self.config.get("workflow_trigger_source", "manual"),
-            metadata={"fetchers": list(self.fetchers.keys())},
+            metadata={
+                "fetchers": list(self.fetchers.keys()),
+                "unavailableFetchers": sorted(self.fetcher_initialization_errors),
+            },
         )
         self.operations_client.record_audit_event(
             "workflow.run.started",
@@ -393,10 +404,28 @@ class WorkflowController:
         
         # 1. Fetch Documents
         all_documents = []
+        for source, error in self.fetcher_initialization_errors.items():
+            workflow_had_failures = True
+            self.logger.error(f"Source connector {source} could not be initialized: {error}")
+            self._record_workflow_error(
+                f"initialize_{source}",
+                error,
+                workflow_run_id=workflow_run_id,
+                details={"source": source},
+            )
         for source, fetcher in self.fetchers.items():
             try:
                 self.logger.info(f"Fetching documents from {source}...")
                 fetched_documents = fetcher.fetch_documents()
+                fetch_error = _fetcher_error(fetcher)
+                if fetch_error:
+                    workflow_had_failures = True
+                    self._record_workflow_error(
+                        f"fetch_{source}",
+                        fetch_error,
+                        workflow_run_id=workflow_run_id,
+                        details={"source": source, "partialDocumentCount": len(fetched_documents or [])},
+                    )
                 normalized_documents = [
                     self._normalize_fetched_document(source, document, position)
                     for position, document in enumerate(fetched_documents)
@@ -1019,6 +1048,27 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off", ""}
     return bool(value)
+
+
+def _legacy_source_enabled(config: Dict[str, Any], source: str) -> bool:
+    keys = {
+        "gmail": ("gmail_enabled",),
+        "drive": ("google_drive_enabled", "drive_enabled"),
+        "freshdesk": ("freshdesk_enabled",),
+        "photos": ("google_photos_enabled", "photos_enabled"),
+    }.get(source, ())
+    for key in keys:
+        if key in config and config.get(key) not in (None, ""):
+            return _as_bool(config.get(key), default=True)
+    return True
+
+
+def _fetcher_error(fetcher: Any) -> Optional[Exception]:
+    for attribute in ("last_error", "auth_error"):
+        value = getattr(fetcher, attribute, None)
+        if isinstance(value, Exception):
+            return value
+    return None
 
 
 

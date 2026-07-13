@@ -84,6 +84,7 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertEqual(reviews[0]["reason"], "mijngeldzaken_supervision_required")
             audit_actions = {event["action"] for event in ledger.list_audit_events(limit=100)}
             self.assertIn("local_worker.autonomy_cycle", audit_actions)
+            self.assertIn("local_worker.connector_intake_cycle", audit_actions)
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
             self.assertIn("local_worker.scheduled_report_cycle", audit_actions)
@@ -121,6 +122,31 @@ class TestOperationsExportWorker(unittest.TestCase):
             audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
             self.assertIn("local_worker.stage_failed", audit_actions)
             self.assertIn("local_worker.cycle_finished_with_error", audit_actions)
+
+    def test_connector_failure_does_not_suppress_autonomy_or_exports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["worker_run_legacy_workflow"] = False
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_sync_source_connectors",
+                side_effect=RuntimeError("gmail unavailable"),
+            ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
+                worker,
+                "_process_scheduled_reports",
+            ), patch.object(worker, "_process_operations_exports") as exports:
+                worker.run()
+
+            autonomy.assert_called_once()
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            failed_stages = [
+                event for event in ledger.list_audit_events(limit=30)
+                if event["action"] == "local_worker.stage_failed"
+            ]
+            self.assertEqual(failed_stages[0]["details"]["stage"], "connector_intake")
 
     def test_worker_can_disable_legacy_pipeline_for_local_only_operation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
