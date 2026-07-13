@@ -95,6 +95,13 @@ class LocalOperationsHealth:
             "report_stale_hours",
             default=2.0,
         )
+        self.invoice_due_soon_days = _float_config(
+            self.config,
+            "fab_invoice_due_soon_days",
+            "operations_invoice_due_soon_days",
+            "invoice_due_soon_days",
+            default=7.0,
+        )
 
     def summarize(self) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -113,6 +120,11 @@ class LocalOperationsHealth:
         deferred_exports = self.ledger.list_export_attempts(status=DEFERRED_EXPORT_STATUSES, limit=500)
         failed_exports = self.ledger.list_export_attempts(status="failed", limit=500)
         wave_sync_runs = self.ledger.list_wave_sync_runs(limit=100)
+        wave_invoices = self.ledger.list_wave_entities(
+            entity_type="invoice",
+            presence_status="present",
+            limit=500,
+        )
         report_runs = self.ledger.list_financial_report_runs(status=REPORT_ATTENTION_STATUSES, limit=100)
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
@@ -375,6 +387,52 @@ class LocalOperationsHealth:
                     {"targetSystem": target_system, "status": sync_status},
                 ))
 
+        settled_invoice_statuses = {"paid", "cancelled", "canceled", "void", "deleted"}
+        for invoice in wave_invoices:
+            invoice_status = str(invoice.get("status") or "unknown").strip().lower()
+            if invoice_status in settled_invoice_statuses:
+                continue
+            due_date = _parse_date(invoice.get("due_date"))
+            if not due_date:
+                continue
+            days_until_due = (due_date - now.date()).days
+            invoice_label = invoice.get("name") or invoice.get("external_id") or invoice.get("id")
+            if days_until_due < 0:
+                issues.append(_issue(
+                    "medium",
+                    "wave_invoice_overdue",
+                    "wave_entity",
+                    invoice.get("id"),
+                    f"Wave invoice {invoice_label} is {abs(days_until_due)} day(s) overdue.",
+                    abs(days_until_due) * 24.0,
+                    {
+                        "targetSystem": invoice.get("target_system"),
+                        "externalId": invoice.get("external_id"),
+                        "dueDate": invoice.get("due_date"),
+                        "status": invoice.get("status"),
+                        "amount": invoice.get("amount"),
+                        "currency": invoice.get("currency"),
+                    },
+                ))
+            elif days_until_due <= self.invoice_due_soon_days:
+                issues.append(_issue(
+                    "low",
+                    "wave_invoice_due_soon",
+                    "wave_entity",
+                    invoice.get("id"),
+                    f"Wave invoice {invoice_label} is due in {days_until_due} day(s).",
+                    None,
+                    {
+                        "targetSystem": invoice.get("target_system"),
+                        "externalId": invoice.get("external_id"),
+                        "dueDate": invoice.get("due_date"),
+                        "daysUntilDue": days_until_due,
+                        "status": invoice.get("status"),
+                        "amount": invoice.get("amount"),
+                        "currency": invoice.get("currency"),
+                    },
+                ))
+
         missing_wave_entities = int(metrics.get("wave_entities_missing_downstream") or 0)
         if missing_wave_entities:
             issues.append(_issue(
@@ -419,6 +477,7 @@ class LocalOperationsHealth:
                 "exportExecutionStaleHours": self.export_execution_stale_hours,
                 "waveEntitySyncStaleHours": self.wave_entity_sync_stale_hours,
                 "reportStaleHours": self.report_stale_hours,
+                "invoiceDueSoonDays": self.invoice_due_soon_days,
             },
             "metrics": {
                 **metrics,
@@ -444,6 +503,8 @@ class LocalOperationsHealth:
                 "staleFinancialReportRuns": _issue_count(issues, "stale_financial_report_run"),
                 "waveEntities": metrics.get("wave_entities", 0),
                 "waveEntitiesMissingDownstream": missing_wave_entities,
+                "waveInvoicesOverdue": _issue_count(issues, "wave_invoice_overdue"),
+                "waveInvoicesDueSoon": _issue_count(issues, "wave_invoice_due_soon"),
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),
                 "masterLedgerBlockedRows": master_ledger_summary.get("blockedRows", 0),
                 "masterLedgerReadyForDraft": master_ledger_summary.get("readyForDraft", 0),
@@ -527,6 +588,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Review Wave records marked missing downstream before reusing their customer, product, or invoice IDs.")
     if "master_ledger_blockers" in issue_types:
         actions.append("Open the master ledger projection and resolve blocked rows before close or downstream execution.")
+    if "wave_invoice_overdue" in issue_types or "wave_invoice_due_soon" in issue_types:
+        actions.append("Open Wave invoice evidence, confirm payment state, and approve any reminder or follow-up separately.")
     if "api_quota_exhausted" in issue_types:
         actions.append("Pause affected downstream sync jobs until the service quota window resets.")
     return actions
@@ -552,6 +615,15 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _parse_date(value: Any):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except (TypeError, ValueError):
+        return None
 
 
 def _float_config(config: Dict[str, Any], *keys: str, default: float) -> float:

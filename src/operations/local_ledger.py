@@ -635,6 +635,52 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_financial_reports_schedule
                     ON financial_report_runs(schedule_id, schedule_slot);
 
+                CREATE TABLE IF NOT EXISTS notification_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    in_app_enabled INTEGER NOT NULL DEFAULT 1,
+                    minimum_severity TEXT NOT NULL DEFAULT 'low',
+                    external_delivery TEXT NOT NULL DEFAULT 'disabled',
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(event_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'low',
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    entity_type TEXT,
+                    entity_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'unread',
+                    source TEXT NOT NULL DEFAULT 'operations_health',
+                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    read_at TEXT,
+                    acknowledged_at TEXT,
+                    resolved_at TEXT,
+                    external_delivery TEXT NOT NULL DEFAULT 'not_executed',
+                    payload_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(fingerprint)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_notifications_status
+                    ON notifications(status);
+                CREATE INDEX IF NOT EXISTS idx_local_notifications_severity
+                    ON notifications(severity);
+                CREATE INDEX IF NOT EXISTS idx_local_notifications_event_type
+                    ON notifications(event_type);
+                CREATE INDEX IF NOT EXISTS idx_local_notifications_last_seen
+                    ON notifications(last_seen_at);
+
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     actor_user_id INTEGER,
@@ -2579,6 +2625,232 @@ class LocalOperationsLedger:
             },
         )
 
+    def upsert_notification_preference(self, payload: Dict[str, Any]) -> int:
+        event_type = str(payload.get("eventType") or payload.get("event_type") or "").strip()
+        if not event_type:
+            raise ValueError("eventType is required")
+        minimum_severity = str(
+            payload.get("minimumSeverity") or payload.get("minimum_severity") or "low"
+        ).strip().lower()
+        if minimum_severity not in {"low", "medium", "high"}:
+            raise ValueError(f"Unsupported minimum notification severity: {minimum_severity}")
+        now = self._now()
+        values = {
+            "enabled": self._bool_int(payload.get("enabled", True)),
+            "in_app_enabled": self._bool_int(
+                self._first_present(payload.get("inAppEnabled"), payload.get("in_app_enabled"), True)
+            ),
+            "minimum_severity": minimum_severity,
+            "external_delivery": "disabled",
+            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata") or {})),
+            "updated_at": now,
+        }
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM notification_preferences WHERE event_type = ? LIMIT 1",
+                (event_type,),
+            ).fetchone()
+            if row:
+                preference_id = int(row["id"])
+                self._update_with_connection(connection, "notification_preferences", preference_id, values)
+            else:
+                preference_id = self._insert_with_connection(
+                    connection,
+                    "notification_preferences",
+                    {"event_type": event_type, "created_at": now, **values},
+                )
+        return preference_id
+
+    def get_notification_preference(self, event_type: str) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM notification_preferences WHERE event_type = ? LIMIT 1",
+                (str(event_type or "").strip(),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_notification_preferences(self, limit: int = 100) -> list:
+        limit = self._bounded_limit(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM notification_preferences ORDER BY event_type ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def upsert_notification(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        fingerprint = str(payload.get("fingerprint") or "").strip()
+        event_type = str(payload.get("eventType") or payload.get("event_type") or "").strip()
+        if not fingerprint or not event_type:
+            raise ValueError("fingerprint and eventType are required")
+        now = self._date_text(payload.get("seenAt") or payload.get("seen_at")) or self._now()
+        desired_status = str(payload.get("status") or "unread").strip()
+        if desired_status not in {"unread", "suppressed"}:
+            raise ValueError(f"Unsupported notification upsert status: {desired_status}")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM notifications WHERE fingerprint = ? LIMIT 1",
+                (fingerprint,),
+            ).fetchone()
+            created = row is None
+            reopened = False
+            if row:
+                existing = self._row_to_dict(row)
+                status = str(existing.get("status") or "unread")
+                if status == "resolved":
+                    status = desired_status
+                    reopened = True
+                elif status == "suppressed" and desired_status == "unread":
+                    status = "unread"
+                    reopened = True
+                elif desired_status == "suppressed":
+                    status = "suppressed"
+                occurrence_count = int(existing.get("occurrence_count") or 1) + (1 if reopened else 0)
+                notification_id = int(existing["id"])
+                self._update_with_connection(
+                    connection,
+                    "notifications",
+                    notification_id,
+                    {
+                        "event_type": event_type,
+                        "severity": payload.get("severity") or "low",
+                        "title": payload.get("title") or event_type.replace("_", " ").title(),
+                        "message": payload.get("message") or "FAB detected an operating event.",
+                        "entity_type": payload.get("entityType") or payload.get("entity_type"),
+                        "entity_id": self._date_text(payload.get("entityId") or payload.get("entity_id")),
+                        "status": status,
+                        "source": payload.get("source") or "operations_health",
+                        "occurrence_count": occurrence_count,
+                        "last_seen_at": now,
+                        "read_at": None if reopened else existing.get("read_at"),
+                        "acknowledged_at": None if reopened else existing.get("acknowledged_at"),
+                        "resolved_at": None if reopened else existing.get("resolved_at"),
+                        "external_delivery": "not_executed",
+                        "payload_json": self._json(self._redact_sensitive(payload.get("payload") or {})),
+                        "updated_at": now,
+                    },
+                )
+                if reopened:
+                    connection.execute(
+                        "UPDATE notifications SET read_at = NULL, acknowledged_at = NULL, resolved_at = NULL WHERE id = ?",
+                        (notification_id,),
+                    )
+            else:
+                notification_id = self._insert_with_connection(
+                    connection,
+                    "notifications",
+                    {
+                        "fingerprint": fingerprint,
+                        "event_type": event_type,
+                        "severity": payload.get("severity") or "low",
+                        "title": payload.get("title") or event_type.replace("_", " ").title(),
+                        "message": payload.get("message") or "FAB detected an operating event.",
+                        "entity_type": payload.get("entityType") or payload.get("entity_type"),
+                        "entity_id": self._date_text(payload.get("entityId") or payload.get("entity_id")),
+                        "status": desired_status,
+                        "source": payload.get("source") or "operations_health",
+                        "first_seen_at": now,
+                        "last_seen_at": now,
+                        "external_delivery": "not_executed",
+                        "payload_json": self._json(self._redact_sensitive(payload.get("payload") or {})),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            updated = connection.execute(
+                "SELECT * FROM notifications WHERE id = ? LIMIT 1",
+                (notification_id,),
+            ).fetchone()
+        return {
+            "created": created,
+            "reopened": reopened,
+            "notification": self._row_to_dict(updated),
+        }
+
+    def update_notification_status(self, notification_id: int, status: str) -> Optional[Dict[str, Any]]:
+        status = str(status or "").strip().lower()
+        if status not in {"unread", "read", "acknowledged", "resolved"}:
+            raise ValueError(f"Unsupported notification status: {status}")
+        now = self._now()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM notifications WHERE id = ? LIMIT 1",
+                (int(notification_id),),
+            ).fetchone()
+            if not row:
+                return None
+            values = {"status": status, "updated_at": now}
+            if status == "unread":
+                values.update({"read_at": None, "acknowledged_at": None, "resolved_at": None})
+            elif status == "read":
+                values["read_at"] = now
+            elif status == "acknowledged":
+                values.update({"read_at": now, "acknowledged_at": now})
+            elif status == "resolved":
+                values.update({"read_at": now, "resolved_at": now})
+            self._update_with_connection(connection, "notifications", int(notification_id), values)
+            if status == "unread":
+                connection.execute(
+                    "UPDATE notifications SET read_at = NULL, acknowledged_at = NULL, resolved_at = NULL WHERE id = ?",
+                    (int(notification_id),),
+                )
+            updated = connection.execute(
+                "SELECT * FROM notifications WHERE id = ? LIMIT 1",
+                (int(notification_id),),
+            ).fetchone()
+        return self._row_to_dict(updated) if updated else None
+
+    def resolve_inactive_notifications(self, source: str, active_fingerprints: Any) -> int:
+        fingerprints = {str(value) for value in (active_fingerprints or []) if value}
+        now = self._now()
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT id, fingerprint FROM notifications WHERE source = ? AND status != 'resolved'",
+                (str(source or "operations_health"),),
+            ).fetchall()
+            inactive_ids = [int(row["id"]) for row in rows if row["fingerprint"] not in fingerprints]
+            if inactive_ids:
+                placeholders = ", ".join("?" for _ in inactive_ids)
+                connection.execute(
+                    f"UPDATE notifications SET status = 'resolved', resolved_at = ?, updated_at = ? "
+                    f"WHERE id IN ({placeholders})",
+                    (now, now, *inactive_ids),
+                )
+        return len(inactive_ids)
+
+    def get_notification(self, notification_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM notifications WHERE id = ? LIMIT 1",
+                (int(notification_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_notifications(
+        self,
+        status: Optional[Any] = None,
+        severity: Optional[Any] = None,
+        event_type: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM notifications"
+        params = []
+        where = []
+        self._append_status_filter(where, params, "status", status)
+        self._append_status_filter(where, params, "severity", severity)
+        if event_type:
+            where.append("event_type = ?")
+            params.append(event_type)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def dashboard_metrics(self) -> Dict[str, int]:
         with self._connection() as connection:
             return {
@@ -2688,6 +2960,18 @@ class LocalOperationsLedger:
                     "financial_report_runs",
                     "status IN ('failed', 'prepared_needs_review')",
                 ),
+                "notifications": self._count(connection, "notifications"),
+                "unread_notifications": self._count(
+                    connection,
+                    "notifications",
+                    "status = 'unread'",
+                ),
+                "active_notifications": self._count(
+                    connection,
+                    "notifications",
+                    "status IN ('unread', 'read', 'acknowledged')",
+                ),
+                "notification_preferences": self._count(connection, "notification_preferences"),
                 "audit_events": self._count(connection, "audit_events"),
             }
 

@@ -6,6 +6,7 @@ from typing import Any, Dict
 from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_exports import LocalExportAttemptService
+from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
 from src.operations.local_runtime import build_local_operations_ledger
 from src.storage.database import Database
@@ -31,6 +32,9 @@ class FabWorker:
         self.generate_scheduled_reports = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_generate_scheduled_reports", True)
         )
+        self.refresh_notifications = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_refresh_notifications", True)
+        )
         self.process_legacy_postings = _as_bool(
             self.config.get("worker_process_legacy_postings", self.operations_ledger is None)
         )
@@ -55,6 +59,7 @@ class FabWorker:
                 ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
                 ("scheduled_reports", self._process_scheduled_reports),
+                ("notifications", self._refresh_notifications),
                 ("operations_exports", self._process_operations_exports),
                 ("legacy_queue", self._process_legacy_queue),
             )
@@ -159,6 +164,18 @@ class FabWorker:
         if not result.get("success"):
             raise RuntimeError(result.get("error") or "Scheduled report generation failed")
 
+    def _refresh_notifications(self) -> None:
+        if not self.refresh_notifications or not self.operations_ledger:
+            return
+        result = LocalNotificationService(self.operations_ledger, self.config).refresh(
+            actor="local_worker",
+        )
+        self._record_audit(
+            "notification_cycle",
+            _compact_notification_refresh(result),
+            "Local notification refresh completed",
+        )
+
     def _process_legacy_queue(self) -> None:
         if not self.process_legacy_postings:
             return
@@ -260,6 +277,19 @@ def _compact_scheduled_report(result: Dict[str, Any]) -> Dict[str, Any]:
         "rowCount": report_run.get("row_count", 0),
         "blockerCount": report_run.get("blocker_count", 0),
         "externalSubmission": "not_executed",
+    }
+
+
+def _compact_notification_refresh(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "created": result.get("created", 0),
+        "reopened": result.get("reopened", 0),
+        "resolved": result.get("resolved", 0),
+        "suppressed": result.get("suppressed", 0),
+        "activeIssues": result.get("activeIssues", 0),
+        "externalDelivery": "not_executed",
     }
 
 

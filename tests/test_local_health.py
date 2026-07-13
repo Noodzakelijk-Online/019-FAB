@@ -302,6 +302,48 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["metrics"]["waveEntitiesMissingDownstream"], 1)
             self.assertIn("Refresh the Wave entity mirror", " ".join(health["nextActions"]))
 
+    def test_health_surfaces_unsettled_wave_invoice_deadlines(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            today = datetime.now(timezone.utc).date()
+            ledger.upsert_wave_entity({
+                "targetSystem": "waveapps_business",
+                "entityType": "invoice",
+                "externalId": "invoice-overdue",
+                "name": "INV-OVERDUE",
+                "status": "SENT",
+                "dueDate": (today - timedelta(days=3)).isoformat(),
+                "amount": 125.0,
+                "currency": "EUR",
+            })
+            ledger.upsert_wave_entity({
+                "targetSystem": "waveapps_business",
+                "entityType": "invoice",
+                "externalId": "invoice-due-soon",
+                "name": "INV-DUE-SOON",
+                "status": "VIEWED",
+                "dueDate": (today + timedelta(days=2)).isoformat(),
+                "amount": 75.0,
+                "currency": "EUR",
+            })
+            ledger.upsert_wave_entity({
+                "targetSystem": "waveapps_business",
+                "entityType": "invoice",
+                "externalId": "invoice-paid",
+                "name": "INV-PAID",
+                "status": "PAID",
+                "dueDate": (today - timedelta(days=10)).isoformat(),
+            })
+
+            health = LocalOperationsHealth(ledger, {"invoice_due_soon_days": 7}).summarize()
+
+            issue_types = [issue["type"] for issue in health["issues"]]
+            self.assertEqual(issue_types.count("wave_invoice_overdue"), 1)
+            self.assertEqual(issue_types.count("wave_invoice_due_soon"), 1)
+            self.assertEqual(health["metrics"]["waveInvoicesOverdue"], 1)
+            self.assertEqual(health["metrics"]["waveInvoicesDueSoon"], 1)
+            self.assertIn("approve any reminder", " ".join(health["nextActions"]))
+
 
 def _hours_ago(hours: int) -> str:
     value = datetime.now(timezone.utc) - timedelta(hours=hours)

@@ -11,6 +11,52 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_notification_center_refresh_preferences_and_status_actions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "notification-api",
+                "originalFilename": "failed.pdf",
+                "processingStatus": "failed",
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            refreshed = client.post("/api/notifications/refresh", json={"actor": "tester"})
+            self.assertEqual(refreshed.status_code, 200)
+            self.assertEqual(refreshed.get_json()["created"], 1)
+            self.assertEqual(refreshed.get_json()["externalDelivery"], "not_executed")
+            inbox = client.get("/api/notifications?status=unread").get_json()
+            self.assertEqual(inbox["summary"]["unread"], 1)
+            notification_id = inbox["notifications"][0]["id"]
+            self.assertEqual(inbox["notifications"][0]["event_type"], "failed_document")
+
+            acknowledged = client.patch(
+                f"/api/notifications/{notification_id}/status",
+                json={"status": "acknowledged", "actor": "tester"},
+            )
+            self.assertEqual(acknowledged.status_code, 200)
+            self.assertEqual(acknowledged.get_json()["notification"]["status"], "acknowledged")
+
+            preference = client.post("/api/notification-preferences", json={
+                "eventType": "failed_document",
+                "enabled": False,
+                "inAppEnabled": False,
+                "minimumSeverity": "high",
+            })
+            self.assertEqual(preference.status_code, 200)
+            self.assertEqual(preference.get_json()["preference"]["external_delivery"], "disabled")
+            self.assertFalse(preference.get_json()["preference"]["enabled"])
+
+            page = client.get("/")
+            html = page.data.decode("utf-8")
+            self.assertIn("Notification Center", html)
+            self.assertIn("Document processing failed", html)
+            self.assertIn("External delivery", html)
+            self.assertIn("acknowledged", html)
+
     def test_local_api_exposes_dashboard_documents_review_and_audit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

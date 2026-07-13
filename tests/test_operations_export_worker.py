@@ -87,6 +87,7 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
             self.assertIn("local_worker.scheduled_report_cycle", audit_actions)
+            self.assertIn("local_worker.notification_cycle", audit_actions)
             self.assertIn("local_reporting.scheduled_report_prepared", audit_actions)
             self.assertIn("local_export_attempt.batch_execution_preflight_backup", audit_actions)
             self.assertIn("local_export_attempt.supervision_required", audit_actions)
@@ -169,6 +170,33 @@ class TestOperationsExportWorker(unittest.TestCase):
                 "local_worker.cycle_finished_with_error",
                 {event["action"] for event in ledger.list_audit_events(limit=30)},
             )
+
+    def test_notification_failure_does_not_suppress_export_stage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["worker_run_legacy_workflow"] = False
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_run_local_autonomy",
+            ), patch.object(
+                worker,
+                "_process_scheduled_reports",
+            ), patch.object(
+                worker,
+                "_refresh_notifications",
+                side_effect=RuntimeError("notification store unavailable"),
+            ), patch.object(worker, "_process_operations_exports") as exports:
+                worker.run()
+
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            failed_stages = [
+                event for event in ledger.list_audit_events(limit=30)
+                if event["action"] == "local_worker.stage_failed"
+            ]
+            self.assertEqual(failed_stages[0]["details"]["stage"], "notifications")
 
     def test_manual_runner_uses_operations_ledger_and_respects_execution_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

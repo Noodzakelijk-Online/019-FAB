@@ -34,6 +34,7 @@ from src.operations.local_ledger import (
 )
 from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_mijngeldzaken_control import LocalMijngeldzakenControlService
+from src.operations.local_notifications import ACTIVE_NOTIFICATION_STATUSES, LocalNotificationService
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
@@ -346,6 +347,7 @@ DASHBOARD_TEMPLATE = """
     <nav aria-label="FAB operations sections">
       <a href="#overview">Overview</a>
       <a href="#health">Health</a>
+      <a href="#notifications">Notifications</a>
       <a href="#close">Close</a>
       <a href="#sources">Sources</a>
       <a href="#autonomy">Autonomy</a>
@@ -427,6 +429,106 @@ DASHBOARD_TEMPLATE = """
       {% else %}
       <div class="empty">No operational health issues detected.</div>
       {% endif %}
+    </section>
+
+    <section id="notifications">
+      <div class="section-head">
+        <div>
+          <h2>Notification Center</h2>
+          <p>Preference-controlled local alerts derived from current operating evidence.</p>
+        </div>
+        <form class="inline-actions" method="post" action="{{ url_for('refresh_notifications_form') }}">
+          <button type="submit">Refresh alerts</button>
+        </form>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-item"><span>Active</span><strong>{{ notification_summary.active }}</strong></div>
+        <div class="summary-item"><span>Unread</span><strong>{{ notification_summary.unread }}</strong></div>
+        <div class="summary-item"><span>High</span><strong>{{ notification_summary.high }}</strong></div>
+        <div class="summary-item"><span>Medium</span><strong>{{ notification_summary.medium }}</strong></div>
+        <div class="summary-item"><span>Acknowledged</span><strong>{{ notification_summary.acknowledged }}</strong></div>
+        <div class="summary-item"><span>External delivery</span><strong>{{ notification_summary.externalDelivery }}</strong></div>
+      </div>
+      {% if notification_refresh_summary %}
+      <details open>
+        <summary>Last notification refresh</summary>
+        <pre>{{ pretty_json(notification_refresh_summary) }}</pre>
+      </details>
+      {% endif %}
+      {% if notifications %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Alert</th>
+              <th>Entity</th>
+              <th>Status</th>
+              <th>Last seen</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for notification in notifications %}
+            <tr>
+              <td><span class="badge {{ notification.severity }}">{{ notification.severity }}</span></td>
+              <td>
+                <strong>{{ notification.title }}</strong>
+                <div class="muted">{{ notification.message }}</div>
+                <a href="{{ notification.payload.dashboardPath or '#health' }}">Open evidence</a>
+              </td>
+              <td>{{ notification.entity_type or "-" }} {{ notification.entity_id or "" }}</td>
+              <td><span class="badge {{ notification.status }}">{{ notification.status }}</span></td>
+              <td class="mono">{{ notification.last_seen_at }}</td>
+              <td>
+                <div class="button-row">
+                  {% if notification.status == 'unread' %}
+                  <form class="table-actions" method="post" action="{{ url_for('notification_status_form', notification_id=notification.id) }}">
+                    <input type="hidden" name="status" value="read">
+                    <button class="compact secondary" type="submit">Mark read</button>
+                  </form>
+                  {% endif %}
+                  {% if notification.status != 'acknowledged' %}
+                  <form class="table-actions" method="post" action="{{ url_for('notification_status_form', notification_id=notification.id) }}">
+                    <input type="hidden" name="status" value="acknowledged">
+                    <button class="compact secondary" type="submit">Acknowledge</button>
+                  </form>
+                  {% endif %}
+                  <form class="table-actions" method="post" action="{{ url_for('notification_status_form', notification_id=notification.id) }}">
+                    <input type="hidden" name="status" value="resolved">
+                    <button class="compact secondary" type="submit">Resolve</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">No active local notifications. Refresh alerts to compare the inbox with current operating health.</div>
+      {% endif %}
+      <details>
+        <summary>Notification preferences</summary>
+        <form method="post" action="{{ url_for('notification_preference_form') }}">
+          <div class="form-grid">
+            <label>Event type
+              <input name="eventType" value="*" required>
+            </label>
+            <label>Minimum severity
+              <select name="minimumSeverity">
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label><input type="checkbox" name="enabled" checked> Enabled</label>
+            <label><input type="checkbox" name="inAppEnabled" checked> In-app inbox</label>
+          </div>
+          <button type="submit">Save preference</button>
+        </form>
+        <pre>{{ pretty_json(notification_preferences) }}</pre>
+      </details>
     </section>
 
     <section id="exceptions">
@@ -3359,6 +3461,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def dashboard_page():
         metrics = ledger.dashboard_metrics()
         operations_health = LocalOperationsHealth(ledger, config).summarize()
+        notification_service = LocalNotificationService(ledger, config)
+        notifications = notification_service.list_notifications(
+            status=ACTIVE_NOTIFICATION_STATUSES,
+            limit=20,
+        )
+        notification_summary = notification_service.summary()
+        notification_preferences = ledger.list_notification_preferences(limit=100)
         exceptions = LocalExceptionQueueService(ledger, config).list_exceptions(limit=50)
         readiness_service = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions)
         readiness = readiness_service.summarize()
@@ -3431,6 +3540,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_backup_summary = session.pop("fab_last_backup_summary", None)
         last_close_pack_summary = session.pop("fab_last_close_pack_summary", None)
         last_scheduled_report_summary = session.pop("fab_last_scheduled_report_summary", None)
+        last_notification_refresh_summary = session.pop("fab_last_notification_refresh_summary", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3459,6 +3569,9 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "financialReport": financial_report,
             "reportScheduleStatus": report_schedule_status,
             "financialReportRuns": financial_report_runs,
+            "notifications": notifications,
+            "notificationSummary": notification_summary,
+            "notificationPreferences": notification_preferences,
             "bankTransactions": bank_transactions,
             "bankStatementImports": bank_statement_imports,
             "mijngeldzakenControl": mijngeldzaken_control,
@@ -3494,6 +3607,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastBackupSummary": last_backup_summary,
             "lastClosePackSummary": last_close_pack_summary,
             "lastScheduledReportSummary": last_scheduled_report_summary,
+            "lastNotificationRefreshSummary": last_notification_refresh_summary,
         }
         return render_template_string(
             DASHBOARD_TEMPLATE,
@@ -3552,6 +3666,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 {"label": "Wave Ops", "value": metrics["wave_operation_snapshots"]},
                 {"label": "Wave Entities", "value": metrics["wave_entities"]},
                 {"label": "Report Runs", "value": metrics["financial_report_runs"]},
+                {"label": "Unread Alerts", "value": metrics["unread_notifications"]},
                 {"label": "Audit Events", "value": metrics["audit_events"]},
             ],
             metrics=metrics,
@@ -3562,6 +3677,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             pretty_json=_pretty_json,
             processing_summary=last_processing_summary,
             operations_health=operations_health,
+            notifications=notifications,
+            notification_summary=notification_summary,
+            notification_preferences=notification_preferences,
+            notification_refresh_summary=last_notification_refresh_summary,
             readiness=readiness,
             raw_payload=_pretty_json(raw_payload),
             record_refresh_summary=last_record_refresh_summary,
@@ -3592,6 +3711,98 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.get("/api/dashboard")
     def dashboard():
         return jsonify(ledger.dashboard_metrics())
+
+    @app.get("/api/notifications")
+    def notifications_api():
+        return jsonify({
+            "notifications": LocalNotificationService(ledger, config).list_notifications(
+                status=request.args.get("status"),
+                severity=request.args.get("severity"),
+                event_type=request.args.get("eventType") or request.args.get("event_type"),
+                limit=_limit_arg(),
+            ),
+            "summary": LocalNotificationService(ledger, config).summary(),
+            "externalDelivery": "not_executed",
+        })
+
+    @app.post("/api/notifications/refresh")
+    def refresh_notifications_api():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(LocalNotificationService(ledger, config).refresh(
+            actor=payload.get("actor") or "local_api",
+        ))
+
+    @app.post("/notifications/refresh")
+    def refresh_notifications_form():
+        session["fab_last_notification_refresh_summary"] = LocalNotificationService(
+            ledger,
+            config,
+        ).refresh(actor="local_dashboard")
+        return redirect(url_for("dashboard_page", _anchor="notifications"))
+
+    @app.route("/api/notifications/<int:notification_id>/status", methods=["POST", "PATCH"])
+    def notification_status_api(notification_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalNotificationService(ledger, config).update_status(
+                notification_id,
+                payload.get("status"),
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid", "error": str(exc)}), 400
+        return jsonify(result), 200 if result.get("success") else 404
+
+    @app.post("/notifications/<int:notification_id>/status")
+    def notification_status_form(notification_id: int):
+        try:
+            LocalNotificationService(ledger, config).update_status(
+                notification_id,
+                request.form.get("status"),
+                actor="local_dashboard",
+            )
+        except ValueError as exc:
+            session["fab_last_notification_refresh_summary"] = {
+                "success": False,
+                "status": "invalid",
+                "error": str(exc),
+            }
+        return redirect(url_for("dashboard_page", _anchor="notifications"))
+
+    @app.get("/api/notification-preferences")
+    def notification_preferences_api():
+        return jsonify({
+            "notificationPreferences": ledger.list_notification_preferences(limit=_limit_arg()),
+            "externalDelivery": "disabled",
+        })
+
+    @app.post("/api/notification-preferences")
+    def update_notification_preference_api():
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(LocalNotificationService(ledger, config).update_preference(
+                payload,
+                actor=payload.get("actor") or "local_api",
+            ))
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid", "error": str(exc)}), 400
+
+    @app.post("/notification-preferences")
+    def notification_preference_form():
+        try:
+            LocalNotificationService(ledger, config).update_preference({
+                "eventType": request.form.get("eventType"),
+                "enabled": "enabled" in request.form,
+                "inAppEnabled": "inAppEnabled" in request.form,
+                "minimumSeverity": request.form.get("minimumSeverity") or "low",
+            }, actor="local_dashboard")
+        except ValueError as exc:
+            session["fab_last_notification_refresh_summary"] = {
+                "success": False,
+                "status": "invalid_preference",
+                "error": str(exc),
+            }
+        return redirect(url_for("dashboard_page", _anchor="notifications"))
 
     @app.get("/api/exceptions")
     def exceptions_api():
