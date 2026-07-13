@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
@@ -76,7 +77,59 @@ class LocalConnectorIntakeService:
                 "externalSubmission": "not_executed",
             },
         })
-        results = [self._sync_source(source) for source in selected]
+        results = []
+        for step_order, source in enumerate(selected, start=1):
+            source_plan = self._source_plan(source)
+            step_metadata = {
+                "label": source_plan.get("label"),
+                "mode": source_plan.get("mode"),
+                "configured": source_plan.get("configured"),
+                "enabled": source_plan.get("enabled"),
+                "canSync": source_plan.get("canSync"),
+                "externalSubmission": "not_executed",
+            }
+            workflow_step_id = self.ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": f"source:{source}",
+                "stage": "collect",
+                "status": "pending",
+                "stepOrder": step_order,
+                "metadata": step_metadata,
+            })
+            started = time.perf_counter()
+            self.ledger.update_workflow_step(workflow_step_id, {
+                "status": "running",
+                "startedAt": _now(),
+            })
+            try:
+                result = self._sync_source(source)
+            except Exception as exc:
+                error = _safe_error(exc, self.config) or type(exc).__name__
+                result = {
+                    "source": source,
+                    "sourceAccountId": None,
+                    "status": "failed",
+                    "seen": 0,
+                    "registered": 0,
+                    "duplicates": 0,
+                    "revisions": 0,
+                    "alreadyRegistered": 0,
+                    "skipped": 0,
+                    "error": error,
+                    "externalSubmission": "not_executed",
+                }
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            self.ledger.update_workflow_step(workflow_step_id, {
+                "status": _connector_step_status(result.get("status")),
+                "finishedAt": _now(),
+                "durationMs": duration_ms,
+                "errorMessage": result.get("error"),
+                "metadata": {
+                    **step_metadata,
+                    "result": _compact_connector_step_result(result),
+                },
+            })
+            results.append(result)
         summary = _summarize(results)
         failures = [item for item in results if item["status"] in {"failed", "partial"}]
         attention = [
@@ -475,6 +528,36 @@ def _summarize(results: list) -> Dict[str, int]:
         if item.get("status") in {"failed", "partial"}:
             summary["failedSources"] += 1
     return summary
+
+
+def _connector_step_status(status: Any) -> str:
+    normalized = str(status or "failed").strip().lower()
+    if normalized in {"ready", "completed"}:
+        return "completed"
+    if normalized in {"failed", "partial", "error", "completed_with_errors"}:
+        return "failed"
+    return "skipped"
+
+
+def _compact_connector_step_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    keys = (
+        "source",
+        "sourceAccountId",
+        "status",
+        "seen",
+        "registered",
+        "duplicates",
+        "revisions",
+        "alreadyRegistered",
+        "skipped",
+        "nextAction",
+        "externalSubmission",
+    )
+    return {
+        key: result.get(key)
+        for key in keys
+        if result.get(key) is not None
+    }
 
 
 def _configured_bool(config: Dict[str, Any], *keys: str, default: bool) -> bool:

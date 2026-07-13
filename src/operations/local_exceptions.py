@@ -87,7 +87,7 @@ class LocalExceptionQueueService:
             route = self.ledger.get_routing_attempt(parsed_id)
             return _routing_summary(route) if route else None
         if entity_type == "workflow_run" and parsed_id is not None:
-            run = _find_by_id(self.ledger.list_workflow_runs(limit=500), parsed_id)
+            run = self.ledger.get_workflow_run_with_steps(parsed_id)
             return _workflow_summary(run) if run else None
         return None
 
@@ -320,7 +320,13 @@ def _actions_for_issue(issue: Dict[str, Any]) -> List[Dict[str, Any]]:
     if entity_type == "routing_attempt" and entity_id:
         actions.append(_action("open_routing_attempts", "GET", f"/api/routing?id={entity_id}", "read_only"))
     if entity_type == "workflow_run" and entity_id:
-        actions.append(_action("open_autonomy_plan", "GET", "/api/autonomy/plan", "read_only"))
+        actions.append(_action(
+            "open_workflow_run",
+            "GET",
+            f"/api/workflows/{entity_id}",
+            "read_only",
+            dashboard_path="/#workflows",
+        ))
     if issue_type == "master_ledger_blockers":
         actions.append(_action("open_master_ledger", "GET", "/api/master-ledger", "read_only"))
     return actions
@@ -418,6 +424,11 @@ def _routing_summary(route: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
+    steps = run.get("steps") or []
+    step_summary: Dict[str, int] = {}
+    for step in steps:
+        status = str(step.get("status") or "unknown")
+        step_summary[status] = step_summary.get(status, 0) + 1
     return {
         "id": run.get("id"),
         "status": run.get("status"),
@@ -425,6 +436,18 @@ def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
         "errorMessage": run.get("error_message"),
         "startedAt": run.get("started_at"),
         "finishedAt": run.get("finished_at"),
+        "stepSummary": step_summary,
+        "failedSteps": [
+            {
+                "id": step.get("id"),
+                "stepKey": step.get("step_key"),
+                "stage": step.get("stage"),
+                "status": step.get("status"),
+                "errorMessage": step.get("error_message"),
+            }
+            for step in steps
+            if step.get("status") in {"failed", "blocked"}
+        ],
     }
 
 

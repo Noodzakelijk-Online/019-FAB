@@ -224,8 +224,56 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(export_attempts[0]["external_submission"], "not_executed")
             audit_actions = [event["action"] for event in client.get("/api/audit").get_json()["auditEvents"]]
             self.assertIn("local_autonomy.cycle_started", audit_actions)
+            workflow = client.get(f"/api/workflows/{payload['workflowRunId']}").get_json()
+            self.assertEqual(len(workflow["steps"]), 12)
+            self.assertEqual(workflow["steps"][0]["step_key"], "rescan_intake")
+            self.assertEqual(workflow["steps"][0]["status"], "completed")
+            self.assertGreaterEqual(workflow["steps"][0]["duration_ms"], 0)
+            self.assertEqual(workflow["stepSummary"]["completed"], len(payload["executedActions"]))
+            self.assertEqual(workflow["stepSummary"]["skipped"], len(payload["skippedActions"]))
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_master_ledger.projection_prepared", audit_actions)
+
+    def test_autonomy_failure_marks_failed_step_and_remaining_steps_not_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(
+                ledger,
+                {
+                    "fab_autonomy_ignore_health_blocks": True,
+                    "api_token": "sensitive-value",
+                },
+                intake_paths=[intake_dir],
+            )
+
+            with patch.object(
+                service,
+                "_run_rescan",
+                side_effect=RuntimeError(
+                    "sensitive-value was rejected; access_token=unknown-secret"
+                ),
+            ):
+                result = service.run_cycle(
+                    include_wave_plan=False,
+                    include_wave_sync=False,
+                )
+
+            steps = ledger.list_workflow_steps(
+                workflow_run_id=result["workflowRunId"],
+                limit=100,
+            )
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "failed")
+            self.assertNotIn("sensitive-value", result["error"])
+            self.assertNotIn("unknown-secret", result["error"])
+            self.assertEqual(steps[0]["step_key"], "rescan_intake")
+            self.assertEqual(steps[0]["status"], "failed")
+            self.assertNotIn("sensitive-value", steps[0]["error_message"])
+            self.assertNotIn("unknown-secret", steps[0]["error_message"])
+            self.assertTrue(all(step["status"] == "not_run" for step in steps[1:]))
+            self.assertTrue(all(step["finished_at"] for step in steps))
 
     def test_autonomy_surfaces_and_prepares_mijngeldzaken_downstream_routes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

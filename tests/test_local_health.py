@@ -28,6 +28,21 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["issues"], [])
             self.assertEqual(health["metrics"]["openReviewItems"], 0)
 
+    def test_health_flags_completed_workflow_with_step_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "completed_with_errors",
+                "triggerSource": "connector_intake",
+                "errorMessage": "One source failed",
+            })
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            issue = next(item for item in health["issues"] if item["type"] == "failed_workflow_run")
+            self.assertEqual(issue["entityId"], str(workflow_run_id))
+            self.assertEqual(health["metrics"]["failedWorkflowRuns"], 1)
+
     def test_health_flags_failed_and_stale_source_connectors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

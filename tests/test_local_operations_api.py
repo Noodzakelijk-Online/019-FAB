@@ -11,6 +11,51 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_workflow_run_api_and_dashboard_expose_step_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "completed_with_errors",
+                "triggerSource": "connector_intake",
+                "startedAt": "2026-07-13T08:00:00Z",
+                "finishedAt": "2026-07-13T08:00:02Z",
+            })
+            ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": "source:gmail",
+                "stage": "collect",
+                "status": "failed",
+                "stepOrder": 1,
+                "durationMs": 2000,
+                "errorMessage": "Provider timeout",
+            })
+            ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": "source:google_drive",
+                "stage": "collect",
+                "status": "not_run",
+                "stepOrder": 2,
+                "durationMs": 0,
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            listing = client.get("/api/workflows?triggerSource=connector_intake").get_json()
+            detail = client.get(f"/api/workflows/{workflow_run_id}").get_json()
+            missing = client.get("/api/workflows/999999")
+            html = client.get("/").data.decode("utf-8")
+
+            self.assertEqual(listing["workflowRuns"][0]["id"], workflow_run_id)
+            self.assertEqual(detail["steps"][0]["step_key"], "source:gmail")
+            self.assertEqual(detail["stepSummary"]["failed"], 1)
+            self.assertEqual(detail["stepSummary"]["not_run"], 1)
+            self.assertEqual(missing.status_code, 404)
+            self.assertIn("Workflow Runs", html)
+            self.assertIn("source:gmail", html)
+            self.assertIn("Not run", html)
+            self.assertIn(f"/api/workflows/{workflow_run_id}", html)
+
     def test_compliance_assessment_findings_retention_and_dashboard(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

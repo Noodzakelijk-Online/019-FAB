@@ -1,4 +1,6 @@
 from datetime import date, datetime, timezone
+import re
+import time
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -35,6 +37,20 @@ AUTONOMOUS_TRIGGER = "local_autonomous_cycle"
 AUTONOMY_LEASE_NAME = "local_autonomous_cycle"
 WAVE_ENTITY_TARGETS = ("waveapps_business", "waveapps_personal")
 WAVE_ENTITY_TYPES = ("customer", "product", "invoice")
+AUTONOMY_EXECUTION_ORDER = (
+    "rescan_intake",
+    "process_imported",
+    "refresh_bank_records",
+    "run_reconciliation",
+    "refresh_wave_entity_mirror",
+    "prepare_wave_drafts",
+    "prepare_export_attempts",
+    "regenerate_stale_export_attempts",
+    "execute_approved_exports",
+    "prepare_master_ledger_projection",
+    "plan_wave_daily_reconciliation",
+    "prepare_period_close_pack",
+)
 
 
 class LocalAutonomousService:
@@ -531,6 +547,92 @@ class LocalAutonomousService:
         skipped: List[Dict[str, Any]] = []
         status = "completed"
         error_message = None
+        failed_step_key = None
+        plan_actions = {
+            action["id"]: action
+            for action in plan.get("actions") or []
+            if action.get("id")
+        }
+        ordered_action_ids = [
+            action_id
+            for action_id in AUTONOMY_EXECUTION_ORDER
+            if action_id in plan_actions
+        ]
+        step_metadata: Dict[str, Dict[str, Any]] = {}
+        step_ids: Dict[str, int] = {}
+        for step_order, action_id in enumerate(ordered_action_ids, start=1):
+            action = plan_actions[action_id]
+            metadata = {
+                "label": action.get("label"),
+                "risk": action.get("risk"),
+                "mode": action.get("mode"),
+                "canRun": action.get("canRun"),
+                "blockedReason": action.get("blockedReason"),
+                "evidence": _bounded_step_value(action.get("evidence") or {}),
+                "externalSubmission": "not_executed",
+            }
+            step_metadata[action_id] = metadata
+            step_ids[action_id] = self.ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": action_id,
+                "stage": action.get("stage"),
+                "status": "pending",
+                "stepOrder": step_order,
+                "metadata": metadata,
+            })
+
+        def execute_step(action_id: str, should_run: bool, callback) -> Dict[str, Any]:
+            nonlocal failed_step_key
+            step_id = step_ids[action_id]
+            if not should_run:
+                result = self._skip(plan, action_id)
+                self.ledger.update_workflow_step(step_id, {
+                    "status": "skipped",
+                    "finishedAt": _utc_timestamp(),
+                    "durationMs": 0,
+                    "metadata": {
+                        **step_metadata[action_id],
+                        "result": _compact_step_result(result),
+                    },
+                })
+                skipped.append(result)
+                return result
+
+            started_at = _utc_timestamp()
+            started = time.perf_counter()
+            self.ledger.update_workflow_step(step_id, {
+                "status": "running",
+                "startedAt": started_at,
+            })
+            try:
+                result = callback()
+            except Exception as exc:
+                failed_step_key = action_id
+                safe_error = _safe_error_message(exc, self.config)
+                self.ledger.update_workflow_step(step_id, {
+                    "status": "failed",
+                    "finishedAt": _utc_timestamp(),
+                    "durationMs": int((time.perf_counter() - started) * 1000),
+                    "errorMessage": safe_error,
+                    "metadata": {
+                        **step_metadata[action_id],
+                        "exceptionType": type(exc).__name__,
+                    },
+                })
+                raise
+
+            self.ledger.update_workflow_step(step_id, {
+                "status": _workflow_step_status(result),
+                "finishedAt": _utc_timestamp(),
+                "durationMs": int((time.perf_counter() - started) * 1000),
+                "metadata": {
+                    **step_metadata[action_id],
+                    "result": _compact_step_result(result),
+                },
+            })
+            executed.append(result)
+            return result
+
         self.ledger.record_audit_event({
             "action": "local_autonomy.cycle_started",
             "entityType": "workflow_run",
@@ -542,79 +644,102 @@ class LocalAutonomousService:
         })
 
         try:
-            if self._can_run(plan, "rescan_intake"):
-                executed.append(self._run_rescan())
-            else:
-                skipped.append(self._skip(plan, "rescan_intake"))
+            execute_step(
+                "rescan_intake",
+                self._can_run(plan, "rescan_intake"),
+                self._run_rescan,
+            )
 
             processing_should_run = self._can_run(plan, "process_imported") or _registered_documents(executed)
-            if processing_should_run:
-                executed.append(self._run_processing(limit))
-            else:
-                skipped.append(self._skip(plan, "process_imported"))
+            execute_step(
+                "process_imported",
+                processing_should_run,
+                lambda: self._run_processing(limit),
+            )
 
-            if self._can_run(plan, "refresh_bank_records"):
-                executed.append(self._run_bank_record_refresh(limit))
-            else:
-                skipped.append(self._skip(plan, "refresh_bank_records"))
+            execute_step(
+                "refresh_bank_records",
+                self._can_run(plan, "refresh_bank_records"),
+                lambda: self._run_bank_record_refresh(limit),
+            )
 
-            if self._can_run(plan, "run_reconciliation"):
-                executed.append(self._run_reconciliation(bank_transactions, limit))
-            else:
-                skipped.append(self._skip(plan, "run_reconciliation"))
+            execute_step(
+                "run_reconciliation",
+                self._can_run(plan, "run_reconciliation"),
+                lambda: self._run_reconciliation(bank_transactions, limit),
+            )
 
-            if self._can_run(plan, "refresh_wave_entity_mirror"):
-                sync_action = next(
-                    action for action in plan["actions"]
-                    if action["id"] == "refresh_wave_entity_mirror"
-                )
-                executed.append(self._run_wave_entity_sync(sync_action["evidence"]["dueTargets"]))
-            else:
-                skipped.append(self._skip(plan, "refresh_wave_entity_mirror"))
+            sync_action = plan_actions["refresh_wave_entity_mirror"]
+            execute_step(
+                "refresh_wave_entity_mirror",
+                self._can_run(plan, "refresh_wave_entity_mirror"),
+                lambda: self._run_wave_entity_sync(sync_action["evidence"]["dueTargets"]),
+            )
 
             routing_should_run = (
                 self._can_run(plan, "prepare_wave_drafts")
                 or _processed_documents(executed)
                 or _refreshed_bank_records(executed)
             )
-            if routing_should_run:
-                executed.append(self._run_routing(limit))
-            else:
-                skipped.append(self._skip(plan, "prepare_wave_drafts"))
+            execute_step(
+                "prepare_wave_drafts",
+                routing_should_run,
+                lambda: self._run_routing(limit),
+            )
 
             export_attempt_should_run = self._can_run(plan, "prepare_export_attempts") or self._has_prepared_routes()
-            if export_attempt_should_run:
-                executed.append(self._run_export_attempt_preparation(limit))
-            else:
-                skipped.append(self._skip(plan, "prepare_export_attempts"))
+            execute_step(
+                "prepare_export_attempts",
+                export_attempt_should_run,
+                lambda: self._run_export_attempt_preparation(limit),
+            )
 
-            if self._can_run(plan, "regenerate_stale_export_attempts"):
-                executed.append(self._run_stale_export_regeneration(limit))
-            else:
-                skipped.append(self._skip(plan, "regenerate_stale_export_attempts"))
+            execute_step(
+                "regenerate_stale_export_attempts",
+                self._can_run(plan, "regenerate_stale_export_attempts"),
+                lambda: self._run_stale_export_regeneration(limit),
+            )
 
-            if self._can_run(plan, "execute_approved_exports"):
-                executed.append(self._run_export_execution(limit))
-            else:
-                skipped.append(self._skip(plan, "execute_approved_exports"))
+            execute_step(
+                "execute_approved_exports",
+                self._can_run(plan, "execute_approved_exports"),
+                lambda: self._run_export_execution(limit),
+            )
 
-            if self._can_run(plan, "prepare_master_ledger_projection") or _records_or_exports_changed(executed):
-                executed.append(self._run_master_ledger_projection(limit))
-            else:
-                skipped.append(self._skip(plan, "prepare_master_ledger_projection"))
+            execute_step(
+                "prepare_master_ledger_projection",
+                self._can_run(plan, "prepare_master_ledger_projection") or _records_or_exports_changed(executed),
+                lambda: self._run_master_ledger_projection(limit),
+            )
 
-            if self._can_run(plan, "plan_wave_daily_reconciliation"):
-                executed.append(self._run_wave_plan())
-            else:
-                skipped.append(self._skip(plan, "plan_wave_daily_reconciliation"))
+            execute_step(
+                "plan_wave_daily_reconciliation",
+                self._can_run(plan, "plan_wave_daily_reconciliation"),
+                self._run_wave_plan,
+            )
 
-            if self._can_run(plan, "prepare_period_close_pack"):
-                executed.append(self._run_period_close_pack())
-            else:
-                skipped.append(self._skip(plan, "prepare_period_close_pack"))
+            execute_step(
+                "prepare_period_close_pack",
+                self._can_run(plan, "prepare_period_close_pack"),
+                self._run_period_close_pack,
+            )
         except Exception as exc:
             status = "failed"
-            error_message = str(exc)
+            error_message = _safe_error_message(exc, self.config)
+            for action_id, step_id in step_ids.items():
+                step = self.ledger.get_workflow_step(step_id)
+                if not step or step.get("status") != "pending":
+                    continue
+                self.ledger.update_workflow_step(step_id, {
+                    "status": "not_run",
+                    "finishedAt": _utc_timestamp(),
+                    "durationMs": 0,
+                    "metadata": {
+                        **step_metadata[action_id],
+                        "reason": "cycle_aborted_after_step_failure",
+                        "failedAfterStep": failed_step_key,
+                    },
+                })
             self.ledger.record_audit_event({
                 "action": "local_autonomy.cycle_failed",
                 "entityType": "workflow_run",
@@ -637,7 +762,19 @@ class LocalAutonomousService:
             "documentsProcessed": _sum_nested(executed, "summary", "processed"),
             "documentsNeedingReview": final_metrics["pending_review"],
             "errorMessage": error_message,
-            "finishedAt": date.today().isoformat(),
+            "finishedAt": _utc_timestamp(),
+            "metadata": {
+                "plan": {
+                    "status": plan["status"],
+                    "runnableActionIds": plan["runnableActionIds"],
+                    "externalSubmission": "not_executed",
+                },
+                "steps": {
+                    "executed": [action["id"] for action in executed],
+                    "skipped": [action["id"] for action in skipped],
+                    "failed": failed_step_key,
+                },
+            },
         })
         self.ledger.record_audit_event({
             "action": "local_autonomy.cycle_completed" if status == "completed" else "local_autonomy.cycle_finished_with_error",
@@ -1087,6 +1224,73 @@ def _action(
         "blockedReason": blocked_reason,
         "evidence": evidence or {},
     }
+
+
+def _workflow_step_status(result: Dict[str, Any]) -> str:
+    result_status = str(result.get("status") or "completed").strip().lower()
+    if result_status in {"failed", "error", "partial", "completed_with_errors"}:
+        return "failed"
+    if result_status in {"blocked", "attention", "attention_required", "supervision_required"}:
+        return "blocked"
+    if result_status == "skipped":
+        return "skipped"
+    return "completed"
+
+
+def _compact_step_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    compact = {
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+    }
+    if "summary" in result:
+        compact["summary"] = _bounded_step_value(result.get("summary"))
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def _bounded_step_value(value: Any, depth: int = 0) -> Any:
+    if depth >= 3:
+        if isinstance(value, (dict, list, tuple)):
+            return {"count": len(value)}
+        return str(value)[:300]
+    if isinstance(value, dict):
+        return {
+            str(key)[:100]: _bounded_step_value(item, depth + 1)
+            for key, item in list(value.items())[:25]
+        }
+    if isinstance(value, (list, tuple)):
+        return {"count": len(value)}
+    if isinstance(value, str):
+        return value[:500]
+    return value
+
+
+def _safe_error_message(error: Any, config: Dict[str, Any]) -> str:
+    message = str(error) or type(error).__name__
+    secret_markers = ("token", "password", "secret", "credential", "authorization", "api_key", "apikey")
+    for key, value in config.items():
+        if value in (None, "") or not any(marker in str(key).lower() for marker in secret_markers):
+            continue
+        message = message.replace(str(value), "<redacted>")
+    message = re.sub(
+        r"(?i)((?:access[_-]?token|refresh[_-]?token|token|password|secret|(?:x[_-]?)?api[_-]?key)\s*[:=]\s*)[^&,;\s]+",
+        r"\1<redacted>",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^,;\s]+",
+        r"\1<redacted>",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"\1<redacted>",
+        message,
+    )
+    return message[:2000]
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _compact_readiness(readiness: Dict[str, Any]) -> Dict[str, Any]:

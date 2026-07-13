@@ -254,7 +254,7 @@ The current repository already contains many module-level foundations for this v
 - Processing should move toward queued jobs and workers.
 - Backups need to cover database state, original documents, generated artifacts, and configuration.
 - Restore operations need safety checks, audit logging, and user-facing status.
-- Performance metrics should be captured by workflow step and source.
+- Durable step evidence now covers autonomous actions and connector sources; restartable per-step retries and resume-from-failure policies remain open.
 
 ## Recommended Delivery Sequence
 
@@ -279,9 +279,9 @@ The current repository already contains many module-level foundations for this v
 
 ### Phase 3: Workflow Orchestration
 
-- Persist each workflow run and step result.
+- Persist each workflow run and step result. Implemented for the local autonomous cycle and connector intake.
 - Add resumable processing and retries.
-- Add integration status and error visibility to the dashboard.
+- Add integration status and error visibility to the dashboard. Implemented through Workflow Runs, `/api/workflows`, health, and exception links.
 - Connect the Python workflow to the web API or move orchestration behind a worker/job boundary.
 
 ### Phase 4: Platform Integrations and Reconciliation
@@ -306,11 +306,4 @@ The current repository already contains many module-level foundations for this v
 
 ## Immediate Next Build Target
 
-The best first product increment is:
-
-1. Stabilize the Python test suite enough to trust the core workflow.
-2. Add persistent tables for documents, review queue items, vendors, categories, and workflow runs.
-3. Build the first manual-review admin page in the web app.
-4. Wire the existing Python manual-review queue into the database-backed review model.
-
-This creates the backbone for nearly every other FAB capability: validation, categorization feedback, duplicate resolution, audit logs, notifications, reporting, and integration retry handling.
+The persistent operating backbone, review surface, and workflow-step evidence are now present. The next orchestration increment is resumable execution: explicit retry policies per step, dependency-aware resume from the first safe incomplete boundary, and crash-recovery tests that prove no external action is replayed without its approval and idempotency evidence.

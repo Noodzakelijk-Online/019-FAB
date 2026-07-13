@@ -50,6 +50,12 @@ class TestLocalExceptionQueueService(unittest.TestCase):
             self.assertEqual(failed_export["entity"]["externalSubmission"], "failed")
             self.assertIn("reject_export_attempt", {action["id"] for action in failed_export["actions"]})
             self.assertEqual(failed_workflow["entity"]["errorMessage"], "Pipeline crashed")
+            workflow_action = next(
+                action for action in failed_workflow["actions"]
+                if action["id"] == "open_workflow_run"
+            )
+            self.assertEqual(workflow_action["path"], f"/api/workflows/{workflow_id}")
+            self.assertEqual(workflow_action["dashboardPath"], "/#workflows")
 
     def test_api_exposes_exception_queue_and_dashboard_section(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -547,6 +547,32 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS workflow_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    workflow_run_id INTEGER NOT NULL,
+                    step_key TEXT NOT NULL,
+                    stage TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    step_order INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    duration_ms INTEGER,
+                    error_message TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(workflow_run_id, step_key, attempt),
+                    FOREIGN KEY(workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_workflow_steps_run
+                    ON workflow_steps(workflow_run_id, step_order, id);
+                CREATE INDEX IF NOT EXISTS idx_local_workflow_steps_status
+                    ON workflow_steps(status);
+                CREATE INDEX IF NOT EXISTS idx_local_workflow_steps_key
+                    ON workflow_steps(step_key);
+
                 CREATE TABLE IF NOT EXISTS runtime_leases (
                     lease_name TEXT PRIMARY KEY,
                     owner_token TEXT NOT NULL,
@@ -996,6 +1022,89 @@ class LocalOperationsLedger:
                 (workflow_run_id,),
             ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def create_workflow_step(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
+        workflow_run_id = self._optional_int(
+            self._payload_value(payload, "workflowRunId", "workflow_run_id")
+        )
+        if workflow_run_id is None:
+            raise ValueError("Workflow run id is required")
+        step_key = str(self._payload_value(payload, "stepKey", "step_key") or "").strip()
+        if not step_key:
+            raise ValueError("Workflow step key is required")
+        now = self._now()
+        status = str(payload.get("status") or "pending").strip() or "pending"
+        started_at = self._date_text(self._payload_value(payload, "startedAt", "started_at"))
+        if status == "running" and not started_at:
+            started_at = now
+        error_message = self._payload_value(payload, "errorMessage", "error_message")
+        values = {
+            "id": preferred_id,
+            "workflow_run_id": workflow_run_id,
+            "step_key": step_key[:200],
+            "stage": self._payload_value(payload, "stage"),
+            "status": status[:80],
+            "attempt": max(1, self._int(payload.get("attempt"), 1)),
+            "step_order": max(
+                0,
+                self._int(self._payload_value(payload, "stepOrder", "step_order"), 0),
+            ),
+            "started_at": started_at,
+            "finished_at": self._date_text(
+                self._payload_value(payload, "finishedAt", "finished_at")
+            ),
+            "duration_ms": self._nonnegative_optional_int(
+                self._payload_value(payload, "durationMs", "duration_ms")
+            ),
+            "error_message": str(error_message)[:2000] if error_message else None,
+            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
+            "created_at": now,
+            "updated_at": now,
+        }
+        return self._insert("workflow_steps", values)
+
+    def update_workflow_step(self, workflow_step_id: int, payload: Dict[str, Any]) -> None:
+        error_message = self._payload_value(payload, "errorMessage", "error_message")
+        fields = {
+            "stage": payload.get("stage"),
+            "status": payload.get("status"),
+            "started_at": self._date_text(
+                self._payload_value(payload, "startedAt", "started_at")
+            ),
+            "finished_at": self._date_text(
+                self._payload_value(payload, "finishedAt", "finished_at")
+            ),
+            "duration_ms": self._nonnegative_optional_int(
+                self._payload_value(payload, "durationMs", "duration_ms")
+            ),
+            "error_message": str(error_message)[:2000] if error_message else None,
+            "metadata_json": (
+                self._json(self._redact_sensitive(payload.get("metadata")))
+                if "metadata" in payload
+                else None
+            ),
+            "updated_at": self._now(),
+        }
+        self._update("workflow_steps", workflow_step_id, fields)
+
+    def get_workflow_step(self, workflow_step_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_steps WHERE id = ? LIMIT 1",
+                (workflow_step_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_workflow_run_with_steps(self, workflow_run_id: int) -> Optional[Dict[str, Any]]:
+        workflow_run = self.get_workflow_run(workflow_run_id)
+        if workflow_run is None:
+            return None
+        workflow_run["steps"] = self.list_workflow_steps(
+            workflow_run_id=workflow_run_id,
+            limit=500,
+        )
+        workflow_run["step_count"] = len(workflow_run["steps"])
+        return workflow_run
 
     def register_document(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         now = self._now()
@@ -3358,6 +3467,13 @@ class LocalOperationsLedger:
                     "status IN ('open', 'acknowledged') AND severity = 'high'",
                 ),
                 "retention_records": self._count(connection, "retention_records"),
+                "workflow_runs": self._count(connection, "workflow_runs"),
+                "workflow_steps": self._count(connection, "workflow_steps"),
+                "failed_workflow_steps": self._count(
+                    connection,
+                    "workflow_steps",
+                    "status = 'failed'",
+                ),
                 "audit_events": self._count(connection, "audit_events"),
             }
 
@@ -3387,6 +3503,32 @@ class LocalOperationsLedger:
         if where:
             query = f"{query} WHERE {' AND '.join(where)}"
         query = f"{query} ORDER BY updated_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_workflow_steps(
+        self,
+        workflow_run_id: Optional[int] = None,
+        status: Optional[Any] = None,
+        step_key: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM workflow_steps"
+        params = []
+        where = []
+        if workflow_run_id is not None:
+            where.append("workflow_run_id = ?")
+            params.append(int(workflow_run_id))
+        self._append_status_filter(where, params, "status", status)
+        if step_key:
+            where.append("step_key = ?")
+            params.append(str(step_key))
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY workflow_run_id DESC, step_order ASC, attempt ASC, id ASC LIMIT ?"
         params.append(limit)
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -4756,6 +4898,11 @@ class LocalOperationsLedger:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def _nonnegative_optional_int(cls, value: Any) -> Optional[int]:
+        parsed = cls._optional_int(value)
+        return max(0, parsed) if parsed is not None else None
 
     @staticmethod
     def _first_present(*values: Any) -> Any:

@@ -77,7 +77,7 @@ General application settings.
 
 Local operating ledger and optional web operations API settings.
 
-*   `local_ledger_enabled`: Set to `true` to persist workflow runs, document status, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events to local SQLite.
+*   `local_ledger_enabled`: Set to `true` to persist workflow runs and ordered step evidence, document status, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events to local SQLite.
 *   `ledger_path`: Path to the SQLite ledger file. On Windows, prefer a private folder such as `C:\Users\<you>\AppData\Local\FAB\fab_operations.sqlite3`.
 *   `api_host`: Host for the optional local operations API. Use `127.0.0.1` unless you intentionally expose FAB through a protected tunnel.
 *   `api_port`: Port for the optional local operations API. Default: `5001`.
@@ -101,6 +101,8 @@ Local operating ledger and optional web operations API settings.
 *   `timeout_seconds`: Request timeout for the optional web operations API.
 
 The local ledger does not store API tokens or passwords. It can store financial document metadata and OCR text, so keep the file out of Git and protect it like bookkeeping records.
+
+The Workflow Runs panel shows recent autonomous and connector-intake runs with ordered step status, attempt, start time, duration, error, and aborted downstream work. `GET /api/workflows` filters runs by `status` or `triggerSource`; `GET /api/workflows/{id}` returns the exact run and its redacted step evidence. A failed autonomous action stops dependent downstream work and marks it `not_run`. This evidence supports diagnosis but does not yet resume a process from the failed step automatically.
 Run the local API with:
 
 ```bash

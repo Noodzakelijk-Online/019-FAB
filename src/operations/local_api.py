@@ -190,16 +190,16 @@ DASHBOARD_TEMPLATE = """
       font-weight: 700;
       white-space: nowrap;
     }
-    .badge.failed, .badge.rejected { background: #fff1f0; color: var(--danger); }
+    .badge.failed, .badge.error, .badge.rejected { background: #fff1f0; color: var(--danger); }
     .badge.blocked, .badge.blocked_routing, .badge.blocked_by_review, .badge.blocked_invalid_plan, .badge.blocked_unapproved, .badge.high { background: #fff1f0; color: var(--danger); }
     .badge.pending, .badge.review, .badge.needs_review, .badge.in_review, .badge.candidate, .badge.suggested, .badge.missing_receipt, .badge.unmatched_document { background: #fff7e6; color: var(--warning); }
     .badge.attention, .badge.medium, .badge.low { background: #fff7e6; color: var(--warning); }
     .badge.needs_attention, .badge.needs_auth { background: #fff7e6; color: var(--warning); }
     .badge.safe_auto, .badge.safe_draft, .badge.read_only { background: #ecfdf3; color: var(--ok); }
-    .badge.review_required, .badge.approval_required, .badge.attention_required, .badge.deferred, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed, .badge.supervision_required, .badge.needs_configuration, .badge.partial, .badge.syncing { background: #fff7e6; color: var(--warning); }
+    .badge.review_required, .badge.approval_required, .badge.attention_required, .badge.completed_with_errors, .badge.deferred, .badge.awaiting_approval, .badge.approved_not_submitted, .badge.approved_not_executed, .badge.supervision_required, .badge.needs_configuration, .badge.partial, .badge.syncing, .badge.running { background: #fff7e6; color: var(--warning); }
     .badge.completed, .badge.approved, .badge.executed, .badge.submitted, .badge.resolved, .badge.validated, .badge.routed, .badge.reconciled, .badge.ok { background: #ecfdf3; color: var(--ok); }
     .badge.ready { background: #ecfdf3; color: var(--ok); }
-    .badge.not_configured, .badge.disabled { background: #f1f5f9; color: var(--muted); }
+    .badge.not_configured, .badge.disabled, .badge.skipped, .badge.not_run { background: #f1f5f9; color: var(--muted); }
     .review-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -354,6 +354,7 @@ DASHBOARD_TEMPLATE = """
       <a href="#close">Close</a>
       <a href="#sources">Sources</a>
       <a href="#autonomy">Autonomy</a>
+      <a href="#workflows">Runs</a>
       <a href="#intake">Intake</a>
       <a href="#ledger">Ledger</a>
       <a href="#groups">Groups</a>
@@ -903,6 +904,63 @@ DASHBOARD_TEMPLATE = """
         <summary>Raw autonomous plan</summary>
         <pre>{{ pretty_json(autonomy_plan) }}</pre>
       </details>
+    </section>
+
+    <section id="workflows">
+      <div class="section-head">
+        <div><h2>Workflow Runs</h2></div>
+        <a class="button-link secondary" href="{{ url_for('workflow_runs_api') }}">JSON</a>
+      </div>
+      {% if workflow_runs %}
+      {% for run in workflow_runs %}
+      <details {% if run.status in ["failed", "error", "completed_with_errors", "running"] or run.step_summary.get("failed", 0) or run.step_summary.get("blocked", 0) %}open{% endif %}>
+        <summary>
+          <span class="mono">#{{ run.id }}</span>
+          {{ run.trigger_source }}
+          <span class="badge {{ run.status }}">{{ run.status }}</span>
+        </summary>
+        <div class="summary-grid">
+          <div class="summary-item"><span>Started</span><strong class="mono">{{ run.started_at or "-" }}</strong></div>
+          <div class="summary-item"><span>Finished</span><strong class="mono">{{ run.finished_at or "-" }}</strong></div>
+          <div class="summary-item"><span>Steps</span><strong>{{ run.step_count }}</strong></div>
+          <div class="summary-item"><span>Completed</span><strong>{{ run.step_summary.get("completed", 0) }}</strong></div>
+          <div class="summary-item"><span>Skipped</span><strong>{{ run.step_summary.get("skipped", 0) }}</strong></div>
+          <div class="summary-item"><span>Failed</span><strong>{{ run.step_summary.get("failed", 0) }}</strong></div>
+          <div class="summary-item"><span>Blocked</span><strong>{{ run.step_summary.get("blocked", 0) }}</strong></div>
+          <div class="summary-item"><span>Not run</span><strong>{{ run.step_summary.get("not_run", 0) }}</strong></div>
+        </div>
+        {% if run.error_message %}<div class="empty">{{ run.error_message }}</div>{% endif %}
+        {% if run.steps %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Order</th><th>Step</th><th>Stage</th><th>Status</th><th>Attempt</th><th>Duration</th><th>Started</th><th>Error</th></tr></thead>
+            <tbody>
+            {% for step in run.steps %}
+              <tr>
+                <td>{{ step.step_order }}</td>
+                <td class="mono">{{ step.step_key }}</td>
+                <td>{{ step.stage or "-" }}</td>
+                <td><span class="badge {{ step.status }}">{{ step.status }}</span></td>
+                <td>{{ step.attempt }}</td>
+                <td>{% if step.duration_ms is not none %}{{ step.duration_ms }} ms{% else %}-{% endif %}</td>
+                <td class="mono">{{ step.started_at or "-" }}</td>
+                <td>{{ step.error_message or "-" }}</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="empty">No step evidence was recorded for this legacy workflow run.</div>
+        {% endif %}
+        <div class="inline-actions">
+          <a href="{{ url_for('workflow_detail_api', workflow_run_id=run.id) }}">Run JSON</a>
+        </div>
+      </details>
+      {% endfor %}
+      {% else %}
+      <div class="empty">No workflow runs recorded.</div>
+      {% endif %}
     </section>
 
     <section id="intake">
@@ -3729,6 +3787,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         category_summaries = ledger.list_category_summaries(limit=25)
         corrections = ledger.list_review_corrections(limit=25)
         audit_events = ledger.list_audit_events(limit=15)
+        workflow_runs = _workflow_runs_with_steps(ledger, limit=15)
         last_intake_summary = session.pop("fab_last_intake_summary", None)
         last_processing_summary = session.pop("fab_last_processing_summary", None)
         last_routing_summary = session.pop("fab_last_routing_summary", None)
@@ -3804,6 +3863,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "categories": category_summaries,
             "corrections": corrections,
             "auditEvents": audit_events,
+            "workflowRuns": workflow_runs,
             "health": health_payload,
             "lastIntakeSummary": last_intake_summary,
             "lastProcessingSummary": last_processing_summary,
@@ -3888,6 +3948,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 {"label": "Report Runs", "value": metrics["financial_report_runs"]},
                 {"label": "Unread Alerts", "value": metrics["unread_notifications"]},
                 {"label": "Compliance", "value": compliance_summary["openFindings"]},
+                {"label": "Workflow Steps", "value": metrics["workflow_steps"]},
                 {"label": "Audit Events", "value": metrics["audit_events"]},
             ],
             metrics=metrics,
@@ -3932,11 +3993,30 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             wave_sync_runs=wave_sync_runs,
             wave_entity_sync_summary=last_wave_entity_sync,
             wave_report_controls=wave_report_controls,
+            workflow_runs=workflow_runs,
         )
 
     @app.get("/api/dashboard")
     def dashboard():
         return jsonify(ledger.dashboard_metrics())
+
+    @app.get("/api/workflows")
+    def workflow_runs_api():
+        return jsonify({
+            "workflowRuns": ledger.list_workflow_runs(
+                status=request.args.get("status"),
+                trigger_source=request.args.get("triggerSource") or request.args.get("trigger_source"),
+                limit=_limit_arg(),
+            )
+        })
+
+    @app.get("/api/workflows/<int:workflow_run_id>")
+    def workflow_detail_api(workflow_run_id: int):
+        workflow_run = ledger.get_workflow_run_with_steps(workflow_run_id)
+        if workflow_run is None:
+            return jsonify({"error": "Workflow run not found"}), 404
+        workflow_run["stepSummary"] = _workflow_step_summary(workflow_run.get("steps") or [])
+        return jsonify(workflow_run)
 
     @app.get("/api/notifications")
     def notifications_api():
@@ -6546,6 +6626,27 @@ def _compact_connector_sync(result: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "externalSubmission": "not_executed",
     }
+
+
+def _workflow_runs_with_steps(ledger: LocalOperationsLedger, limit: int = 15) -> list:
+    workflow_runs = ledger.list_workflow_runs(limit=limit)
+    for workflow_run in workflow_runs:
+        steps = ledger.list_workflow_steps(
+            workflow_run_id=int(workflow_run["id"]),
+            limit=500,
+        )
+        workflow_run["steps"] = steps
+        workflow_run["step_count"] = len(steps)
+        workflow_run["step_summary"] = _workflow_step_summary(steps)
+    return workflow_runs
+
+
+def _workflow_step_summary(steps: list) -> Dict[str, int]:
+    summary: Dict[str, int] = {}
+    for step in steps:
+        status = str(step.get("status") or "unknown")
+        summary[status] = summary.get(status, 0) + 1
+    return summary
 
 
 def _compact_photos_picker_result(result: Dict[str, Any]) -> Dict[str, Any]:

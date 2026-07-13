@@ -7,6 +7,50 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_workflow_steps_are_ordered_filterable_and_redacted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "running",
+                "triggerSource": "test_cycle",
+            })
+            first_step_id = ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": "collect",
+                "stage": "collect",
+                "status": "pending",
+                "stepOrder": 1,
+                "metadata": {"apiToken": "must-not-persist", "scope": "receipts"},
+            })
+            ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": "extract",
+                "stage": "extract_validate",
+                "status": "skipped",
+                "stepOrder": 2,
+                "durationMs": -10,
+            })
+
+            ledger.update_workflow_step(first_step_id, {
+                "status": "completed",
+                "startedAt": "2026-07-13T08:00:00Z",
+                "finishedAt": "2026-07-13T08:00:01Z",
+                "durationMs": 1000,
+                "metadata": {"access_token": "must-not-persist", "registered": 2},
+            })
+
+            detail = ledger.get_workflow_run_with_steps(workflow_run_id)
+            completed = ledger.list_workflow_steps(status="completed")
+            metrics = ledger.dashboard_metrics()
+
+            self.assertEqual([step["step_key"] for step in detail["steps"]], ["collect", "extract"])
+            self.assertEqual(detail["step_count"], 2)
+            self.assertEqual(completed[0]["duration_ms"], 1000)
+            self.assertEqual(completed[0]["metadata"]["access_token"], "<redacted>")
+            self.assertEqual(detail["steps"][1]["duration_ms"], 0)
+            self.assertEqual(metrics["workflow_runs"], 1)
+            self.assertEqual(metrics["workflow_steps"], 2)
+
     def test_runtime_lease_is_atomic_owner_checked_and_redacted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -407,6 +451,9 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     "open_compliance_findings": 0,
                     "blocking_compliance_findings": 0,
                     "retention_records": 0,
+                    "workflow_runs": 0,
+                    "workflow_steps": 0,
+                    "failed_workflow_steps": 0,
                     "audit_events": 1,
                 },
             )

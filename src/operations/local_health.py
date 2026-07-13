@@ -17,7 +17,7 @@ ROUTING_BLOCK_STATUSES = (
 )
 PENDING_ROUTING_STATUSES = ("draft_prepared", "needs_confirmation", "queued")
 RUNNING_WORKFLOW_STATUSES = ("running",)
-FAILED_WORKFLOW_STATUSES = ("failed", "error")
+FAILED_WORKFLOW_STATUSES = ("failed", "error", "completed_with_errors")
 PICKER_ATTENTION_STATUSES = (
     "creating",
     "awaiting_user_selection",

@@ -80,6 +80,11 @@ class TestLocalConnectorIntake(unittest.TestCase):
             runs = ledger.list_workflow_runs(limit=10)
             self.assertEqual([run["status"] for run in runs[:2]], ["completed", "completed"])
             self.assertEqual(runs[0]["metadata"]["summary"]["alreadyRegistered"], 1)
+            steps = ledger.list_workflow_steps(workflow_run_id=runs[0]["id"])
+            self.assertEqual(len(steps), 1)
+            self.assertEqual(steps[0]["step_key"], "source:gmail")
+            self.assertEqual(steps[0]["status"], "completed")
+            self.assertEqual(steps[0]["metadata"]["result"]["alreadyRegistered"], 1)
             self.assertEqual(first["externalSubmission"], "not_executed")
 
     def test_changed_provider_document_creates_reviewable_revision(self):
@@ -140,6 +145,10 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertIn("[REDACTED]", result["results"][0]["error"])
             self.assertEqual(ledger.list_source_accounts(source_type="gmail")[0]["status"], "partial")
             self.assertEqual(len(ledger.list_documents()), 1)
+            workflow_run_id = result["workflowRunId"]
+            step = ledger.list_workflow_steps(workflow_run_id=workflow_run_id)[0]
+            self.assertEqual(step["status"], "failed")
+            self.assertNotIn("top-secret", step["error_message"])
 
     def test_download_outside_configured_root_fails_source_completeness(self):
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside_dir:
