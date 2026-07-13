@@ -127,6 +127,27 @@ class TestLocalNotificationService(unittest.TestCase):
             self.assertEqual(notification["event_type"], "source_connector_unavailable")
             self.assertEqual(notification["payload"]["dashboardPath"], "#sources")
 
+    def test_picker_session_alert_links_to_sources_dashboard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalNotificationService(ledger)
+
+            result = service.refresh({
+                "generatedAt": "2026-07-13T12:00:00Z",
+                "issues": [{
+                    "type": "stale_picker_session",
+                    "severity": "medium",
+                    "entityType": "workflow_run",
+                    "entityId": 7,
+                    "message": "Google Photos selection is waiting.",
+                }],
+            })
+
+            self.assertEqual(result["created"], 1)
+            notification = ledger.list_notifications()[0]
+            self.assertEqual(notification["title"], "Google Photos selection is waiting")
+            self.assertEqual(notification["payload"]["dashboardPath"], "#sources")
+
 
 if __name__ == "__main__":
     unittest.main()

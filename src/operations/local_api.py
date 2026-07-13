@@ -37,6 +37,7 @@ from src.operations.local_ledger import (
 from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_mijngeldzaken_control import LocalMijngeldzakenControlService
 from src.operations.local_notifications import ACTIVE_NOTIFICATION_STATUSES, LocalNotificationService
+from src.operations.local_photos_picker import LocalGooglePhotosPickerService
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
@@ -717,6 +718,54 @@ DASHBOARD_TEMPLATE = """
           </tbody>
         </table>
       </div>
+      <div class="section-head">
+        <div>
+          <h3>Google Photos selections</h3>
+          <p>User-owned receipt selections waiting for import or cleanup.</p>
+        </div>
+        <form class="inline-actions" method="post" action="{{ url_for('start_google_photos_picker_form') }}">
+          <button type="submit" {% if not photos_picker_plan.canStartSession %}disabled{% endif %}>Start selection</button>
+        </form>
+      </div>
+      {% if photos_picker_action %}
+      <pre>{{ pretty_json(photos_picker_action) }}</pre>
+      {% endif %}
+      {% if photos_picker_sessions %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Session</th><th>Status</th><th>Selected</th><th>Updated</th><th>Actions</th></tr></thead>
+          <tbody>
+          {% for picker_session in photos_picker_sessions %}
+            <tr>
+              <td class="mono">#{{ picker_session.id }}</td>
+              <td><span class="badge {{ picker_session.status }}">{{ picker_session.status }}</span></td>
+              <td>{{ picker_session.selectedItemCount }}</td>
+              <td class="mono">{{ picker_session.updatedAt or "-" }}</td>
+              <td>
+                <div class="inline-actions">
+                  {% if picker_session.pickerUri %}
+                  <a href="{{ picker_session.pickerUri }}" target="_blank" rel="noopener noreferrer">Open selection</a>
+                  {% endif %}
+                  {% if picker_session.status in ["creating", "awaiting_user_selection", "collecting", "partial", "completed_cleanup_required", "failed"] %}
+                  {% if picker_session.providerSessionId and not picker_session.providerSessionDeleted %}
+                  <form method="post" action="{{ url_for('collect_google_photos_picker_form', workflow_run_id=picker_session.id) }}">
+                    <button type="submit">Check &amp; import</button>
+                  </form>
+                  {% endif %}
+                  <form method="post" action="{{ url_for('cancel_google_photos_picker_form', workflow_run_id=picker_session.id) }}">
+                    <button type="submit" class="secondary">Cancel</button>
+                  </form>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">No Google Photos selection sessions recorded.</div>
+      {% endif %}
       {% if sources %}
       <div class="table-wrap">
         <table>
@@ -3618,6 +3667,9 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         ).plan()
         documents = ledger.list_documents(limit=25)
         connector_plan = LocalConnectorIntakeService(ledger, config).plan()
+        photos_picker_service = LocalGooglePhotosPickerService(ledger, config)
+        photos_picker_plan = photos_picker_service.plan()
+        photos_picker_sessions = photos_picker_service.list_sessions(limit=10)
         sources = ledger.list_source_accounts(limit=25)
         document_groups = ledger.list_document_groups(limit=25)
         extracted_fields = ledger.list_extracted_fields(limit=40)
@@ -3694,6 +3746,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_notification_refresh_summary = session.pop("fab_last_notification_refresh_summary", None)
         last_compliance_summary = session.pop("fab_last_compliance_summary", None)
         last_connector_sync = session.pop("fab_last_connector_sync", None)
+        last_photos_picker_action = session.pop("fab_last_photos_picker_action", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3710,6 +3763,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "readiness": readiness,
             "autonomyPlan": autonomy_plan,
             "connectorPlan": connector_plan,
+            "photosPickerPlan": photos_picker_plan,
+            "photosPickerSessions": photos_picker_sessions,
             "sources": sources,
             "documents": documents,
             "documentGroups": document_groups,
@@ -3783,6 +3838,9 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             compact_json=_compact_json,
             connector_plan=connector_plan,
             connector_sync_summary=last_connector_sync,
+            photos_picker_action=last_photos_picker_action,
+            photos_picker_plan=photos_picker_plan,
+            photos_picker_sessions=photos_picker_sessions,
             close_pack_summary=last_close_pack_summary,
             close_packs=close_packs,
             close_readiness=close_readiness,
@@ -4095,6 +4153,57 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def source_connector_readiness():
         return jsonify(LocalConnectorIntakeService(ledger, config).plan())
 
+    @app.get("/api/sources/google-photos/sessions")
+    def google_photos_picker_sessions_api():
+        service = LocalGooglePhotosPickerService(ledger, config)
+        return jsonify({
+            "plan": service.plan(),
+            "sessions": service.list_sessions(limit=_limit_arg()),
+            "externalSubmission": "not_executed",
+        })
+
+    @app.post("/api/sources/google-photos/sessions")
+    def start_google_photos_picker_api():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).create_session(
+                actor=payload.get("actor") or "api",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 409
+        return jsonify(result), 200 if result.get("success") else 502
+
+    @app.get("/api/sources/google-photos/sessions/<int:workflow_run_id>")
+    def google_photos_picker_session_api(workflow_run_id: int):
+        result = LocalGooglePhotosPickerService(ledger, config).get_session(workflow_run_id)
+        if not result:
+            return jsonify({"error": "Google Photos Picker session not found"}), 404
+        return jsonify({"session": result, "externalSubmission": "not_executed"})
+
+    @app.post("/api/sources/google-photos/sessions/<int:workflow_run_id>/collect")
+    def collect_google_photos_picker_api(workflow_run_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).collect_session(
+                workflow_run_id,
+                actor=payload.get("actor") or "api",
+            )
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 404
+        return jsonify(result), 200 if result.get("success") else 502
+
+    @app.post("/api/sources/google-photos/sessions/<int:workflow_run_id>/cancel")
+    def cancel_google_photos_picker_api(workflow_run_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).cancel_session(
+                workflow_run_id,
+                actor=payload.get("actor") or "api",
+            )
+        except LookupError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 404
+        return jsonify(result), 200 if result.get("success") else 502
+
     @app.post("/api/sources/sync")
     def sync_sources_api():
         payload = request.get_json(silent=True) or {}
@@ -4121,6 +4230,56 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "error": str(exc),
                 "externalSubmission": "not_executed",
             }
+        return redirect(url_for("dashboard_page") + "#sources")
+
+    @app.post("/sources/google-photos/sessions/start")
+    def start_google_photos_picker_form():
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).create_session(
+                actor="local_user",
+            )
+        except ValueError as exc:
+            result = {
+                "success": False,
+                "status": "not_ready",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        session["fab_last_photos_picker_action"] = _compact_photos_picker_result(result)
+        return redirect(url_for("dashboard_page") + "#sources")
+
+    @app.post("/sources/google-photos/sessions/<int:workflow_run_id>/collect")
+    def collect_google_photos_picker_form(workflow_run_id: int):
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).collect_session(
+                workflow_run_id,
+                actor="local_user",
+            )
+        except LookupError as exc:
+            result = {
+                "success": False,
+                "status": "not_found",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        session["fab_last_photos_picker_action"] = _compact_photos_picker_result(result)
+        return redirect(url_for("dashboard_page") + "#sources")
+
+    @app.post("/sources/google-photos/sessions/<int:workflow_run_id>/cancel")
+    def cancel_google_photos_picker_form(workflow_run_id: int):
+        try:
+            result = LocalGooglePhotosPickerService(ledger, config).cancel_session(
+                workflow_run_id,
+                actor="local_user",
+            )
+        except LookupError as exc:
+            result = {
+                "success": False,
+                "status": "not_found",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }
+        session["fab_last_photos_picker_action"] = _compact_photos_picker_result(result)
         return redirect(url_for("dashboard_page") + "#sources")
 
     @app.post("/api/sources")
@@ -6385,6 +6544,23 @@ def _compact_connector_sync(result: Dict[str, Any]) -> Dict[str, Any]:
             }
             for item in result.get("results") or []
         ],
+        "externalSubmission": "not_executed",
+    }
+
+
+def _compact_photos_picker_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    picker_session = result.get("session") if isinstance(result.get("session"), dict) else {}
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "error": result.get("error"),
+        "session": {
+            "id": picker_session.get("id"),
+            "status": picker_session.get("status"),
+            "selectedItemCount": picker_session.get("selectedItemCount", 0),
+            "providerSessionDeleted": picker_session.get("providerSessionDeleted", False),
+        } if picker_session else None,
+        "summary": result.get("summary") or {},
         "externalSubmission": "not_executed",
     }
 

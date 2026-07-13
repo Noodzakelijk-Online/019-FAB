@@ -359,7 +359,7 @@ class LocalConnectorIntakeService:
                 "nextAction": (
                     "Configure a Picker-scoped OAuth token before starting a supervised selection session."
                     if status == "needs_configuration"
-                    else "Use a supervised Google Photos Picker session; background whole-library access is no longer available."
+                    else "Start a supervised Google Photos selection from Sources; background whole-library access is no longer available."
                     if status == "supervision_required"
                     else "Enable the supervised Google Photos Picker integration when needed."
                 ),
@@ -405,16 +405,17 @@ class LocalConnectorIntakeService:
             )
         if source == "freshdesk":
             return bool(self.config.get("freshdesk_api_key") and self.config.get("freshdesk_domain"))
-        return _existing_config_path(
-            self.config,
-            "google_photos_credentials_file",
-            "photos_credentials_path",
-        ) and _existing_config_path(
+        token_path = _config_path(
             self.config,
             "google_photos_picker_token_file",
             "google_photos_token_file",
             "photos_token_path",
         )
+        return _existing_config_path(
+            self.config,
+            "google_photos_credentials_file",
+            "photos_credentials_path",
+        ) and bool(token_path and token_path.lower().endswith(".json") and os.path.isfile(token_path))
 
     def _source_identifier(self, source: str) -> str:
         if source == "gmail":
@@ -487,11 +488,16 @@ def _configured_bool(config: Dict[str, Any], *keys: str, default: bool) -> bool:
 
 
 def _existing_config_path(config: Dict[str, Any], *keys: str) -> bool:
+    return bool(_config_path(config, *keys))
+
+
+def _config_path(config: Dict[str, Any], *keys: str) -> Optional[str]:
     for key in keys:
         value = config.get(key)
         if str(value or "").strip():
-            return os.path.isfile(os.path.abspath(os.path.expanduser(os.path.expandvars(str(value)))))
-    return False
+            path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(value))))
+            return path if os.path.isfile(path) else None
+    return None
 
 
 def _next_action(source: str, status: str) -> Optional[str]:

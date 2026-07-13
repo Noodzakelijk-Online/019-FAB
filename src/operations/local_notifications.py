@@ -213,12 +213,14 @@ def _title(event_type: str) -> str:
         "master_ledger_blockers": "Master ledger has blocked rows",
         "wave_invoice_overdue": "Wave invoice is overdue",
         "wave_invoice_due_soon": "Wave invoice is due soon",
+        "stale_picker_session": "Google Photos selection is waiting",
+        "picker_session_attention": "Google Photos selection needs attention",
     }
     return labels.get(event_type, event_type.replace("_", " ").strip().title())
 
 
 def _dashboard_path(event_type: str) -> str:
-    if "source_connector" in event_type:
+    if "source_connector" in event_type or "picker_session" in event_type:
         return "#sources"
     if event_type.startswith("compliance_"):
         return "#compliance"

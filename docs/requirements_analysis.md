@@ -35,8 +35,8 @@ Develop a fully automated system to fetch financial documents, extract relevant 
 - Download relevant attachments.
 
 #### Google Photos
-- Use Google Photos API (OAuth 2.0).
-- Scan the entire Google Photos library for financial documents.
+- Use the Google Photos Picker API with OAuth 2.0 read-only scope.
+- Import only receipt images explicitly selected by the user; whole-library background scanning is not available and must not be simulated.
 
 ### 2. Document Processing (OCR & Data Extraction)
 

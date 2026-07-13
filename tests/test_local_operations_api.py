@@ -1622,6 +1622,105 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Google Photos Picker", html)
             self.assertIn("&#34;workflowRunId&#34;: 7", html)
 
+    def test_google_photos_picker_sessions_api_and_dashboard_controls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "awaiting_user_selection",
+                "triggerSource": "google_photos_picker",
+                "metadata": {
+                    "sourceAccountId": 1,
+                    "providerSessionId": "picker-session-1",
+                    "pickerUri": "https://photos.google.com/picker/picker-session-1/autoclose",
+                    "providerSessionDeleted": False,
+                    "externalSubmission": "not_executed",
+                },
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+            collected_result = {
+                "success": True,
+                "status": "completed",
+                "session": {
+                    "id": workflow_run_id,
+                    "status": "completed",
+                    "selectedItemCount": 1,
+                    "providerSessionDeleted": True,
+                },
+                "summary": {"registered": 1},
+                "externalSubmission": "not_executed",
+            }
+            cancelled_result = {
+                "success": True,
+                "status": "cancelled",
+                "session": {
+                    "id": workflow_run_id,
+                    "status": "cancelled",
+                    "selectedItemCount": 0,
+                    "providerSessionDeleted": True,
+                },
+                "externalSubmission": "not_executed",
+            }
+
+            sessions = client.get("/api/sources/google-photos/sessions")
+            detail = client.get(f"/api/sources/google-photos/sessions/{workflow_run_id}")
+            with patch(
+                "src.operations.local_api.LocalGooglePhotosPickerService.collect_session",
+                return_value=collected_result,
+            ) as collect:
+                collected = client.post(
+                    f"/api/sources/google-photos/sessions/{workflow_run_id}/collect",
+                    json={"actor": "tester"},
+                )
+            with patch(
+                "src.operations.local_api.LocalGooglePhotosPickerService.cancel_session",
+                return_value=cancelled_result,
+            ) as cancel:
+                cancelled = client.post(
+                    f"/api/sources/google-photos/sessions/{workflow_run_id}/cancel",
+                    json={"actor": "tester"},
+                )
+            page = client.get("/")
+
+            self.assertEqual(sessions.status_code, 200)
+            self.assertEqual(sessions.get_json()["sessions"][0]["id"], workflow_run_id)
+            self.assertEqual(detail.get_json()["session"]["providerSessionId"], "picker-session-1")
+            self.assertEqual(collected.status_code, 200)
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(collect.call_args.kwargs["actor"], "tester")
+            self.assertEqual(cancel.call_args.kwargs["actor"], "tester")
+            html = page.data.decode("utf-8")
+            self.assertIn("Google Photos selections", html)
+            self.assertIn("Open selection", html)
+            self.assertIn("Check &amp; import", html)
+            self.assertIn("picker-session-1", html)
+
+            missing = client.get("/api/sources/google-photos/sessions/999999")
+            self.assertEqual(missing.status_code, 404)
+
+    def test_dashboard_can_cancel_interrupted_picker_creation_without_provider_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "creating",
+                "triggerSource": "google_photos_picker",
+                "metadata": {"externalSubmission": "not_executed"},
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            html = client.get("/").data.decode("utf-8")
+
+            self.assertIn(
+                f'/sources/google-photos/sessions/{workflow_run_id}/cancel',
+                html,
+            )
+            self.assertNotIn(
+                f'/sources/google-photos/sessions/{workflow_run_id}/collect',
+                html,
+            )
+
     def test_api_exposes_duplicate_candidates_from_intake(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

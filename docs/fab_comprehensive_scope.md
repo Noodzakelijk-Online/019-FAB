@@ -31,7 +31,7 @@ The current repository already contains many module-level foundations for this v
 ### Enhancement Gaps
 
 - Gmail, Google Drive, and Freshdesk now have bounded pagination, content-addressed downloads, durable source/document provenance, exact-content idempotency, provider-revision review, isolated failures, and source health/readiness visibility. Production credential provisioning and connector-specific retry scheduling still need operational deployment work.
-- Google Photos whole-library background reads are no longer available. FAB correctly fails closed as `supervision_required`; completing the user-selectable Picker session and media download flow remains an implementation gap.
+- Google Photos whole-library background reads are no longer available. FAB now provides a durable user-owned Picker session, paginated selected-photo retrieval, bounded authenticated download, duplicate/revision registration, provider cleanup, and session health/audit visibility. Production OAuth-client approval and a live account acceptance run remain deployment tasks.
 - OCR and extraction should emit confidence scores per field, not just document-level results.
 - Extracted fields need a database-backed record so corrections, review decisions, and model feedback are preserved.
 - Validation output should consistently include machine-readable errors, warnings, and blocking/non-blocking status.
@@ -287,7 +287,7 @@ The current repository already contains many module-level foundations for this v
 ### Phase 4: Platform Integrations and Reconciliation
 
 - Provision and validate production Gmail, Google Drive `sort out`, and Freshdesk credentials against the durable connector-intake control plane.
-- Implement supervised Google Photos Picker session creation, polling, selected-media download, and durable evidence registration.
+- Validate the supervised Google Photos Picker flow with the production OAuth client and receipt-selection account, including token revocation and provider timeout recovery.
 - Replace Waveapps and MijnGeldzaken placeholders with real entry flows.
 - Implement bank transaction import and reconciliation status views.
 

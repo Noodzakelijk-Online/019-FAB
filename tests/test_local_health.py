@@ -66,6 +66,62 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["metrics"]["staleSourceConnectors"], 1)
             self.assertTrue(any("Open Sources" in action for action in health["nextActions"]))
 
+    def test_health_flags_stale_supervised_picker_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "awaiting_user_selection",
+                "triggerSource": "google_photos_picker",
+                "metadata": {
+                    "providerSessionId": "picker-session-1",
+                    "providerSessionDeleted": False,
+                },
+            })
+            _set_timestamp(
+                ledger_path,
+                "workflow_runs",
+                workflow_run_id,
+                "updated_at",
+                _hours_ago(48),
+            )
+
+            health = LocalOperationsHealth(
+                ledger,
+                {"operations_source_stale_hours": 24},
+            ).summarize()
+
+            issue = next(item for item in health["issues"] if item["type"] == "stale_picker_session")
+            self.assertEqual(issue["entityId"], str(workflow_run_id))
+            self.assertEqual(health["metrics"]["pickerSessionsNeedingAttention"], 1)
+            self.assertTrue(any("Google Photos" in action for action in health["nextActions"]))
+
+    def test_health_flags_picker_work_interrupted_during_collection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "collecting",
+                "triggerSource": "google_photos_picker",
+                "metadata": {"providerSessionId": "picker-session-1"},
+            })
+            _set_timestamp(
+                ledger_path,
+                "workflow_runs",
+                workflow_run_id,
+                "updated_at",
+                _hours_ago(8),
+            )
+
+            health = LocalOperationsHealth(
+                ledger,
+                {"operations_workflow_stale_hours": 6},
+            ).summarize()
+
+            issue = next(item for item in health["issues"] if item["type"] == "stale_picker_session")
+            self.assertEqual(issue["details"]["status"], "collecting")
+            self.assertEqual(health["metrics"]["pickerSessionsNeedingAttention"], 1)
+
     def test_health_flags_stale_review_failed_document_and_running_workflow(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

@@ -518,11 +518,14 @@ def _photos_picker_source(credentials: Dict[str, Any], token: Dict[str, Any]) ->
         credentials,
         token,
     )
-    if source["ready"]:
+    if token["exists"] and not str(token.get("path") or "").lower().endswith(".json"):
+        source["ready"] = False
+        source["status"] = "needs_attention"
+        source["details"] = "Picker tokens must be JSON; unsafe pickle token files are not loaded."
+    elif source["ready"]:
         source["status"] = "supervision_required"
         source["details"] = (
-            "Credentials are ready. A user must select receipt images in a supervised Picker session; "
-            "background whole-library access is unavailable."
+            "Credentials are ready for a user-owned receipt selection session; background whole-library access is unavailable."
         )
     return source
 

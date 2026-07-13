@@ -18,6 +18,13 @@ ROUTING_BLOCK_STATUSES = (
 PENDING_ROUTING_STATUSES = ("draft_prepared", "needs_confirmation", "queued")
 RUNNING_WORKFLOW_STATUSES = ("running",)
 FAILED_WORKFLOW_STATUSES = ("failed", "error")
+PICKER_ATTENTION_STATUSES = (
+    "creating",
+    "awaiting_user_selection",
+    "collecting",
+    "partial",
+    "completed_cleanup_required",
+)
 PENDING_EXPORT_APPROVAL_STATUSES = ("approval_required", "prepared")
 APPROVED_EXPORT_STATUSES = ("approved",)
 SUPERVISED_EXPORT_STATUSES = ("supervision_required",)
@@ -121,6 +128,11 @@ class LocalOperationsHealth:
         pending_routes = self.ledger.list_routing_attempts(status=PENDING_ROUTING_STATUSES, limit=500)
         running_runs = self.ledger.list_workflow_runs(status=RUNNING_WORKFLOW_STATUSES, limit=100)
         failed_runs = self.ledger.list_workflow_runs(status=FAILED_WORKFLOW_STATUSES, limit=100)
+        picker_runs = self.ledger.list_workflow_runs(
+            status=PICKER_ATTENTION_STATUSES,
+            trigger_source="google_photos_picker",
+            limit=100,
+        )
         pending_export_approvals = self.ledger.list_export_attempts(status=PENDING_EXPORT_APPROVAL_STATUSES, limit=500)
         approved_exports = self.ledger.list_export_attempts(status=APPROVED_EXPORT_STATUSES, limit=500)
         supervised_exports = self.ledger.list_export_attempts(status=SUPERVISED_EXPORT_STATUSES, limit=500)
@@ -365,6 +377,40 @@ class LocalOperationsHealth:
                 {"errorMessage": run.get("error_message")},
             ))
 
+        for run in picker_runs:
+            picker_status = str(run.get("status") or "unknown")
+            age_hours = _age_hours(run.get("updated_at") or run.get("created_at"), now)
+            if picker_status in {"creating", "awaiting_user_selection", "collecting"}:
+                stale_hours = (
+                    self.source_stale_hours
+                    if picker_status == "awaiting_user_selection"
+                    else self.workflow_stale_hours
+                )
+                if age_hours is None or age_hours < stale_hours:
+                    continue
+                message = (
+                    f"Google Photos selection #{run.get('id')} has remained {picker_status} "
+                    f"for {age_hours:.1f} hours."
+                )
+                issue_type = "stale_picker_session"
+            else:
+                message = (
+                    f"Google Photos selection #{run.get('id')} requires import or cleanup attention ({picker_status})."
+                )
+                issue_type = "picker_session_attention"
+            issues.append(_issue(
+                "medium",
+                issue_type,
+                "workflow_run",
+                run.get("id"),
+                message,
+                age_hours,
+                {
+                    "triggerSource": run.get("trigger_source"),
+                    "status": picker_status,
+                },
+            ))
+
         for report_run in report_runs:
             report_status = str(report_run.get("status") or "unknown")
             if report_status == "failed":
@@ -557,6 +603,10 @@ class LocalOperationsHealth:
                 "sourceAccounts": len(source_accounts),
                 "sourceConnectorsUnavailable": _issue_count(issues, "source_connector_unavailable"),
                 "staleSourceConnectors": _issue_count(issues, "stale_source_connector"),
+                "pickerSessionsNeedingAttention": (
+                    _issue_count(issues, "stale_picker_session")
+                    + _issue_count(issues, "picker_session_attention")
+                ),
                 "openReviewItems": len(review_items),
                 "staleReviewItems": _issue_count(issues, "stale_review_item"),
                 "stuckDocuments": _issue_count(issues, "stuck_document"),
@@ -648,6 +698,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Open Sources, repair the connector configuration, and run a read-only sync.")
     if "stale_source_connector" in issue_types:
         actions.append("Run the configured source sync before relying on document completeness.")
+    if "stale_picker_session" in issue_types or "picker_session_attention" in issue_types:
+        actions.append("Open Sources and complete, retry, or cancel the Google Photos selection session.")
     if "failed_document" in issue_types:
         actions.append("Open failed documents, inspect processing errors, and re-run after fixing the source issue.")
     if "stale_workflow_run" in issue_types:

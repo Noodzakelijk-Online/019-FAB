@@ -989,6 +989,14 @@ class LocalOperationsLedger:
         }
         self._update("workflow_runs", workflow_run_id, fields)
 
+    def get_workflow_run(self, workflow_run_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM workflow_runs WHERE id = ? LIMIT 1",
+                (workflow_run_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def register_document(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         now = self._now()
         values = {
@@ -3353,20 +3361,31 @@ class LocalOperationsLedger:
                 "audit_events": self._count(connection, "audit_events"),
             }
 
-    def list_workflow_runs(self, status: Optional[Any] = None, limit: int = 100) -> list:
+    def list_workflow_runs(
+        self,
+        status: Optional[Any] = None,
+        trigger_source: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
         limit = self._bounded_limit(limit)
         query = "SELECT * FROM workflow_runs"
         params = []
+        where = []
         if status:
             if isinstance(status, Sequence) and not isinstance(status, str):
                 statuses = [str(item) for item in status if item]
                 if statuses:
                     placeholders = ", ".join("?" for _ in statuses)
-                    query = f"{query} WHERE status IN ({placeholders})"
+                    where.append(f"status IN ({placeholders})")
                     params.extend(statuses)
             else:
-                query = f"{query} WHERE status = ?"
+                where.append("status = ?")
                 params.append(status)
+        if trigger_source:
+            where.append("trigger_source = ?")
+            params.append(trigger_source)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
         query = f"{query} ORDER BY updated_at DESC, id DESC LIMIT ?"
         params.append(limit)
         with self._connection() as connection:
