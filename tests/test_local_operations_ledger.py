@@ -403,6 +403,10 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     "unread_notifications": 0,
                     "active_notifications": 0,
                     "notification_preferences": 0,
+                    "compliance_assessments": 0,
+                    "open_compliance_findings": 0,
+                    "blocking_compliance_findings": 0,
+                    "retention_records": 0,
                     "audit_events": 1,
                 },
             )

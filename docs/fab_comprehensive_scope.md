@@ -182,7 +182,8 @@ The current repository already contains many module-level foundations for this v
 - Financial operations need audit logging beyond application logs.
 - Secrets should be integrated with a production secrets manager for deployment.
 - RBAC should be expanded from basic admin/user web roles into bookkeeping-specific permissions.
-- Compliance checks should produce structured findings and retention records.
+- The local operations layer now produces idempotent, provisional Dutch VAT assessments, reviewable structured findings, source-file evidence, and seven-year document-retention records. Filing and deletion remain explicitly unauthorized.
+- Compliance still needs full Dutch return-box mappings, ICP/private-use/small-business rules, exchange-rate policy, accountant approval, and a separately approved filing connector.
 
 ## 8. Workflow Automation and Notifications
 

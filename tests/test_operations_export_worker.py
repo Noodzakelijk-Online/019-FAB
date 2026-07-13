@@ -87,12 +87,14 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
             self.assertIn("local_worker.scheduled_report_cycle", audit_actions)
+            self.assertIn("local_worker.compliance_cycle", audit_actions)
             self.assertIn("local_worker.notification_cycle", audit_actions)
             self.assertIn("local_reporting.scheduled_report_prepared", audit_actions)
             self.assertIn("local_export_attempt.batch_execution_preflight_backup", audit_actions)
             self.assertIn("local_export_attempt.supervision_required", audit_actions)
             self.assertEqual(ledger.list_export_attempts(status="approved"), [])
             self.assertEqual(len(ledger.list_financial_report_runs()), 1)
+            self.assertEqual(len(ledger.list_compliance_assessments()), 1)
 
     def test_worker_stage_failure_does_not_suppress_local_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -197,6 +199,37 @@ class TestOperationsExportWorker(unittest.TestCase):
                 if event["action"] == "local_worker.stage_failed"
             ]
             self.assertEqual(failed_stages[0]["details"]["stage"], "notifications")
+
+    def test_compliance_failure_does_not_suppress_notifications_or_exports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["worker_run_legacy_workflow"] = False
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_run_local_autonomy",
+            ), patch.object(
+                worker,
+                "_process_scheduled_reports",
+            ), patch.object(
+                worker,
+                "_assess_compliance",
+                side_effect=RuntimeError("compliance assessment unavailable"),
+            ), patch.object(worker, "_refresh_notifications") as notifications, patch.object(
+                worker,
+                "_process_operations_exports",
+            ) as exports:
+                worker.run()
+
+            notifications.assert_called_once()
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            failed_stages = [
+                event for event in ledger.list_audit_events(limit=30)
+                if event["action"] == "local_worker.stage_failed"
+            ]
+            self.assertEqual(failed_stages[0]["details"]["stage"], "compliance")
 
     def test_manual_runner_uses_operations_ledger_and_respects_execution_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -11,6 +11,75 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_compliance_assessment_findings_retention_and_dashboard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "compliance-api",
+                "originalFilename": "vat-error.pdf",
+                "processingStatus": "reviewed",
+            })
+            ledger.upsert_bookkeeping_record({
+                "documentId": document_id,
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "targetSystem": "waveapps_business",
+                "targetAccount": "Office",
+                "category": "Office",
+                "recordDate": "2026-07-05",
+                "amount": 10,
+                "vatAmount": 12,
+                "currency": "EUR",
+                "reconciliationStatus": "reconciled",
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            first = client.post("/api/compliance/assessments", json={
+                "fromDate": "2026-07-01",
+                "toDate": "2026-07-31",
+                "actor": "tester",
+            })
+            second = client.post("/api/compliance/assessments", json={
+                "fromDate": "2026-07-01",
+                "toDate": "2026-07-31",
+                "actor": "tester",
+            })
+
+            self.assertEqual(first.status_code, 200)
+            self.assertTrue(first.get_json()["created"])
+            self.assertEqual(first.get_json()["assessment"]["status"], "blocked")
+            self.assertEqual(first.get_json()["filingStatus"], "not_filed")
+            self.assertEqual(first.get_json()["externalFiling"], "not_executed")
+            self.assertEqual(second.get_json()["status"], "already_current")
+            assessment_id = first.get_json()["assessment"]["id"]
+            detail = client.get(f"/api/compliance/assessments/{assessment_id}").get_json()
+            self.assertEqual(detail["assessment"]["statutory_status"], "provisional")
+            finding_id = next(
+                finding["id"] for finding in detail["findings"]
+                if finding["code"] == "vat_exceeds_gross"
+            )
+            invalid = client.patch(
+                f"/api/compliance/findings/{finding_id}/status",
+                json={"status": "resolved"},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            acknowledged = client.patch(
+                f"/api/compliance/findings/{finding_id}/status",
+                json={"status": "acknowledged", "actor": "tester"},
+            )
+            self.assertEqual(acknowledged.status_code, 200)
+            self.assertEqual(acknowledged.get_json()["finding"]["status"], "acknowledged")
+            retention = client.get("/api/compliance/retention").get_json()
+            self.assertFalse(retention["deletionAuthorized"])
+            self.assertEqual(len(retention["retentionRecords"]), 1)
+            html = client.get("/").data.decode("utf-8")
+            self.assertIn("VAT & Compliance", html)
+            self.assertIn("No tax filing is performed", html)
+            self.assertIn("vat_exceeds_gross", html)
+
     def test_notification_center_refresh_preferences_and_status_actions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

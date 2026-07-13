@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.operations.local_api import create_app
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_compliance import LocalComplianceService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, LocalExportAttemptService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_ledger import LocalOperationsLedger
@@ -343,6 +344,38 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["metrics"]["waveInvoicesOverdue"], 1)
             self.assertEqual(health["metrics"]["waveInvoicesDueSoon"], 1)
             self.assertIn("approve any reminder", " ".join(health["nextActions"]))
+
+    def test_health_surfaces_latest_open_compliance_findings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_bookkeeping_record({
+                "bankTransactionId": 77,
+                "sourceType": "bank_transaction",
+                "recordType": "expense",
+                "status": "draft",
+                "targetSystem": "waveapps_business",
+                "targetAccount": "Office",
+                "category": "Office",
+                "recordDate": "2026-07-05",
+                "amount": -10,
+                "vatAmount": 12,
+                "currency": "EUR",
+                "reconciliationStatus": "reconciled",
+            })
+            LocalComplianceService(ledger).assess(
+                from_date="2026-07-01",
+                to_date="2026-07-31",
+            )
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            issue_types = {issue["type"] for issue in health["issues"]}
+            self.assertIn("compliance_vat_exceeds_gross", issue_types)
+            self.assertEqual(health["status"], "blocked")
+            self.assertEqual(health["metrics"]["complianceAssessments"], 1)
+            self.assertGreater(health["metrics"]["openComplianceFindings"], 0)
+            self.assertGreater(health["metrics"]["blockingComplianceFindings"], 0)
+            self.assertIn("before filing", " ".join(health["nextActions"]))
 
 
 def _hours_ago(hours: int) -> str:

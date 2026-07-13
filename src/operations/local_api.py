@@ -17,6 +17,7 @@ from src.operations.local_bookkeeping_records import (
 )
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
+from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -358,6 +359,7 @@ DASHBOARD_TEMPLATE = """
       <a href="#records">Records</a>
       <a href="#master-ledger">Master Ledger</a>
       <a href="#reports">Reports</a>
+      <a href="#compliance">Compliance</a>
       <a href="#fields">Fields</a>
       <a href="#routing">Routing</a>
       <a href="#exports">Exports</a>
@@ -1397,6 +1399,119 @@ DASHBOARD_TEMPLATE = """
         </div>
       </details>
       {% endif %}
+    </section>
+
+    <section id="compliance">
+      <div class="section-head">
+        <div>
+          <h2>VAT & Compliance</h2>
+          <p>Provisional Dutch VAT checks, source evidence, and document-retention controls. No tax filing is performed.</p>
+        </div>
+        <form class="inline-actions" method="post" action="{{ url_for('run_compliance_assessment_form') }}">
+          <button type="submit">Assess current quarter</button>
+        </form>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-item"><span>Assessments</span><strong>{{ compliance_summary.assessmentCount }}</strong></div>
+        <div class="summary-item"><span>Open findings</span><strong>{{ compliance_summary.openFindings }}</strong></div>
+        <div class="summary-item"><span>Blocking</span><strong>{{ compliance_summary.blockingFindings }}</strong></div>
+        <div class="summary-item"><span>Retention records</span><strong>{{ compliance_summary.retentionRecords }}</strong></div>
+        <div class="summary-item"><span>Statutory status</span><strong>{{ compliance_summary.statutoryStatus }}</strong></div>
+        <div class="summary-item"><span>External filing</span><strong>{{ compliance_summary.externalFiling }}</strong></div>
+      </div>
+      {% if last_compliance_summary %}
+      <details open>
+        <summary>Last assessment action</summary>
+        <pre>{{ pretty_json(last_compliance_summary) }}</pre>
+      </details>
+      {% endif %}
+      {% if compliance_assessments %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Assessment</th><th>Period</th><th>Status</th><th>Records</th><th>Findings</th><th>Blocking</th><th>VAT summary</th><th>Filing</th></tr>
+          </thead>
+          <tbody>
+          {% for assessment in compliance_assessments %}
+            <tr>
+              <td class="mono">#{{ assessment.id }}<div class="muted">{{ assessment.source_checksum[:12] }}</div></td>
+              <td>{{ assessment.period_from }} to {{ assessment.period_to }}</td>
+              <td><span class="badge {{ assessment.status }}">{{ assessment.status }}</span></td>
+              <td>{{ assessment.record_count }}</td>
+              <td>{{ assessment.finding_count }}</td>
+              <td>{{ assessment.blocking_count }}</td>
+              <td class="mono">{{ compact_json(assessment.vat_summary) }}</td>
+              <td>{{ assessment.statutory_status }} / {{ assessment.external_filing }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">No compliance assessment yet. Run the current-quarter assessment to create reviewable evidence.</div>
+      {% endif %}
+      {% if compliance_findings %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Severity</th><th>Finding</th><th>Record</th><th>Status</th><th>Evidence</th><th>Review action</th></tr>
+          </thead>
+          <tbody>
+          {% for finding in compliance_findings %}
+            <tr>
+              <td><span class="badge {{ finding.severity }}">{{ finding.severity }}</span></td>
+              <td><strong>{{ finding.title }}</strong><div class="muted">{{ finding.message }}</div><div class="mono">{{ finding.code }}</div></td>
+              <td>
+                {% if finding.bookkeeping_record_id %}<a href="{{ url_for('bookkeeping_record_detail_page', record_id=finding.bookkeeping_record_id) }}">#{{ finding.bookkeeping_record_id }}</a>{% else %}-{% endif %}
+                {% if finding.document_id %}<div class="muted">document #{{ finding.document_id }}</div>{% endif %}
+              </td>
+              <td><span class="badge {{ finding.status }}">{{ finding.status }}</span></td>
+              <td class="mono">{{ compact_json(finding.evidence) }}</td>
+              <td>
+                {% if finding.status == 'open' %}
+                <form class="table-actions" method="post" action="{{ url_for('compliance_finding_status_form', finding_id=finding.id) }}">
+                  <input type="hidden" name="status" value="acknowledged">
+                  <button class="compact secondary" type="submit">Acknowledge</button>
+                </form>
+                {% endif %}
+                <form class="review-actions" method="post" action="{{ url_for('compliance_finding_status_form', finding_id=finding.id) }}">
+                  <input type="hidden" name="status" value="resolved">
+                  <input name="resolution" placeholder="Correction or reviewed exception evidence" required>
+                  <button class="compact secondary" type="submit">Resolve</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% elif compliance_assessments %}
+      <div class="empty">The latest stored compliance evidence has no open findings.</div>
+      {% endif %}
+      <details>
+        <summary>Document retention records</summary>
+        {% if retention_records %}
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Document</th><th>Source date</th><th>Retain until</th><th>Status</th><th>Source file</th><th>Deletion</th></tr></thead>
+            <tbody>
+            {% for retention in retention_records %}
+              <tr>
+                <td class="mono">#{{ retention.document_id }}</td>
+                <td>{{ retention.source_date or "-" }}</td>
+                <td>{{ retention.retain_until or "-" }}</td>
+                <td><span class="badge {{ retention.status }}">{{ retention.status }}</span></td>
+                <td>{{ "present" if retention.source_file_present else "unverified" if retention.source_file_present is none else "missing" }}</td>
+                <td>not authorized</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="empty">No document-retention evidence has been assessed yet.</div>
+        {% endif %}
+      </details>
     </section>
 
     <section id="fields">
@@ -3508,6 +3623,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "externalSubmission": "not_executed",
             }
         financial_report_runs = ledger.list_financial_report_runs(limit=10)
+        compliance_service = LocalComplianceService(ledger, config)
+        compliance_summary = compliance_service.summary()
+        compliance_assessments = ledger.list_compliance_assessments(limit=10)
+        latest_compliance_assessment_id = (
+            compliance_assessments[0].get("id") if compliance_assessments else None
+        )
+        compliance_findings = ledger.list_compliance_findings(
+            assessment_id=latest_compliance_assessment_id,
+            status=OPEN_FINDING_STATUSES,
+            limit=25,
+        ) if latest_compliance_assessment_id else []
+        retention_records = ledger.list_retention_records(limit=25)
         backups = LocalBackupService(ledger, config).list_backups(limit=10)
         mijngeldzaken_service = LocalMijngeldzakenControlService(config)
         mijngeldzaken_control = mijngeldzaken_service.overview(ledger)
@@ -3541,6 +3668,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_close_pack_summary = session.pop("fab_last_close_pack_summary", None)
         last_scheduled_report_summary = session.pop("fab_last_scheduled_report_summary", None)
         last_notification_refresh_summary = session.pop("fab_last_notification_refresh_summary", None)
+        last_compliance_summary = session.pop("fab_last_compliance_summary", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3572,6 +3700,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "notifications": notifications,
             "notificationSummary": notification_summary,
             "notificationPreferences": notification_preferences,
+            "complianceSummary": compliance_summary,
+            "complianceAssessments": compliance_assessments,
+            "complianceFindings": compliance_findings,
+            "retentionRecords": retention_records,
             "bankTransactions": bank_transactions,
             "bankStatementImports": bank_statement_imports,
             "mijngeldzakenControl": mijngeldzaken_control,
@@ -3608,6 +3740,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastClosePackSummary": last_close_pack_summary,
             "lastScheduledReportSummary": last_scheduled_report_summary,
             "lastNotificationRefreshSummary": last_notification_refresh_summary,
+            "lastComplianceSummary": last_compliance_summary,
         }
         return render_template_string(
             DASHBOARD_TEMPLATE,
@@ -3667,6 +3800,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 {"label": "Wave Entities", "value": metrics["wave_entities"]},
                 {"label": "Report Runs", "value": metrics["financial_report_runs"]},
                 {"label": "Unread Alerts", "value": metrics["unread_notifications"]},
+                {"label": "Compliance", "value": compliance_summary["openFindings"]},
                 {"label": "Audit Events", "value": metrics["audit_events"]},
             ],
             metrics=metrics,
@@ -3681,6 +3815,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             notification_summary=notification_summary,
             notification_preferences=notification_preferences,
             notification_refresh_summary=last_notification_refresh_summary,
+            compliance_summary=compliance_summary,
+            compliance_assessments=compliance_assessments,
+            compliance_findings=compliance_findings,
+            retention_records=retention_records,
+            last_compliance_summary=last_compliance_summary,
             readiness=readiness,
             raw_payload=_pretty_json(raw_payload),
             record_refresh_summary=last_record_refresh_summary,
@@ -4745,6 +4884,118 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         response.headers["X-FAB-External-Submission"] = artifact["externalSubmission"]
         response.headers["X-FAB-Report-SHA256"] = artifact["sha256"]
         return response
+
+    @app.get("/api/compliance/assessments")
+    def compliance_assessments_api():
+        return jsonify({
+            "summary": LocalComplianceService(ledger, config).summary(),
+            "assessments": ledger.list_compliance_assessments(
+                status=request.args.get("status"),
+                limit=_limit_arg(),
+            ),
+            "statutoryStatus": "provisional",
+            "filingStatus": "not_filed",
+            "externalFiling": "not_executed",
+        })
+
+    @app.post("/api/compliance/assessments")
+    def create_compliance_assessment_api():
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalComplianceService(ledger, config).assess(
+                from_date=payload.get("fromDate") or payload.get("from_date"),
+                to_date=payload.get("toDate") or payload.get("to_date"),
+                basis=payload.get("basis") or "accrual",
+                target_system=payload.get("targetSystem") or payload.get("target_system"),
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_request", "error": str(exc)}), 400
+        return jsonify(result)
+
+    @app.post("/compliance/assess")
+    def run_compliance_assessment_form():
+        try:
+            result = LocalComplianceService(ledger, config).assess(actor="local_dashboard")
+        except ValueError as exc:
+            result = {"success": False, "status": "invalid_request", "error": str(exc)}
+        session["fab_last_compliance_summary"] = result
+        return redirect(url_for("dashboard_page", _anchor="compliance"))
+
+    @app.get("/api/compliance/assessments/<int:assessment_id>")
+    def compliance_assessment_detail_api(assessment_id: int):
+        assessment = ledger.get_compliance_assessment(assessment_id)
+        if not assessment:
+            return jsonify({"success": False, "status": "not_found"}), 404
+        return jsonify({
+            "success": True,
+            "assessment": assessment,
+            "findings": ledger.list_compliance_findings(assessment_id=assessment_id, limit=500),
+            "retentionRecords": [
+                item for item in ledger.list_retention_records(limit=500)
+                if item.get("assessment_id") == assessment_id
+            ],
+            "statutoryStatus": "provisional",
+            "filingStatus": "not_filed",
+            "externalFiling": "not_executed",
+        })
+
+    @app.get("/api/compliance/findings")
+    def compliance_findings_api():
+        assessment_id = request.args.get("assessmentId") or request.args.get("assessment_id")
+        try:
+            parsed_assessment_id = int(assessment_id) if assessment_id else None
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "status": "invalid_request", "error": "assessmentId must be an integer"}), 400
+        return jsonify({
+            "findings": ledger.list_compliance_findings(
+                assessment_id=parsed_assessment_id,
+                status=request.args.get("status"),
+                severity=request.args.get("severity"),
+                code=request.args.get("code"),
+                limit=_limit_arg(),
+            ),
+            "externalFiling": "not_executed",
+        })
+
+    @app.route("/api/compliance/findings/<int:finding_id>/status", methods=["POST", "PATCH"])
+    def compliance_finding_status_api(finding_id: int):
+        payload = request.get_json(silent=True) or {}
+        try:
+            result = LocalComplianceService(ledger, config).update_finding(
+                finding_id,
+                payload.get("status"),
+                resolution=payload.get("resolution"),
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "invalid_request", "error": str(exc)}), 400
+        return jsonify(result), 200 if result.get("success") else 404
+
+    @app.post("/compliance/findings/<int:finding_id>/status")
+    def compliance_finding_status_form(finding_id: int):
+        try:
+            result = LocalComplianceService(ledger, config).update_finding(
+                finding_id,
+                request.form.get("status"),
+                resolution=request.form.get("resolution") or None,
+                actor="local_dashboard",
+            )
+        except ValueError as exc:
+            result = {"success": False, "status": "invalid_request", "error": str(exc)}
+        session["fab_last_compliance_summary"] = result
+        return redirect(url_for("dashboard_page", _anchor="compliance"))
+
+    @app.get("/api/compliance/retention")
+    def compliance_retention_api():
+        return jsonify({
+            "retentionRecords": ledger.list_retention_records(
+                status=request.args.get("status"),
+                limit=_limit_arg(),
+            ),
+            "deletionAuthorized": False,
+            "externalFiling": "not_executed",
+        })
 
     @app.get("/api/bookkeeping-records/<int:record_id>")
     def bookkeeping_record_detail(record_id: int):

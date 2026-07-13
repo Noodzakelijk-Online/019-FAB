@@ -126,6 +126,13 @@ class LocalOperationsHealth:
             limit=500,
         )
         report_runs = self.ledger.list_financial_report_runs(status=REPORT_ATTENTION_STATUSES, limit=100)
+        compliance_assessments = self.ledger.list_compliance_assessments(limit=1)
+        latest_compliance_assessment = compliance_assessments[0] if compliance_assessments else None
+        compliance_findings = self.ledger.list_compliance_findings(
+            assessment_id=latest_compliance_assessment.get("id") if latest_compliance_assessment else None,
+            status=("open", "acknowledged"),
+            limit=500,
+        ) if latest_compliance_assessment else []
         master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
         rate_limits = get_all_rates()
@@ -445,6 +452,26 @@ class LocalOperationsHealth:
                 {"count": missing_wave_entities},
             ))
 
+        for finding in compliance_findings:
+            issues.append(_issue(
+                finding.get("severity") or "medium",
+                f"compliance_{finding.get('code') or 'finding'}",
+                "compliance_finding",
+                finding.get("id"),
+                finding.get("message") or "Compliance evidence requires review.",
+                _age_hours(finding.get("created_at"), now),
+                {
+                    "assessmentId": finding.get("assessment_id"),
+                    "bookkeepingRecordId": finding.get("bookkeeping_record_id"),
+                    "documentId": finding.get("document_id"),
+                    "code": finding.get("code"),
+                    "status": finding.get("status"),
+                    "evidence": finding.get("evidence") or {},
+                    "statutoryStatus": "provisional",
+                    "externalFiling": "not_executed",
+                },
+            ))
+
         exhausted_limiters = [name for name, rate in rate_limits.items() if rate.get("quotaExhausted")]
         if exhausted_limiters:
             issues.append(_issue(
@@ -505,6 +532,12 @@ class LocalOperationsHealth:
                 "waveEntitiesMissingDownstream": missing_wave_entities,
                 "waveInvoicesOverdue": _issue_count(issues, "wave_invoice_overdue"),
                 "waveInvoicesDueSoon": _issue_count(issues, "wave_invoice_due_soon"),
+                "complianceAssessments": metrics.get("compliance_assessments", 0),
+                "openComplianceFindings": len(compliance_findings),
+                "blockingComplianceFindings": sum(
+                    1 for finding in compliance_findings if finding.get("severity") == "high"
+                ),
+                "retentionRecords": metrics.get("retention_records", 0),
                 "masterLedgerRows": master_ledger_summary.get("totalRows", 0),
                 "masterLedgerBlockedRows": master_ledger_summary.get("blockedRows", 0),
                 "masterLedgerReadyForDraft": master_ledger_summary.get("readyForDraft", 0),
@@ -590,6 +623,8 @@ def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:
         actions.append("Open the master ledger projection and resolve blocked rows before close or downstream execution.")
     if "wave_invoice_overdue" in issue_types or "wave_invoice_due_soon" in issue_types:
         actions.append("Open Wave invoice evidence, confirm payment state, and approve any reminder or follow-up separately.")
+    if any(str(issue_type or "").startswith("compliance_") for issue_type in issue_types):
+        actions.append("Open the compliance assessment, correct the source evidence, or record a reasoned reviewed exception before filing.")
     if "api_quota_exhausted" in issue_types:
         actions.append("Pause affected downstream sync jobs until the service quota window resets.")
     return actions

@@ -218,6 +218,8 @@ def _title(event_type: str) -> str:
 
 
 def _dashboard_path(event_type: str) -> str:
+    if event_type.startswith("compliance_"):
+        return "#compliance"
     if "report" in event_type:
         return "#reports"
     if "export" in event_type or "routing" in event_type:

@@ -5,6 +5,7 @@ from typing import Any, Dict
 
 from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_compliance import LocalComplianceService
 from src.operations.local_exports import LocalExportAttemptService
 from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
@@ -35,6 +36,9 @@ class FabWorker:
         self.refresh_notifications = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_refresh_notifications", True)
         )
+        self.assess_compliance = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_assess_compliance", True)
+        )
         self.process_legacy_postings = _as_bool(
             self.config.get("worker_process_legacy_postings", self.operations_ledger is None)
         )
@@ -59,6 +63,7 @@ class FabWorker:
                 ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
                 ("scheduled_reports", self._process_scheduled_reports),
+                ("compliance", self._assess_compliance),
                 ("notifications", self._refresh_notifications),
                 ("operations_exports", self._process_operations_exports),
                 ("legacy_queue", self._process_legacy_queue),
@@ -176,6 +181,18 @@ class FabWorker:
             "Local notification refresh completed",
         )
 
+    def _assess_compliance(self) -> None:
+        if not self.assess_compliance or not self.operations_ledger:
+            return
+        result = LocalComplianceService(self.operations_ledger, self.config).assess(
+            actor="local_worker",
+        )
+        self._record_audit(
+            "compliance_cycle",
+            _compact_compliance_assessment(result),
+            f"Local compliance cycle ended as {result.get('status')}",
+        )
+
     def _process_legacy_queue(self) -> None:
         if not self.process_legacy_postings:
             return
@@ -290,6 +307,23 @@ def _compact_notification_refresh(result: Dict[str, Any]) -> Dict[str, Any]:
         "suppressed": result.get("suppressed", 0),
         "activeIssues": result.get("activeIssues", 0),
         "externalDelivery": "not_executed",
+    }
+
+
+def _compact_compliance_assessment(result: Dict[str, Any]) -> Dict[str, Any]:
+    assessment = result.get("assessment") if isinstance(result.get("assessment"), dict) else {}
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "assessmentId": assessment.get("id"),
+        "assessmentStatus": assessment.get("status"),
+        "periodFrom": assessment.get("period_from"),
+        "periodTo": assessment.get("period_to"),
+        "recordCount": assessment.get("record_count", 0),
+        "findingCount": assessment.get("finding_count", 0),
+        "blockingCount": assessment.get("blocking_count", 0),
+        "statutoryStatus": "provisional",
+        "externalFiling": "not_executed",
     }
 
 

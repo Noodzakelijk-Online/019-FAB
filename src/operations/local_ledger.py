@@ -681,6 +681,84 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_notifications_last_seen
                     ON notifications(last_seen_at);
 
+                CREATE TABLE IF NOT EXISTS compliance_assessments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assessment_key TEXT NOT NULL,
+                    period_from TEXT NOT NULL,
+                    period_to TEXT NOT NULL,
+                    basis TEXT NOT NULL DEFAULT 'accrual',
+                    target_system TEXT,
+                    status TEXT NOT NULL DEFAULT 'ready',
+                    record_count INTEGER NOT NULL DEFAULT 0,
+                    finding_count INTEGER NOT NULL DEFAULT 0,
+                    blocking_count INTEGER NOT NULL DEFAULT 0,
+                    attention_count INTEGER NOT NULL DEFAULT 0,
+                    vat_summary_json TEXT,
+                    source_checksum TEXT NOT NULL,
+                    statutory_status TEXT NOT NULL DEFAULT 'provisional',
+                    external_filing TEXT NOT NULL DEFAULT 'not_executed',
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(assessment_key)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_assessments_period
+                    ON compliance_assessments(period_from, period_to);
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_assessments_status
+                    ON compliance_assessments(status);
+
+                CREATE TABLE IF NOT EXISTS compliance_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assessment_id INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'medium',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    title TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    bookkeeping_record_id INTEGER,
+                    document_id INTEGER,
+                    evidence_json TEXT,
+                    resolution TEXT,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(assessment_id, fingerprint),
+                    FOREIGN KEY(assessment_id) REFERENCES compliance_assessments(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_findings_assessment
+                    ON compliance_findings(assessment_id);
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_findings_status
+                    ON compliance_findings(status);
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_findings_severity
+                    ON compliance_findings(severity);
+                CREATE INDEX IF NOT EXISTS idx_local_compliance_findings_record
+                    ON compliance_findings(bookkeeping_record_id);
+
+                CREATE TABLE IF NOT EXISTS retention_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id INTEGER NOT NULL,
+                    assessment_id INTEGER,
+                    source_date TEXT,
+                    retention_years INTEGER NOT NULL DEFAULT 7,
+                    retain_until TEXT,
+                    status TEXT NOT NULL DEFAULT 'retain_required',
+                    source_file_present INTEGER,
+                    metadata_json TEXT,
+                    last_assessed_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(document_id),
+                    FOREIGN KEY(assessment_id) REFERENCES compliance_assessments(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_local_retention_status
+                    ON retention_records(status);
+                CREATE INDEX IF NOT EXISTS idx_local_retention_until
+                    ON retention_records(retain_until);
+
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     actor_user_id INTEGER,
@@ -2851,6 +2929,289 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def create_compliance_assessment(
+        self,
+        payload: Dict[str, Any],
+        findings: Optional[Sequence[Dict[str, Any]]] = None,
+        retention_records: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        assessment_key = str(payload.get("assessmentKey") or payload.get("assessment_key") or "").strip()
+        source_checksum = str(payload.get("sourceChecksum") or payload.get("source_checksum") or "").strip()
+        if not assessment_key or not source_checksum:
+            raise ValueError("assessmentKey and sourceChecksum are required")
+        period_from = payload.get("periodFrom") or payload.get("period_from")
+        period_to = payload.get("periodTo") or payload.get("period_to")
+        basis = payload.get("basis") or "accrual"
+        target_system = payload.get("targetSystem") or payload.get("target_system")
+        now = self._date_text(payload.get("createdAt") or payload.get("created_at")) or self._now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM compliance_assessments WHERE assessment_key = ? LIMIT 1",
+                (assessment_key,),
+            ).fetchone()
+            if existing:
+                return {"created": False, "assessment": self._row_to_dict(existing)}
+            assessment_id = self._insert_with_connection(
+                connection,
+                "compliance_assessments",
+                {
+                    "assessment_key": assessment_key,
+                    "period_from": period_from,
+                    "period_to": period_to,
+                    "basis": basis,
+                    "target_system": target_system,
+                    "status": payload.get("status") or "ready",
+                    "record_count": self._int(self._first_present(payload.get("recordCount"), payload.get("record_count")), 0),
+                    "finding_count": self._int(self._first_present(payload.get("findingCount"), payload.get("finding_count")), 0),
+                    "blocking_count": self._int(self._first_present(payload.get("blockingCount"), payload.get("blocking_count")), 0),
+                    "attention_count": self._int(self._first_present(payload.get("attentionCount"), payload.get("attention_count")), 0),
+                    "vat_summary_json": self._json(self._redact_sensitive(payload.get("vatSummary") or payload.get("vat_summary") or {})),
+                    "source_checksum": source_checksum,
+                    "statutory_status": "provisional",
+                    "external_filing": "not_executed",
+                    "metadata_json": self._json(self._redact_sensitive(payload.get("metadata") or {})),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            connection.execute(
+                """
+                UPDATE compliance_findings
+                SET status = 'superseded',
+                    resolution = ?,
+                    resolved_at = ?,
+                    updated_at = ?
+                WHERE assessment_id IN (
+                    SELECT id
+                    FROM compliance_assessments
+                    WHERE id != ?
+                      AND period_from = ?
+                      AND period_to = ?
+                      AND basis = ?
+                      AND COALESCE(target_system, '') = COALESCE(?, '')
+                )
+                  AND status IN ('open', 'acknowledged')
+                """,
+                (
+                    f"Superseded by compliance assessment #{assessment_id}.",
+                    now,
+                    now,
+                    assessment_id,
+                    period_from,
+                    period_to,
+                    basis,
+                    target_system,
+                ),
+            )
+            for finding in findings or []:
+                self._insert_with_connection(
+                    connection,
+                    "compliance_findings",
+                    {
+                        "assessment_id": assessment_id,
+                        "fingerprint": finding.get("fingerprint"),
+                        "code": finding.get("code"),
+                        "severity": finding.get("severity") or "medium",
+                        "status": finding.get("status") or "open",
+                        "title": finding.get("title") or str(finding.get("code") or "finding").replace("_", " ").title(),
+                        "message": finding.get("message") or "Compliance evidence requires review.",
+                        "bookkeeping_record_id": self._optional_int(
+                            self._first_present(finding.get("bookkeepingRecordId"), finding.get("bookkeeping_record_id"))
+                        ),
+                        "document_id": self._optional_int(
+                            self._first_present(finding.get("documentId"), finding.get("document_id"))
+                        ),
+                        "evidence_json": self._json(self._redact_sensitive(finding.get("evidence") or {})),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            for retention in retention_records or []:
+                document_id = self._optional_int(
+                    self._first_present(retention.get("documentId"), retention.get("document_id"))
+                )
+                if document_id is None:
+                    continue
+                values = {
+                    "assessment_id": assessment_id,
+                    "source_date": retention.get("sourceDate") or retention.get("source_date"),
+                    "retention_years": self._int(
+                        self._first_present(retention.get("retentionYears"), retention.get("retention_years")),
+                        7,
+                    ),
+                    "retain_until": retention.get("retainUntil") or retention.get("retain_until"),
+                    "status": retention.get("status") or "retain_required",
+                    "source_file_present": (
+                        None
+                        if self._first_present(retention.get("sourceFilePresent"), retention.get("source_file_present")) is None
+                        else self._bool_int(
+                            self._first_present(retention.get("sourceFilePresent"), retention.get("source_file_present"))
+                        )
+                    ),
+                    "metadata_json": self._json(self._redact_sensitive(retention.get("metadata") or {})),
+                    "last_assessed_at": now,
+                    "updated_at": now,
+                }
+                row = connection.execute(
+                    "SELECT id FROM retention_records WHERE document_id = ? LIMIT 1",
+                    (document_id,),
+                ).fetchone()
+                if row:
+                    self._update_with_connection(connection, "retention_records", int(row["id"]), values)
+                else:
+                    self._insert_with_connection(
+                        connection,
+                        "retention_records",
+                        {"document_id": document_id, "created_at": now, **values},
+                    )
+            assessment = connection.execute(
+                "SELECT * FROM compliance_assessments WHERE id = ? LIMIT 1",
+                (assessment_id,),
+            ).fetchone()
+        return {"created": True, "assessment": self._row_to_dict(assessment)}
+
+    def get_compliance_assessment(self, assessment_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM compliance_assessments WHERE id = ? LIMIT 1",
+                (int(assessment_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def list_compliance_assessments(
+        self,
+        status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM compliance_assessments"
+        params = []
+        where = []
+        self._append_status_filter(where, params, "status", status)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_compliance_findings(
+        self,
+        assessment_id: Optional[int] = None,
+        status: Optional[Any] = None,
+        severity: Optional[Any] = None,
+        code: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM compliance_findings"
+        params = []
+        where = []
+        if assessment_id is not None:
+            where.append("assessment_id = ?")
+            params.append(int(assessment_id))
+        self._append_status_filter(where, params, "status", status)
+        self._append_status_filter(where, params, "severity", severity)
+        if code:
+            where.append("code = ?")
+            params.append(code)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def get_compliance_finding(self, finding_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM compliance_findings WHERE id = ? LIMIT 1",
+                (int(finding_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def update_compliance_finding_status(
+        self,
+        finding_id: int,
+        status: str,
+        resolution: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        status = str(status or "").strip().lower()
+        if status not in {"open", "acknowledged", "resolved", "accepted_exception"}:
+            raise ValueError(f"Unsupported compliance finding status: {status}")
+        if status in {"resolved", "accepted_exception"} and not str(resolution or "").strip():
+            raise ValueError("resolution is required when closing a compliance finding")
+        now = self._now()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id, assessment_id FROM compliance_findings WHERE id = ? LIMIT 1",
+                (int(finding_id),),
+            ).fetchone()
+            if not row:
+                return None
+            values = {
+                "status": status,
+                "resolution": resolution,
+                "resolved_at": now if status in {"resolved", "accepted_exception"} else None,
+                "updated_at": now,
+            }
+            self._update_with_connection(connection, "compliance_findings", int(finding_id), values)
+            if status == "open":
+                connection.execute(
+                    "UPDATE compliance_findings SET resolution = NULL, resolved_at = NULL WHERE id = ?",
+                    (int(finding_id),),
+                )
+            assessment_id = int(row["assessment_id"])
+            counters = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status IN ('open', 'acknowledged') THEN 1 ELSE 0 END) AS open_count,
+                    SUM(CASE WHEN status IN ('open', 'acknowledged') AND severity = 'high' THEN 1 ELSE 0 END) AS blocking_count,
+                    SUM(CASE WHEN status IN ('open', 'acknowledged') AND severity IN ('medium', 'low') THEN 1 ELSE 0 END) AS attention_count
+                FROM compliance_findings
+                WHERE assessment_id = ?
+                """,
+                (assessment_id,),
+            ).fetchone()
+            open_count = int(counters["open_count"] or 0)
+            blocking_count = int(counters["blocking_count"] or 0)
+            attention_count = int(counters["attention_count"] or 0)
+            assessment_status = "blocked" if blocking_count else "needs_review" if open_count else "ready"
+            connection.execute(
+                """
+                UPDATE compliance_assessments
+                SET status = ?, blocking_count = ?, attention_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (assessment_status, blocking_count, attention_count, now, assessment_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM compliance_findings WHERE id = ? LIMIT 1",
+                (int(finding_id),),
+            ).fetchone()
+        return self._row_to_dict(updated) if updated else None
+
+    def list_retention_records(
+        self,
+        status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = "SELECT * FROM retention_records"
+        params = []
+        where = []
+        self._append_status_filter(where, params, "status", status)
+        if where:
+            query = f"{query} WHERE {' AND '.join(where)}"
+        query = f"{query} ORDER BY retain_until ASC, id ASC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def dashboard_metrics(self) -> Dict[str, int]:
         with self._connection() as connection:
             return {
@@ -2972,6 +3333,18 @@ class LocalOperationsLedger:
                     "status IN ('unread', 'read', 'acknowledged')",
                 ),
                 "notification_preferences": self._count(connection, "notification_preferences"),
+                "compliance_assessments": self._count(connection, "compliance_assessments"),
+                "open_compliance_findings": self._count(
+                    connection,
+                    "compliance_findings",
+                    "status IN ('open', 'acknowledged')",
+                ),
+                "blocking_compliance_findings": self._count(
+                    connection,
+                    "compliance_findings",
+                    "status IN ('open', 'acknowledged') AND severity = 'high'",
+                ),
+                "retention_records": self._count(connection, "retention_records"),
                 "audit_events": self._count(connection, "audit_events"),
             }
 
