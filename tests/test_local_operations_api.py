@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
+from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
 from src.operations.local_ledger import LocalOperationsLedger
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
@@ -55,6 +56,81 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("source:gmail", html)
             self.assertIn("Not run", html)
             self.assertIn(f"/api/workflows/{workflow_run_id}", html)
+
+    def test_workflow_recovery_api_and_dashboard_retry_only_safe_step(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            config = {
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_intake_paths": intake_dir,
+                "fab_autonomy_ignore_health_blocks": True,
+            }
+            autonomy = LocalAutonomousService(
+                ledger,
+                config,
+                intake_paths=[intake_dir],
+            )
+            with patch.object(autonomy, "_run_rescan", side_effect=RuntimeError("scan failed")):
+                failed = autonomy.run_cycle(
+                    include_wave_plan=False,
+                    include_wave_sync=False,
+                )
+            app = create_app(config)
+            client = app.test_client()
+
+            plan_response = client.get(
+                f"/api/workflows/{failed['workflowRunId']}/recovery-plan"
+            )
+            before_html = client.get("/").data.decode("utf-8")
+            retry_response = client.post(
+                f"/api/workflows/{failed['workflowRunId']}/retry",
+                json={"actor": "tester"},
+            )
+            retry_payload = retry_response.get_json()
+            recovered = client.get(
+                f"/api/workflows/{retry_payload['workflowRunId']}"
+            ).get_json()
+            repeated = client.post(
+                f"/api/workflows/{failed['workflowRunId']}/retry",
+                json={"actor": "tester"},
+            )
+            form_result = client.post(
+                f"/workflows/{failed['workflowRunId']}/retry",
+                follow_redirects=True,
+            )
+            missing = client.get("/api/workflows/999999/recovery-plan")
+
+            self.assertEqual(plan_response.status_code, 200)
+            self.assertTrue(plan_response.get_json()["canRetry"])
+            self.assertEqual(plan_response.get_json()["retryActionId"], "rescan_intake")
+            self.assertIn(
+                f"/workflows/{failed['workflowRunId']}/retry",
+                before_html,
+            )
+            self.assertIn("Retry safe step", before_html)
+            self.assertEqual(retry_response.status_code, 200)
+            self.assertTrue(retry_payload["success"])
+            self.assertTrue(retry_payload["runtimeLease"]["released"])
+            self.assertEqual(recovered["trigger_source"], "local_autonomous_recovery")
+            self.assertEqual(len(recovered["steps"]), 1)
+            self.assertEqual(recovered["steps"][0]["attempt"], 2)
+            self.assertEqual(recovered["steps"][0]["step_key"], "rescan_intake")
+            self.assertEqual(repeated.status_code, 409)
+            self.assertEqual(repeated.get_json()["status"], "superseded")
+            self.assertEqual(form_result.status_code, 200)
+            self.assertIn("Last workflow recovery", form_result.data.decode("utf-8"))
+            self.assertIn("superseded", form_result.data.decode("utf-8"))
+            self.assertEqual(missing.status_code, 404)
+            started = next(
+                event
+                for event in ledger.list_audit_events(limit=100)
+                if event["action"] == "local_workflow_recovery.started"
+            )
+            self.assertEqual(started["details"]["actor"], "tester")
+            self.assertEqual(started["details"]["externalSubmission"], "not_executed")
 
     def test_compliance_assessment_findings_retention_and_dashboard(self):
         with tempfile.TemporaryDirectory() as temp_dir:

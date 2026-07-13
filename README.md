@@ -12,6 +12,7 @@ This project aims to develop a fully automated system to fetch financial documen
 - **Validation**: Validates extracted data against predefined rules and patterns.
 - **Error Handling & Recovery**: Robust error handling with retry mechanisms and manual review interfaces for flagged documents.
 - **Workflow Evidence**: Persists ordered autonomous actions and connector-source steps with attempts, timestamps, duration, result metadata, failures, and aborted downstream work.
+- **Governed Workflow Recovery**: Plans and executes linked attempt-2+ retries for failed read-only connector sources or the exact failed low-risk autonomous step, without replaying approved exports or other external actions.
 - **Performance Optimization**: Includes batch processing, caching, and performance optimization strategies.
 - **Security**: Manages credentials securely using encryption.
 - **Compliance**: Checks documents against regulatory compliance rules.

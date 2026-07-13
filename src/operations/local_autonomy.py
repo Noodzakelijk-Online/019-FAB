@@ -414,6 +414,11 @@ class LocalAutonomousService:
         include_wave_plan: bool = True,
         dry_run: bool = False,
         include_wave_sync: bool = True,
+        allowed_action_ids: Optional[List[str]] = None,
+        trigger_source: str = AUTONOMOUS_TRIGGER,
+        workflow_metadata: Optional[Dict[str, Any]] = None,
+        step_attempts: Optional[Dict[str, int]] = None,
+        recovery_mode: bool = False,
     ) -> Dict[str, Any]:
         if dry_run:
             return self._run_cycle_once(
@@ -422,6 +427,11 @@ class LocalAutonomousService:
                 include_wave_plan=include_wave_plan,
                 dry_run=True,
                 include_wave_sync=include_wave_sync,
+                allowed_action_ids=allowed_action_ids,
+                trigger_source=trigger_source,
+                workflow_metadata=workflow_metadata,
+                step_attempts=step_attempts,
+                recovery_mode=recovery_mode,
             )
         owner_token = uuid4().hex
         lease = self.ledger.acquire_runtime_lease(
@@ -433,7 +443,7 @@ class LocalAutonomousService:
                 "operations_autonomy_lease_seconds",
                 default=21600.0,
             ),
-            metadata={"trigger": AUTONOMOUS_TRIGGER},
+            metadata={"trigger": trigger_source},
         )
         if not lease.get("acquired"):
             plan = self.plan(
@@ -468,6 +478,11 @@ class LocalAutonomousService:
                 include_wave_plan=include_wave_plan,
                 dry_run=False,
                 include_wave_sync=include_wave_sync,
+                allowed_action_ids=allowed_action_ids,
+                trigger_source=trigger_source,
+                workflow_metadata=workflow_metadata,
+                step_attempts=step_attempts,
+                recovery_mode=recovery_mode,
             )
             return result
         finally:
@@ -496,8 +511,25 @@ class LocalAutonomousService:
         include_wave_plan: bool = True,
         dry_run: bool = False,
         include_wave_sync: bool = True,
+        allowed_action_ids: Optional[List[str]] = None,
+        trigger_source: str = AUTONOMOUS_TRIGGER,
+        workflow_metadata: Optional[Dict[str, Any]] = None,
+        step_attempts: Optional[Dict[str, int]] = None,
+        recovery_mode: bool = False,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
+        selected_action_ids = (
+            None
+            if allowed_action_ids is None
+            else {str(action_id) for action_id in allowed_action_ids if str(action_id).strip()}
+        )
+        if selected_action_ids is not None and not selected_action_ids:
+            raise ValueError("At least one autonomous action is required")
+        unknown_action_ids = (selected_action_ids or set()) - set(AUTONOMY_EXECUTION_ORDER)
+        if unknown_action_ids:
+            raise ValueError(
+                "Unsupported autonomous action(s): " + ", ".join(sorted(unknown_action_ids))
+            )
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
         plan = self.plan(
             limit=limit,
@@ -532,16 +564,23 @@ class LocalAutonomousService:
                 "skippedActions": plan["actions"],
             }
 
+        run_metadata = {
+            "plan": {
+                "status": plan["status"],
+                "runnableActionIds": plan["runnableActionIds"],
+                "selectedActionIds": sorted(selected_action_ids) if selected_action_ids is not None else None,
+                "externalSubmission": "not_executed",
+            }
+        }
+        run_metadata.update({
+            key: value
+            for key, value in (workflow_metadata or {}).items()
+            if key != "plan"
+        })
         workflow_run_id = self.ledger.create_workflow_run({
             "status": "running",
-            "triggerSource": AUTONOMOUS_TRIGGER,
-            "metadata": {
-                "plan": {
-                    "status": plan["status"],
-                    "runnableActionIds": plan["runnableActionIds"],
-                    "externalSubmission": "not_executed",
-                }
-            },
+            "triggerSource": trigger_source,
+            "metadata": run_metadata,
         })
         executed: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
@@ -557,6 +596,7 @@ class LocalAutonomousService:
             action_id
             for action_id in AUTONOMY_EXECUTION_ORDER
             if action_id in plan_actions
+            and (selected_action_ids is None or action_id in selected_action_ids)
         ]
         step_metadata: Dict[str, Dict[str, Any]] = {}
         step_ids: Dict[str, int] = {}
@@ -577,12 +617,19 @@ class LocalAutonomousService:
                 "stepKey": action_id,
                 "stage": action.get("stage"),
                 "status": "pending",
+                "attempt": max(1, int((step_attempts or {}).get(action_id, 1))),
                 "stepOrder": step_order,
                 "metadata": metadata,
             })
 
         def execute_step(action_id: str, should_run: bool, callback) -> Dict[str, Any]:
             nonlocal failed_step_key
+            if selected_action_ids is not None and action_id not in selected_action_ids:
+                return {
+                    "id": action_id,
+                    "status": "not_selected",
+                    "reason": "not_selected_for_recovery",
+                }
             step_id = step_ids[action_id]
             if not should_run:
                 result = self._skip(plan, action_id)
@@ -650,11 +697,19 @@ class LocalAutonomousService:
                 self._run_rescan,
             )
 
-            processing_should_run = self._can_run(plan, "process_imported") or _registered_documents(executed)
+            processing_should_run = (
+                self._can_run(plan, "process_imported")
+                or _registered_documents(executed)
+                or (recovery_mode and selected_action_ids == {"process_imported"})
+            )
             execute_step(
                 "process_imported",
                 processing_should_run,
-                lambda: self._run_processing(limit),
+                lambda: (
+                    self._run_processing_recovery(limit)
+                    if recovery_mode and selected_action_ids == {"process_imported"}
+                    else self._run_processing(limit)
+                ),
             )
 
             execute_step(
@@ -764,9 +819,15 @@ class LocalAutonomousService:
             "errorMessage": error_message,
             "finishedAt": _utc_timestamp(),
             "metadata": {
+                **{
+                    key: value
+                    for key, value in run_metadata.items()
+                    if key != "plan"
+                },
                 "plan": {
                     "status": plan["status"],
                     "runnableActionIds": plan["runnableActionIds"],
+                    "selectedActionIds": sorted(selected_action_ids) if selected_action_ids is not None else None,
                     "externalSubmission": "not_executed",
                 },
                 "steps": {
@@ -794,6 +855,7 @@ class LocalAutonomousService:
             "success": status == "completed",
             "status": status,
             "workflowRunId": workflow_run_id,
+            "triggerSource": trigger_source,
             "externalSubmission": "not_executed",
             "plan": plan,
             "executedActions": executed,
@@ -960,6 +1022,17 @@ class LocalAutonomousService:
     def _run_processing(self, limit: int) -> Dict[str, Any]:
         summary = LocalDocumentProcessor(self.ledger, self.config).process_imported(limit=limit)
         return {"id": "process_imported", "status": "completed", "summary": summary}
+
+    def _run_processing_recovery(self, limit: int) -> Dict[str, Any]:
+        summary = LocalDocumentProcessor(self.ledger, self.config).retry_failed(
+            limit=limit,
+            actor="local_workflow_recovery",
+        )
+        return {
+            "id": "process_imported",
+            "status": "completed" if int(summary.get("failed") or 0) == 0 else "attention_required",
+            "summary": summary,
+        }
 
     def _run_routing(self, limit: int) -> Dict[str, Any]:
         service = LocalRoutingService(self.ledger, self.config)

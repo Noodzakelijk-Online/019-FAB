@@ -254,7 +254,7 @@ The current repository already contains many module-level foundations for this v
 - Processing should move toward queued jobs and workers.
 - Backups need to cover database state, original documents, generated artifacts, and configuration.
 - Restore operations need safety checks, audit logging, and user-facing status.
-- Durable step evidence now covers autonomous actions and connector sources; restartable per-step retries and resume-from-failure policies remain open.
+- Durable step evidence now covers autonomous actions and connector sources. Governed recovery can create a linked attempt for failed read-only connector sources or the exact failed low-risk autonomous step. Automatic scheduling, process-level crash continuation, and dependency-aware resume across multiple steps remain open.
 
 ## Recommended Delivery Sequence
 
@@ -280,7 +280,7 @@ The current repository already contains many module-level foundations for this v
 ### Phase 3: Workflow Orchestration
 
 - Persist each workflow run and step result. Implemented for the local autonomous cycle and connector intake.
-- Add resumable processing and retries.
+- Add resumable processing and retries. The first governed slice is implemented for connector-source retries and exact low-risk autonomous-step retries; broader crash resume and automatic retry policy remain open.
 - Add integration status and error visibility to the dashboard. Implemented through Workflow Runs, `/api/workflows`, health, and exception links.
 - Connect the Python workflow to the web API or move orchestration behind a worker/job boundary.
 
@@ -306,4 +306,4 @@ The current repository already contains many module-level foundations for this v
 
 ## Immediate Next Build Target
 
-The persistent operating backbone, review surface, and workflow-step evidence are now present. The next orchestration increment is resumable execution: explicit retry policies per step, dependency-aware resume from the first safe incomplete boundary, and crash-recovery tests that prove no external action is replayed without its approval and idempotency evidence.
+The persistent operating backbone, review surface, workflow-step evidence, and first governed retry slice are now present. The next orchestration increment is automatic recovery policy: persisted backoff/attempt limits, dependency-aware continuation after a successful retry, and process-crash tests that prove no external action is replayed without approval and idempotency evidence.

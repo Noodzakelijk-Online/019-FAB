@@ -45,6 +45,7 @@ from src.operations.local_reporting import LocalFinancialReportingService, Local
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.operations.local_workflow_recovery import LocalWorkflowRecoveryService
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -911,6 +912,12 @@ DASHBOARD_TEMPLATE = """
         <div><h2>Workflow Runs</h2></div>
         <a class="button-link secondary" href="{{ url_for('workflow_runs_api') }}">JSON</a>
       </div>
+      {% if workflow_recovery_summary %}
+      <details open>
+        <summary>Last workflow recovery</summary>
+        <pre>{{ pretty_json(workflow_recovery_summary) }}</pre>
+      </details>
+      {% endif %}
       {% if workflow_runs %}
       {% for run in workflow_runs %}
       <details {% if run.status in ["failed", "error", "completed_with_errors", "running"] or run.step_summary.get("failed", 0) or run.step_summary.get("blocked", 0) %}open{% endif %}>
@@ -930,6 +937,22 @@ DASHBOARD_TEMPLATE = """
           <div class="summary-item"><span>Not run</span><strong>{{ run.step_summary.get("not_run", 0) }}</strong></div>
         </div>
         {% if run.error_message %}<div class="empty">{{ run.error_message }}</div>{% endif %}
+        {% if run.recovery %}
+        <div class="empty">
+          <strong>Recovery: {{ run.recovery.status }}</strong>
+          <span>{{ run.recovery.nextAction }}</span>
+          <div class="inline-actions">
+            {% if run.recovery.canRetry %}
+            <form method="post" action="{{ url_for('retry_workflow_form', workflow_run_id=run.id) }}">
+              <button class="secondary" type="submit">Retry safe step</button>
+            </form>
+            {% endif %}
+            {% if run.recovery.supersededByWorkflowRunId %}
+            <a href="{{ url_for('workflow_detail_api', workflow_run_id=run.recovery.supersededByWorkflowRunId) }}">Recovery run #{{ run.recovery.supersededByWorkflowRunId }}</a>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
         {% if run.steps %}
         <div class="table-wrap">
           <table>
@@ -3787,7 +3810,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         category_summaries = ledger.list_category_summaries(limit=25)
         corrections = ledger.list_review_corrections(limit=25)
         audit_events = ledger.list_audit_events(limit=15)
-        workflow_runs = _workflow_runs_with_steps(ledger, limit=15)
+        workflow_recovery_service = _workflow_recovery_service(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        )
+        workflow_runs = _workflow_runs_with_steps(
+            ledger,
+            limit=15,
+            recovery_service=workflow_recovery_service,
+        )
         last_intake_summary = session.pop("fab_last_intake_summary", None)
         last_processing_summary = session.pop("fab_last_processing_summary", None)
         last_routing_summary = session.pop("fab_last_routing_summary", None)
@@ -3806,6 +3840,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         last_compliance_summary = session.pop("fab_last_compliance_summary", None)
         last_connector_sync = session.pop("fab_last_connector_sync", None)
         last_photos_picker_action = session.pop("fab_last_photos_picker_action", None)
+        last_workflow_recovery = session.pop("fab_last_workflow_recovery", None)
         health_payload = {
             "status": operations_health["status"],
             "ledger_path": app.config["FAB_LOCAL_LEDGER_PATH"],
@@ -3883,6 +3918,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "lastNotificationRefreshSummary": last_notification_refresh_summary,
             "lastComplianceSummary": last_compliance_summary,
             "lastConnectorSync": last_connector_sync,
+            "lastWorkflowRecovery": last_workflow_recovery,
         }
         return render_template_string(
             DASHBOARD_TEMPLATE,
@@ -3994,6 +4030,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             wave_entity_sync_summary=last_wave_entity_sync,
             wave_report_controls=wave_report_controls,
             workflow_runs=workflow_runs,
+            workflow_recovery_summary=last_workflow_recovery,
         )
 
     @app.get("/api/dashboard")
@@ -4017,6 +4054,51 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return jsonify({"error": "Workflow run not found"}), 404
         workflow_run["stepSummary"] = _workflow_step_summary(workflow_run.get("steps") or [])
         return jsonify(workflow_run)
+
+    @app.get("/api/workflows/<int:workflow_run_id>/recovery-plan")
+    def workflow_recovery_plan_api(workflow_run_id: int):
+        recovery_plan = _workflow_recovery_service(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).plan(workflow_run_id)
+        return jsonify(recovery_plan), 404 if recovery_plan.get("status") == "not_found" else 200
+
+    @app.post("/api/workflows/<int:workflow_run_id>/retry")
+    def retry_workflow_api(workflow_run_id: int):
+        payload = request.get_json(silent=True) or {}
+        result = _workflow_recovery_service(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).retry(
+            workflow_run_id,
+            actor=str(payload.get("actor") or "api")[:200],
+            limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+        )
+        if result.get("workflowRunId"):
+            status_code = 200
+        elif result.get("status") == "not_found":
+            status_code = 404
+        else:
+            status_code = 409
+        return jsonify(result), status_code
+
+    @app.post("/workflows/<int:workflow_run_id>/retry")
+    def retry_workflow_form(workflow_run_id: int):
+        result = _workflow_recovery_service(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).retry(workflow_run_id, actor="local_user", limit=25)
+        session["fab_last_workflow_recovery"] = _compact_workflow_recovery(result)
+        return redirect(url_for("dashboard_page", _anchor="workflows"))
 
     @app.get("/api/notifications")
     def notifications_api():
@@ -6353,6 +6435,22 @@ def _autonomy_service(
     )
 
 
+def _workflow_recovery_service(
+    ledger: LocalOperationsLedger,
+    config: Dict[str, Any],
+    readiness: LocalReadinessService,
+    intake_paths: list,
+    intake_extensions: list,
+) -> LocalWorkflowRecoveryService:
+    return LocalWorkflowRecoveryService(
+        ledger,
+        config,
+        readiness=readiness,
+        intake_paths=intake_paths,
+        intake_extensions=intake_extensions,
+    )
+
+
 def _compact_wave_plan_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
     workflow_plan = plan.get("workflow_plan") or {}
     operations = plan.get("operations") or []
@@ -6628,7 +6726,11 @@ def _compact_connector_sync(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _workflow_runs_with_steps(ledger: LocalOperationsLedger, limit: int = 15) -> list:
+def _workflow_runs_with_steps(
+    ledger: LocalOperationsLedger,
+    limit: int = 15,
+    recovery_service: Optional[LocalWorkflowRecoveryService] = None,
+) -> list:
     workflow_runs = ledger.list_workflow_runs(limit=limit)
     for workflow_run in workflow_runs:
         steps = ledger.list_workflow_steps(
@@ -6638,7 +6740,27 @@ def _workflow_runs_with_steps(ledger: LocalOperationsLedger, limit: int = 15) ->
         workflow_run["steps"] = steps
         workflow_run["step_count"] = len(steps)
         workflow_run["step_summary"] = _workflow_step_summary(steps)
+        workflow_run["recovery"] = (
+            recovery_service.plan(int(workflow_run["id"]))
+            if recovery_service
+            and workflow_run.get("status") in {"failed", "completed_with_errors", "attention_required"}
+            else None
+        )
     return workflow_runs
+
+
+def _compact_workflow_recovery(result: Dict[str, Any]) -> Dict[str, Any]:
+    plan = result.get("plan") or {}
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "workflowRunId": result.get("workflowRunId"),
+        "sourceWorkflowRunId": result.get("sourceWorkflowRunId"),
+        "recoveryType": result.get("recoveryType") or plan.get("recoveryType"),
+        "selectedStepKeys": result.get("selectedStepKeys") or plan.get("selectedStepKeys") or [],
+        "nextAction": plan.get("nextAction"),
+        "externalSubmission": "not_executed",
+    }
 
 
 def _workflow_step_summary(steps: list) -> Dict[str, int]:

@@ -7,6 +7,59 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_existing_ledger_gets_workflow_recovery_linkage_columns_and_indexes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            connection = sqlite3.connect(ledger_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE workflow_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        status TEXT NOT NULL,
+                        trigger_source TEXT NOT NULL,
+                        documents_imported INTEGER NOT NULL DEFAULT 0,
+                        documents_processed INTEGER NOT NULL DEFAULT 0,
+                        documents_needing_review INTEGER NOT NULL DEFAULT 0,
+                        error_message TEXT,
+                        metadata_json TEXT,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger = LocalOperationsLedger(ledger_path)
+            source_id = ledger.create_workflow_run({"status": "failed", "triggerSource": "test"})
+            child_id = ledger.create_workflow_run({
+                "status": "completed",
+                "triggerSource": "test_recovery",
+                "metadata": {
+                    "recovery": {
+                        "sourceWorkflowRunId": source_id,
+                        "rootWorkflowRunId": source_id,
+                    }
+                },
+            })
+
+            connection = sqlite3.connect(ledger_path)
+            try:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)")}
+                indexes = {row[1] for row in connection.execute("PRAGMA index_list(workflow_runs)")}
+            finally:
+                connection.close()
+
+            self.assertIn("recovery_source_workflow_run_id", columns)
+            self.assertIn("recovery_root_workflow_run_id", columns)
+            self.assertIn("idx_local_workflow_recovery_source", indexes)
+            self.assertIn("idx_local_workflow_recovery_root", indexes)
+            self.assertEqual(ledger.get_workflow_recovery_child(source_id)["id"], child_id)
+
     def test_workflow_steps_are_ordered_filterable_and_redacted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

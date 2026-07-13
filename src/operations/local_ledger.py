@@ -60,6 +60,8 @@ class LocalOperationsLedger:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     status TEXT NOT NULL,
                     trigger_source TEXT NOT NULL,
+                    recovery_source_workflow_run_id INTEGER,
+                    recovery_root_workflow_run_id INTEGER,
                     documents_imported INTEGER NOT NULL DEFAULT 0,
                     documents_processed INTEGER NOT NULL DEFAULT 0,
                     documents_needing_review INTEGER NOT NULL DEFAULT 0,
@@ -68,7 +70,9 @@ class LocalOperationsLedger:
                     started_at TEXT,
                     finished_at TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(recovery_source_workflow_run_id) REFERENCES workflow_runs(id) ON DELETE SET NULL,
+                    FOREIGN KEY(recovery_root_workflow_run_id) REFERENCES workflow_runs(id) ON DELETE SET NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS source_accounts (
@@ -803,6 +807,30 @@ class LocalOperationsLedger:
             )
             self._ensure_column(
                 connection,
+                "workflow_runs",
+                "recovery_source_workflow_run_id",
+                "INTEGER",
+            )
+            self._ensure_column(
+                connection,
+                "workflow_runs",
+                "recovery_root_workflow_run_id",
+                "INTEGER",
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_workflow_recovery_source
+                    ON workflow_runs(recovery_source_workflow_run_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_workflow_recovery_root
+                    ON workflow_runs(recovery_root_workflow_run_id)
+                """
+            )
+            self._ensure_column(
+                connection,
                 "bookkeeping_documents",
                 "source_account_id",
                 "INTEGER",
@@ -981,15 +1009,34 @@ class LocalOperationsLedger:
 
     def create_workflow_run(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         now = self._now()
+        metadata = payload.get("metadata")
+        recovery = metadata.get("recovery") if isinstance(metadata, dict) else {}
+        recovery = recovery if isinstance(recovery, dict) else {}
         values = {
             "id": preferred_id,
             "status": payload.get("status", "running"),
             "trigger_source": payload.get("triggerSource") or payload.get("trigger_source") or "manual",
+            "recovery_source_workflow_run_id": self._optional_int(
+                self._payload_value(
+                    payload,
+                    "recoverySourceWorkflowRunId",
+                    "recovery_source_workflow_run_id",
+                )
+                or recovery.get("sourceWorkflowRunId")
+            ),
+            "recovery_root_workflow_run_id": self._optional_int(
+                self._payload_value(
+                    payload,
+                    "recoveryRootWorkflowRunId",
+                    "recovery_root_workflow_run_id",
+                )
+                or recovery.get("rootWorkflowRunId")
+            ),
             "documents_imported": self._int(payload.get("documentsImported"), 0),
             "documents_processed": self._int(payload.get("documentsProcessed"), 0),
             "documents_needing_review": self._int(payload.get("documentsNeedingReview"), 0),
             "error_message": payload.get("errorMessage"),
-            "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
+            "metadata_json": self._json(self._redact_sensitive(metadata)),
             "started_at": self._date_text(payload.get("startedAt")) or now,
             "finished_at": self._date_text(payload.get("finishedAt")),
             "created_at": now,
@@ -1020,6 +1067,19 @@ class LocalOperationsLedger:
             row = connection.execute(
                 "SELECT * FROM workflow_runs WHERE id = ? LIMIT 1",
                 (workflow_run_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_workflow_recovery_child(self, source_workflow_run_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM workflow_runs
+                WHERE recovery_source_workflow_run_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(source_workflow_run_id),),
             ).fetchone()
         return self._row_to_dict(row) if row else None
 

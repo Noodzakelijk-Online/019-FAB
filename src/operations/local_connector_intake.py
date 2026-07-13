@@ -49,6 +49,9 @@ class LocalConnectorIntakeService:
         self,
         sources: Optional[Iterable[str]] = None,
         actor: str = "local_connector_intake",
+        trigger_source: str = "connector_intake",
+        workflow_metadata: Optional[Dict[str, Any]] = None,
+        step_attempts: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         requested = _normalize_sources(sources)
         selected = requested or [item["source"] for item in self.plan()["sources"] if item["enabled"]]
@@ -67,15 +70,17 @@ class LocalConnectorIntakeService:
             raise ValueError(f"Unsupported connector source(s): {', '.join(sorted(unknown))}")
 
         started_at = _now()
+        run_metadata = {
+            "requestedSources": selected,
+            "actor": actor,
+            "externalSubmission": "not_executed",
+        }
+        run_metadata.update(workflow_metadata or {})
         workflow_run_id = self.ledger.create_workflow_run({
             "status": "running",
-            "triggerSource": "connector_intake",
+            "triggerSource": trigger_source,
             "startedAt": started_at,
-            "metadata": {
-                "requestedSources": selected,
-                "actor": actor,
-                "externalSubmission": "not_executed",
-            },
+            "metadata": run_metadata,
         })
         results = []
         for step_order, source in enumerate(selected, start=1):
@@ -93,6 +98,7 @@ class LocalConnectorIntakeService:
                 "stepKey": f"source:{source}",
                 "stage": "collect",
                 "status": "pending",
+                "attempt": max(1, int((step_attempts or {}).get(source, 1))),
                 "stepOrder": step_order,
                 "metadata": step_metadata,
             })
@@ -151,6 +157,7 @@ class LocalConnectorIntakeService:
             "errorMessage": "; ".join(item.get("error") or item["status"] for item in failures) or None,
             "finishedAt": finished_at,
             "metadata": {
+                **(workflow_metadata or {}),
                 "actor": actor,
                 "requestedSources": selected,
                 "summary": summary,
@@ -183,6 +190,7 @@ class LocalConnectorIntakeService:
             "success": not failures,
             "status": status,
             "workflowRunId": workflow_run_id,
+            "triggerSource": trigger_source,
             "results": results,
             "summary": summary,
             "externalSubmission": "not_executed",
