@@ -8,4 +8,9 @@ export const ENV = {
   forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
   forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
   fabOperationsServiceToken: process.env.FAB_OPERATIONS_SERVICE_TOKEN ?? "",
+  fabLocalApiUrl: process.env.FAB_LOCAL_API_URL ?? "http://127.0.0.1:5001",
+  fabLocalApiToken: process.env.FAB_LOCAL_API_TOKEN ?? "",
+  fabOperatorLocalMode: process.env.FAB_OPERATOR_LOCAL_MODE
+    ? ["1", "true", "yes", "on"].includes(process.env.FAB_OPERATOR_LOCAL_MODE.toLowerCase())
+    : process.env.NODE_ENV === "development",
 };

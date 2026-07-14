@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -2880,7 +2881,9 @@ class LocalOperationsLedger:
                 "action": payload.get("action", "workflow.event"),
                 "entity_type": payload.get("entityType", "unknown"),
                 "entity_id": payload.get("entityId"),
-                "details_json": self._json(payload.get("details")),
+                "details_json": self._json(
+                    self._redact_sensitive(payload.get("details") or {})
+                ),
                 "created_at": self._now(),
             },
         )
@@ -4318,6 +4321,24 @@ class LocalOperationsLedger:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def find_audit_event(
+        self,
+        action: str,
+        entity_type: str,
+        entity_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM audit_events
+                WHERE action = ? AND entity_type = ? AND entity_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (str(action), str(entity_type), str(entity_id)),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def _insert(self, table: str, values: Dict[str, Any]) -> int:
         with self._connection() as connection:
             return self._insert_with_connection(connection, table, values)
@@ -4926,6 +4947,17 @@ class LocalOperationsLedger:
             return result
         if isinstance(value, list):
             return [cls._redact_sensitive(item) for item in value]
+        if isinstance(value, str):
+            value = re.sub(
+                r"(?i)((?:access[_-]?token|refresh[_-]?token|token|password|secret|(?:x[_-]?)?api[_-]?key)\s*[:=]\s*)[^&,;\s]+",
+                r"\1[REDACTED]",
+                value,
+            )
+            value = re.sub(
+                r"(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+",
+                r"\1[REDACTED]",
+                value,
+            )
         return value
 
     @staticmethod

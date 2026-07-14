@@ -100,12 +100,13 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_worker_stage_failure_does_not_suppress_local_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
+            config["freshdesk_api_key"] = "super-secret-value"
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch.object(
                 worker,
                 "_run_legacy_workflow",
-                side_effect=RuntimeError("connector unavailable"),
+                side_effect=RuntimeError("api_key=super-secret-value connector unavailable"),
             ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
                 worker,
                 "_process_scheduled_reports",
@@ -122,6 +123,9 @@ class TestOperationsExportWorker(unittest.TestCase):
             audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
             self.assertIn("local_worker.stage_failed", audit_actions)
             self.assertIn("local_worker.cycle_finished_with_error", audit_actions)
+            audit_payload = str(ledger.list_audit_events(limit=30))
+            self.assertNotIn("super-secret-value", audit_payload)
+            self.assertIn("[REDACTED]", audit_payload)
 
     def test_connector_failure_does_not_suppress_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,6 +151,31 @@ class TestOperationsExportWorker(unittest.TestCase):
                 if event["action"] == "local_worker.stage_failed"
             ]
             self.assertEqual(failed_stages[0]["details"]["stage"], "connector_intake")
+
+    def test_worker_syncs_only_syncable_sources_not_held_by_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = FabWorker(self._config(temp_dir))
+            worker._recovery_held_connector_sources = {"gmail"}
+
+            with patch("src.worker.scheduler.LocalConnectorIntakeService") as service_type:
+                service = service_type.return_value
+                service.plan.return_value = {
+                    "syncableSources": ["gmail", "google_drive"],
+                }
+                service.sync.return_value = {
+                    "success": True,
+                    "status": "completed",
+                    "workflowRunId": 1,
+                    "summary": {},
+                    "externalSubmission": "not_executed",
+                }
+
+                worker._sync_source_connectors()
+
+            service.sync.assert_called_once_with(
+                sources=["google_drive"],
+                actor="local_worker",
+            )
 
     def test_worker_can_disable_legacy_pipeline_for_local_only_operation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

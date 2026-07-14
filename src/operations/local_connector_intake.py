@@ -3,6 +3,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
+from uuid import uuid4
 
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
@@ -12,6 +13,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 CONNECTOR_SOURCES = ("gmail", "google_drive", "freshdesk", "google_photos")
+CONNECTOR_INTAKE_LEASE_NAME = "local_connector_intake"
 SOURCE_ALIASES = {
     "drive": "google_drive",
     "photos": "google_photos",
@@ -46,6 +48,84 @@ class LocalConnectorIntakeService:
         }
 
     def sync(
+        self,
+        sources: Optional[Iterable[str]] = None,
+        actor: str = "local_connector_intake",
+        trigger_source: str = "connector_intake",
+        workflow_metadata: Optional[Dict[str, Any]] = None,
+        step_attempts: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        owner_token = uuid4().hex
+        lease = self.ledger.acquire_runtime_lease(
+            CONNECTOR_INTAKE_LEASE_NAME,
+            owner_token,
+            ttl_seconds=_positive_float_config(
+                self.config,
+                "fab_connector_intake_lease_seconds",
+                "operations_connector_intake_lease_seconds",
+                "connector_intake_lease_seconds",
+                default=21600.0,
+            ),
+            metadata={"actor": actor, "trigger": trigger_source},
+        )
+        if not lease.get("acquired"):
+            self.ledger.record_audit_event({
+                "action": "local_connector_intake.sync_skipped_already_running",
+                "entityType": "runtime_lease",
+                "entityId": CONNECTOR_INTAKE_LEASE_NAME,
+                "details": {
+                    "actor": actor,
+                    "triggerSource": trigger_source,
+                    "lease": lease.get("lease"),
+                    "externalSubmission": "not_executed",
+                },
+            })
+            return {
+                "success": False,
+                "status": "already_running",
+                "workflowRunId": None,
+                "triggerSource": trigger_source,
+                "results": [],
+                "summary": _empty_summary(),
+                "runtimeLease": lease.get("lease"),
+                "externalSubmission": "not_executed",
+            }
+
+        result = None
+        try:
+            result = self._sync_once(
+                sources=sources,
+                actor=actor,
+                trigger_source=trigger_source,
+                workflow_metadata=workflow_metadata,
+                step_attempts=step_attempts,
+            )
+            return result
+        finally:
+            released = self.ledger.release_runtime_lease(
+                CONNECTOR_INTAKE_LEASE_NAME,
+                owner_token,
+            )
+            released_lease = {
+                **(lease.get("lease") or {}),
+                "active": False if released else (lease.get("lease") or {}).get("active"),
+                "released": released,
+            }
+            if isinstance(result, dict):
+                result["runtimeLease"] = released_lease
+            if not released:
+                self.ledger.record_audit_event({
+                    "action": "local_connector_intake.lease_release_failed",
+                    "entityType": "runtime_lease",
+                    "entityId": CONNECTOR_INTAKE_LEASE_NAME,
+                    "details": {
+                        "actor": actor,
+                        "triggerSource": trigger_source,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+
+    def _sync_once(
         self,
         sources: Optional[Iterable[str]] = None,
         actor: str = "local_connector_intake",
@@ -576,6 +656,19 @@ def _configured_bool(config: Dict[str, Any], *keys: str, default: bool) -> bool:
                 return value.strip().lower() not in {"0", "false", "no", "off", ""}
             return bool(value)
     return default
+
+
+def _positive_float_config(
+    config: Dict[str, Any],
+    *keys: str,
+    default: float,
+) -> float:
+    value = next((config.get(key) for key in keys if config.get(key) not in (None, "")), default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _existing_config_path(config: Dict[str, Any], *keys: str) -> bool:

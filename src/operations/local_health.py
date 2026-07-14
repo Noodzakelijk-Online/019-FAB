@@ -128,6 +128,11 @@ class LocalOperationsHealth:
         pending_routes = self.ledger.list_routing_attempts(status=PENDING_ROUTING_STATUSES, limit=500)
         running_runs = self.ledger.list_workflow_runs(status=RUNNING_WORKFLOW_STATUSES, limit=100)
         failed_runs = self.ledger.list_workflow_runs(status=FAILED_WORKFLOW_STATUSES, limit=100)
+        active_failed_runs = [
+            run
+            for run in failed_runs
+            if self.ledger.get_workflow_recovery_child(int(run["id"])) is None
+        ]
         picker_runs = self.ledger.list_workflow_runs(
             status=PICKER_ATTENTION_STATUSES,
             trigger_source="google_photos_picker",
@@ -366,7 +371,7 @@ class LocalOperationsHealth:
                     {"triggerSource": run.get("trigger_source")},
                 ))
 
-        for run in failed_runs:
+        for run in active_failed_runs:
             issues.append(_issue(
                 "medium",
                 "failed_workflow_run",
@@ -643,7 +648,7 @@ class LocalOperationsHealth:
                 "masterLedgerReadyForApproval": master_ledger_summary.get("readyForApproval", 0),
                 "masterLedgerReadyForExternalExecution": master_ledger_summary.get("readyForExternalExecution", 0),
                 "runningWorkflowRuns": len(running_runs),
-                "failedWorkflowRuns": len(failed_runs),
+                "failedWorkflowRuns": len(active_failed_runs),
                 "apiQuotaExhaustedServices": len(exhausted_limiters),
             },
             "rateLimits": rate_limits,

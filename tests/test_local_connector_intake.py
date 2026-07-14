@@ -2,7 +2,10 @@ import os
 import tempfile
 import unittest
 
-from src.operations.local_connector_intake import LocalConnectorIntakeService
+from src.operations.local_connector_intake import (
+    CONNECTOR_INTAKE_LEASE_NAME,
+    LocalConnectorIntakeService,
+)
 from src.operations.local_ledger import LocalOperationsLedger
 
 
@@ -86,6 +89,31 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(steps[0]["status"], "completed")
             self.assertEqual(steps[0]["metadata"]["result"]["alreadyRegistered"], 1)
             self.assertEqual(first["externalSubmission"], "not_executed")
+            self.assertTrue(first["runtimeLease"]["released"])
+
+    def test_sync_does_not_overlap_an_active_connector_cycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger, service = self._service(temp_dir, [])
+            lease = ledger.acquire_runtime_lease(
+                CONNECTOR_INTAKE_LEASE_NAME,
+                "other-owner",
+                ttl_seconds=60,
+            )
+
+            result = service.sync(["gmail"], actor="test")
+
+            self.assertTrue(lease["acquired"])
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "already_running")
+            self.assertEqual(result["runtimeLease"]["leaseName"], CONNECTOR_INTAKE_LEASE_NAME)
+            self.assertEqual(ledger.list_workflow_runs(limit=10), [])
+            self.assertIn(
+                "local_connector_intake.sync_skipped_already_running",
+                [event["action"] for event in ledger.list_audit_events(limit=10)],
+            )
+            self.assertTrue(
+                ledger.release_runtime_lease(CONNECTOR_INTAKE_LEASE_NAME, "other-owner")
+            )
 
     def test_changed_provider_document_creates_reviewable_revision(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -81,6 +81,7 @@ Local operating ledger and optional web operations API settings.
 *   `ledger_path`: Path to the SQLite ledger file. On Windows, prefer a private folder such as `C:\Users\<you>\AppData\Local\FAB\fab_operations.sqlite3`.
 *   `api_host`: Host for the optional local operations API. Use `127.0.0.1` unless you intentionally expose FAB through a protected tunnel.
 *   `api_port`: Port for the optional local operations API. Default: `5001`.
+*   `api_base_url`: Trusted public origin for an authenticated reverse proxy or tunnel. Leave blank for local use; FAB does not trust forwarded host headers implicitly.
 *   `api_token`: Bearer token required by the optional local operations API and optional web operations API. Configure this before using ngrok or any non-loopback host.
 *   `local_intake_paths`: Comma- or semicolon-separated local folders to scan from the dashboard, such as a Google Drive-synced `sort out` folder.
 *   `local_intake_extensions`: File extensions accepted by local intake. Default document types include PDF, image, text, and CSV files.
@@ -93,7 +94,13 @@ Local operating ledger and optional web operations API settings.
 *   `workflow_stale_hours`: Age at which a running workflow is treated as stale. Default: `6`.
 *   `source_stale_hours`: Age at which a previously ready connector is considered stale. Default: `24`.
 *   `worker_sync_source_connectors`: Run durable enabled-source intake before the autonomous cycle. Default: `true`.
-*   `worker_source_connectors`: Optional comma-separated allowlist of enabled connector names; blank means all enabled connectors.
+*   `worker_source_connectors`: Optional comma-separated allowlist of connector names; blank means all currently syncable unattended connectors.
+*   `connector_intake_lease_seconds`: Prevent overlapping API, worker, and recovery connector syncs. Default: `21600`.
+*   `worker_recover_workflows`: Run bounded governed recovery before normal connector intake. Default: `true`.
+*   `worker_recovery_batch_limit`: Maximum due recoveries attempted per worker cycle. Default: `5`.
+*   `workflow_recovery_max_retries`: Maximum linked automatic retry depth. Default: `3`.
+*   `workflow_recovery_base_delay_seconds` / `workflow_recovery_max_delay_seconds`: Exponential retry backoff bounds. Defaults: `300` / `3600`.
+*   `workflow_recovery_stale_seconds`: Minimum age before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `21600`.
 *   `worker_run_legacy_workflow`: Compatibility switch for the old checkpoint pipeline. Default: `false`.
 *   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
 *   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
@@ -102,7 +109,7 @@ Local operating ledger and optional web operations API settings.
 
 The local ledger does not store API tokens or passwords. It can store financial document metadata and OCR text, so keep the file out of Git and protect it like bookkeeping records.
 
-The Workflow Runs panel shows recent autonomous and connector-intake runs with ordered step status, attempt, start time, duration, error, and aborted downstream work. `GET /api/workflows` filters runs by `status` or `triggerSource`; `GET /api/workflows/{id}` returns the exact run and its redacted step evidence. A failed autonomous action stops dependent downstream work and marks it `not_run`. For a recoverable run, FAB displays the exact safe retry plan and enables **Retry safe step**. `GET /api/workflows/{id}/recovery-plan` returns the current gate; authenticated `POST /api/workflows/{id}/retry` creates a new linked run rather than rewriting prior evidence. Connector recovery retries only failed read-only sources. Autonomous recovery retries only the first actual failed low-risk step, never approved export execution, and leaves downstream continuation for a later normal policy-gated cycle. Automatic scheduled recovery and process-crash resume are not implemented.
+The Workflow Runs panel shows recent autonomous and connector-intake runs with ordered step status, attempt, start time, duration, error, and aborted downstream work. `GET /api/workflows` filters runs by `status` or `triggerSource`; `GET /api/workflows/{id}` returns the exact run and its redacted step evidence. A failed autonomous action stops dependent downstream work and marks it `not_run`. For a recoverable run, FAB displays the exact safe retry plan and enables **Retry safe step**. `GET /api/workflows/{id}/recovery-plan` returns the current gate; authenticated `POST /api/workflows/{id}/retry` creates a new linked run rather than rewriting prior evidence. The Recovery policy summary and `GET /api/workflows/recovery` show due, deferred, blocked, and exhausted work; **Run due safe recovery** or authenticated `POST /api/workflows/recovery/run-due` executes the same bounded policy used by the worker. Connector recovery retries only failed read-only sources. Autonomous recovery retries only the first actual failed low-risk step and never approved export execution. The worker applies exponential backoff, prevents the normal connector stage from bypassing that backoff, and finalizes abandoned runs only when the workflow is stale and its runtime lease is inactive.
 Run the local API with:
 
 ```bash

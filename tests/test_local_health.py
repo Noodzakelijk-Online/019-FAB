@@ -43,6 +43,36 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(issue["entityId"], str(workflow_run_id))
             self.assertEqual(health["metrics"]["failedWorkflowRuns"], 1)
 
+    def test_health_ignores_superseded_failure_and_uses_recovery_leaf(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            failed_run_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "connector_intake",
+                "errorMessage": "Provider was unavailable",
+            })
+            recovery_run_id = ledger.create_workflow_run({
+                "status": "completed",
+                "triggerSource": "connector_intake_recovery",
+                "metadata": {
+                    "recovery": {
+                        "sourceWorkflowRunId": failed_run_id,
+                        "rootWorkflowRunId": failed_run_id,
+                        "retryDepth": 1,
+                    }
+                },
+            })
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            self.assertIsNotNone(ledger.get_workflow_run(recovery_run_id))
+            self.assertEqual(health["metrics"]["failedWorkflowRuns"], 0)
+            self.assertFalse(any(
+                issue["type"] == "failed_workflow_run"
+                and issue["entityId"] == str(failed_run_id)
+                for issue in health["issues"]
+            ))
+
     def test_health_flags_failed_and_stale_source_connectors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
