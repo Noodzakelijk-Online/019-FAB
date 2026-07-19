@@ -46,7 +46,9 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(sources["local_folder"]["status"], "ready")
             self.assertEqual(sources["gmail"]["status"], "ready")
             self.assertEqual(sources["waveapps_business"]["status"], "ready")
-            self.assertEqual(sources["mijngeldzaken"]["status"], "ready")
+            self.assertEqual(sources["mijngeldzaken"]["status"], "supervision_required")
+            self.assertTrue(sources["mijngeldzaken"]["localArtifactReady"])
+            self.assertFalse(sources["mijngeldzaken"]["ready"])
             self.assertIn("stored passwords are ignored", sources["mijngeldzaken"]["details"])
             self.assertTrue(credentials["wave_business_token"]["configured"])
             self.assertIn("ignored", credentials["mijngeldzaken_password"]["label"])
@@ -93,6 +95,50 @@ class TestLocalReadinessService(unittest.TestCase):
         self.assertEqual(summary["localAccess"]["apiBaseUrl"], "https://fab-local.example.ngrok-free.app/api")
         self.assertEqual(summary["localAccess"]["authHeaderExample"], "Authorization: Bearer <FAB_LOCAL_API_TOKEN>")
         self.assertNotIn("secret-token", rendered)
+
+    def test_connector_api_url_cannot_replace_local_fab_access_url(self):
+        summary = LocalReadinessService(
+            {
+                "api_url": "https://gql.waveapps.com/graphql/public",
+                "waveapps_api_url": "https://gql.waveapps.com/graphql/public",
+            },
+            ledger_path="data/fab.sqlite3",
+            api_host="127.0.0.1",
+            api_port=5001,
+            api_token_configured=False,
+            intake_paths=[],
+            intake_extensions=[],
+        ).summarize()
+
+        self.assertEqual(summary["localAccess"]["dashboardUrl"], "http://127.0.0.1:5001/")
+        self.assertEqual(summary["localAccess"]["apiBaseUrl"], "http://127.0.0.1:5001/api")
+
+    def test_local_ocr_readiness_requires_pdf_tools_and_configured_languages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = os.path.join(temp_dir, "tesseract.exe")
+            poppler_dir = os.path.join(temp_dir, "poppler")
+            tessdata_dir = os.path.join(temp_dir, "tessdata")
+            os.makedirs(poppler_dir)
+            os.makedirs(tessdata_dir)
+            for path in (executable, os.path.join(poppler_dir, "pdftoppm.exe")):
+                with open(path, "wb") as handle:
+                    handle.write(b"test")
+            for language in ("eng", "nld"):
+                with open(os.path.join(tessdata_dir, f"{language}.traineddata"), "wb") as handle:
+                    handle.write(b"test")
+
+            summary = LocalReadinessService({
+                "tesseract_cmd": executable,
+                "tesseract_data_dir": tessdata_dir,
+                "tesseract_lang": "nld+eng",
+                "poppler_path": poppler_dir,
+            }).summarize()
+            dependencies = {item["id"]: item for item in summary["dependencies"]}
+            sources = {item["id"]: item for item in summary["sources"]}
+
+            self.assertEqual(dependencies["tesseract_languages"]["status"], "ok")
+            self.assertEqual(dependencies["poppler"]["status"], "ok")
+            self.assertEqual(sources["tesseract_ocr"]["status"], "ready")
 
     def test_api_settings_and_dashboard_render_readiness_without_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir:

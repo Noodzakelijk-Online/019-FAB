@@ -4,6 +4,7 @@ google-auth-oauthlib
 google-cloud-vision
 requests
 Pillow
+pytesseract # Python bridge for the local Tesseract OCR executable
 opencv-python-headless # For image processing in some processors
 pdf2image # For PDF-to-image conversion before OCR
 scikit-learn # For ML categorizer

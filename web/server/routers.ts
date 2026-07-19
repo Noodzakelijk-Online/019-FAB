@@ -33,7 +33,7 @@ import {
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { stripeRouter } from "./routers/stripe";
-import { publicProcedure, router, adminProcedure } from "./_core/trpc";
+import { publicProcedure, router, adminProcedure, fabOperatorProcedure } from "./_core/trpc";
 import {
   addToWaitlist,
   getWaitlistCount,
@@ -86,6 +86,12 @@ import {
   buildAutomationWorkflowMasterLedgerProjection,
   buildAutomationWorkflowMasterLedgerCsv,
 } from "@shared/masterLedgerProjection";
+import {
+  FAB_OPERATOR_COMMAND_IDS,
+  getFabControlCenter,
+  runFabOperatorCommand,
+  uploadFabIntakeFile,
+} from "./fabLocalGateway";
 import { z } from "zod";
 
 const log = createLogger("Router");
@@ -418,6 +424,39 @@ async function createAutonomousWorkflowReviewItem(params: {
 export const appRouter = router({
   system: systemRouter,
   stripe: stripeRouter,
+
+  fab: router({
+    access: fabOperatorProcedure.query(({ ctx }) => ({
+      allowed: true,
+      mode: ctx.fabOperatorMode,
+      operatorLabel: ctx.user?.name || ctx.user?.email || "Local operator",
+    })),
+    controlCenter: fabOperatorProcedure.query(async () => getFabControlCenter()),
+    uploadIntake: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255),
+        mimeType: z.string().trim().max(150).optional(),
+        contentBase64: z.string().min(4).max(8_500_000),
+      }).strict())
+      .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    runCommand: fabOperatorProcedure
+      .input(z.object({
+        commandId: z.enum(FAB_OPERATOR_COMMAND_IDS),
+        payload: z.object({
+          limit: z.number().int().min(1).max(500).optional(),
+          sources: z.array(z.enum(["gmail", "google_drive", "freshdesk", "google_photos"])).max(4).optional(),
+          dryRun: z.boolean().optional(),
+          fromDate: z.iso.date().optional(),
+          toDate: z.iso.date().optional(),
+          targetSystem: z.string().trim().max(100).optional(),
+        }).strict().optional(),
+      }))
+      .mutation(async ({ input, ctx }) => runFabOperatorCommand(
+        input.commandId,
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+        input.payload || {},
+      )),
+  }),
 
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),

@@ -1,9 +1,15 @@
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import os
+import secrets
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from werkzeug.utils import secure_filename
 
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
@@ -28,6 +34,7 @@ from src.operations.local_exports import (
 )
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_grouping import LocalDocumentGroupingService
+from src.operations.local_hai_connector import LocalHaiConnector
 from src.operations.local_intake import DEFAULT_ALLOWED_EXTENSIONS, LocalFolderIntake
 from src.operations.local_ledger import (
     VENDOR_CATEGORY_RULE_STATUSES,
@@ -45,10 +52,15 @@ from src.operations.local_reporting import LocalFinancialReportingService, Local
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
-from src.operations.local_workflow_recovery import LocalWorkflowRecoveryService
+from src.operations.local_workflow_recovery import (
+    LocalWorkflowRecoveryScheduler,
+    LocalWorkflowRecoveryService,
+)
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 6 * 1024 * 1024
+LOCAL_FORM_SESSION_KEY = "fab_local_form_session"
 REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
 RULE_RESOLUTION_STATUSES = VENDOR_CATEGORY_RULE_STATUSES - {"learned"}
@@ -912,6 +924,21 @@ DASHBOARD_TEMPLATE = """
         <div><h2>Workflow Runs</h2></div>
         <a class="button-link secondary" href="{{ url_for('workflow_runs_api') }}">JSON</a>
       </div>
+      <div class="summary-grid">
+        <div class="summary-item"><span>Recovery policy</span><strong>{{ workflow_recovery_schedule.status }}</strong></div>
+        <div class="summary-item"><span>Due now</span><strong>{{ workflow_recovery_schedule.dueCount }}</strong></div>
+        <div class="summary-item"><span>Candidates</span><strong>{{ workflow_recovery_schedule.candidateCount }}</strong></div>
+        <div class="summary-item"><span>Retry limit</span><strong>{{ workflow_recovery_schedule.policy.maxRetries }}</strong></div>
+      </div>
+      <div class="actions">
+        <form class="inline-actions" method="post" action="{{ url_for('run_due_workflow_recovery_form') }}">
+          <button class="secondary" type="submit" {% if not workflow_recovery_schedule.dueCount %}disabled{% endif %}>Run due safe recovery</button>
+        </form>
+        <a class="button-link secondary" href="{{ url_for('workflow_recovery_schedule_api') }}">Recovery queue JSON</a>
+      </div>
+      {% if workflow_recovery_schedule.statusCounts %}
+      <div class="empty">Queue: {{ compact_json(workflow_recovery_schedule.statusCounts) }}</div>
+      {% endif %}
       {% if workflow_recovery_summary %}
       <details open>
         <summary>Last workflow recovery</summary>
@@ -3653,6 +3680,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         or config.get("operations_api_token")
         or ""
     )
+    configured_base_url = str(
+        config.get("fab_local_api_base_url")
+        or config.get("operations_api_base_url")
+        or ""
+    ).strip().rstrip("/")
     if host not in LOOPBACK_HOSTS and not token:
         raise ValueError("Refusing to expose FAB local API beyond loopback without an API token.")
 
@@ -3683,15 +3715,57 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     app.config["FAB_LOCAL_API_HOST"] = host
     app.config["FAB_LOCAL_INTAKE_PATHS"] = intake_paths
     app.config["FAB_LOCAL_INTAKE_EXTENSIONS"] = intake_extensions
-    app.secret_key = hashlib.sha256((token or f"fab-local:{ledger_path}").encode("utf-8")).hexdigest()
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = urlsplit(configured_base_url).scheme == "https"
+    app.secret_key = (
+        hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if token
+        else secrets.token_hex(32)
+    )
 
     @app.before_request
     def require_token():
+        request_hostname = (urlsplit(request.host_url).hostname or "").lower()
+        if not token and request_hostname not in LOOPBACK_HOSTS:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Untrusted host for loopback-only service"}), 421
+            return "Untrusted host for loopback-only service", 421
+        if request.method == "GET" and not request.path.startswith("/api/"):
+            if not session.get(LOCAL_FORM_SESSION_KEY):
+                session[LOCAL_FORM_SESSION_KEY] = secrets.token_urlsafe(24)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            fetch_site = request.headers.get("Sec-Fetch-Site", "").strip().lower()
+            origin = request.headers.get("Origin", "").strip().rstrip("/")
+            allowed_origins = {request.host_url.rstrip("/")}
+            if configured_base_url:
+                allowed_origins.add(configured_base_url)
+            trusted_opaque_form = (
+                origin == "null"
+                and not request.path.startswith("/api/")
+                and bool(session.get(LOCAL_FORM_SESSION_KEY))
+                and request.mimetype == "application/x-www-form-urlencoded"
+            )
+            origin_rejected = (
+                bool(origin)
+                and origin not in allowed_origins
+                and not trusted_opaque_form
+            )
+            originless_cross_site = not origin and fetch_site == "cross-site"
+            if origin_rejected or originless_cross_site:
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "Cross-origin mutation rejected"}), 403
+                return "Cross-origin mutation rejected", 403
         if not token:
             return None
         if request.endpoint == "login":
             return None
-        if request.headers.get("Authorization") != f"Bearer {token}":
+        supplied_authorization = request.headers.get("Authorization", "")
+        bearer_authenticated = hmac.compare_digest(
+            supplied_authorization,
+            f"Bearer {token}",
+        )
+        if not bearer_authenticated:
             if session.get("fab_local_api_authenticated"):
                 return None
             if not request.path.startswith("/api/"):
@@ -3705,11 +3779,25 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return redirect(url_for("dashboard_page"))
         if request.method == "POST":
             submitted = request.form.get("token", "")
-            if submitted == token:
+            if hmac.compare_digest(submitted, token):
                 session["fab_local_api_authenticated"] = True
                 return redirect(url_for("dashboard_page"))
             return render_template_string(LOGIN_TEMPLATE, error="Invalid token."), 401
         return render_template_string(LOGIN_TEMPLATE, error=None)
+
+    @app.after_request
+    def harden_financial_responses(response):
+        response.headers.setdefault("Cache-Control", "no-store, max-age=0")
+        response.headers.setdefault("Pragma", "no-cache")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "form-action 'self'; frame-ancestors 'none'; base-uri 'self'",
+        )
+        return response
 
     @app.get("/api/health")
     def health():
@@ -3822,6 +3910,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             limit=15,
             recovery_service=workflow_recovery_service,
         )
+        workflow_recovery_schedule = _workflow_recovery_scheduler(
+            ledger,
+            config,
+            readiness_service,
+            intake_paths,
+            intake_extensions,
+        ).plan(limit=100)
         last_intake_summary = session.pop("fab_last_intake_summary", None)
         last_processing_summary = session.pop("fab_last_processing_summary", None)
         last_routing_summary = session.pop("fab_last_routing_summary", None)
@@ -3899,6 +3994,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "corrections": corrections,
             "auditEvents": audit_events,
             "workflowRuns": workflow_runs,
+            "workflowRecoverySchedule": workflow_recovery_schedule,
             "health": health_payload,
             "lastIntakeSummary": last_intake_summary,
             "lastProcessingSummary": last_processing_summary,
@@ -4030,12 +4126,151 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             wave_entity_sync_summary=last_wave_entity_sync,
             wave_report_controls=wave_report_controls,
             workflow_runs=workflow_runs,
+            workflow_recovery_schedule=workflow_recovery_schedule,
             workflow_recovery_summary=last_workflow_recovery,
         )
 
     @app.get("/api/dashboard")
     def dashboard():
         return jsonify(ledger.dashboard_metrics())
+
+    def hai_connector() -> LocalHaiConnector:
+        readiness = _readiness_service(
+            config,
+            ledger_path,
+            host,
+            bool(token),
+            intake_paths,
+            intake_extensions,
+        )
+
+        def rescan_intake_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            del payload, actor
+            if not intake_paths:
+                raise ValueError("No intake folders configured")
+            return LocalFolderIntake(
+                ledger,
+                allowed_extensions=intake_extensions,
+            ).rescan(intake_paths)
+
+        def process_imported_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            del actor
+            return LocalDocumentProcessor(ledger, config).process_imported(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100)
+            )
+
+        def sync_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalConnectorIntakeService(ledger, config).sync(
+                sources=payload.get("sources"),
+                actor=actor,
+                trigger_source="hai_connector",
+            )
+
+        def run_safe_cycle_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            del actor
+            return _autonomy_service(
+                ledger,
+                config,
+                readiness,
+                intake_paths,
+                intake_extensions,
+            ).run_cycle(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                include_wave_plan=True,
+                include_wave_sync=True,
+                dry_run=bool(payload.get("dryRun", False)),
+            )
+
+        def run_due_recovery_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return _workflow_recovery_scheduler(
+                ledger,
+                config,
+                readiness,
+                intake_paths,
+                intake_extensions,
+            ).run_due(
+                actor=actor,
+                limit=_bounded_positive_int(payload.get("limit"), default=5, maximum=50),
+            )
+
+        def run_reconciliation_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            del actor
+            limit = _bounded_positive_int(payload.get("limit"), default=100, maximum=500)
+            transactions = LocalBankTransactionImportService(
+                ledger,
+                config,
+            ).transactions_for_reconciliation(limit=limit)
+            return LocalReconciliationService(ledger, config).run(transactions, limit=limit)
+
+        return LocalHaiConnector(
+            ledger,
+            config,
+            executors={
+                "rescan_intake": rescan_intake_command,
+                "process_imported": process_imported_command,
+                "sync_sources": sync_sources_command,
+                "run_safe_cycle": run_safe_cycle_command,
+                "run_due_recovery": run_due_recovery_command,
+                "run_reconciliation": run_reconciliation_command,
+                "refresh_notifications": lambda payload, actor: LocalNotificationService(
+                    ledger,
+                    config,
+                ).refresh(actor=actor),
+                "run_due_reports": lambda payload, actor: LocalScheduledReportService(
+                    ledger,
+                    config,
+                ).run_due(actor=actor),
+                "assess_compliance": lambda payload, actor: LocalComplianceService(
+                    ledger,
+                    config,
+                ).assess(
+                    from_date=payload.get("fromDate"),
+                    to_date=payload.get("toDate"),
+                    target_system=payload.get("targetSystem"),
+                    actor=actor,
+                ),
+            },
+        )
+
+    @app.get("/api/hai/manifest")
+    def hai_manifest_api():
+        return jsonify(hai_connector().manifest())
+
+    @app.get("/api/hai/status")
+    def hai_status_api():
+        return jsonify(hai_connector().status())
+
+    @app.post("/api/hai/commands/plan")
+    def hai_command_plan_api():
+        payload = request.get_json(silent=True) or {}
+        result = hai_connector().plan(
+            str(payload.get("commandId") or ""),
+            payload.get("payload") or {},
+        )
+        status_code = 200 if result.get("success") else 400
+        if result.get("status") in {"connector_disabled", "not_allowed"}:
+            status_code = 403
+        return jsonify(result), status_code
+
+    @app.post("/api/hai/commands/execute")
+    def hai_command_execute_api():
+        payload = request.get_json(silent=True) or {}
+        result = hai_connector().execute(
+            request_id=str(payload.get("requestId") or ""),
+            command_id=str(payload.get("commandId") or ""),
+            payload=payload.get("payload") or {},
+            actor=str(payload.get("actor") or "hai"),
+        )
+        status = result.get("status")
+        if result.get("success"):
+            status_code = 200
+        elif status in {"connector_disabled", "not_allowed"}:
+            status_code = 403
+        elif status == "failed":
+            status_code = 500
+        else:
+            status_code = 400
+        return jsonify(result), status_code
 
     @app.get("/api/workflows")
     def workflow_runs_api():
@@ -4046,6 +4281,43 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 limit=_limit_arg(),
             )
         })
+
+    @app.get("/api/workflows/recovery")
+    def workflow_recovery_schedule_api():
+        return jsonify(_workflow_recovery_scheduler(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).plan(limit=_limit_arg()))
+
+    @app.post("/api/workflows/recovery/run-due")
+    def run_due_workflow_recovery_api():
+        payload = request.get_json(silent=True) or {}
+        result = _workflow_recovery_scheduler(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).run_due(
+            actor=str(payload.get("actor") or "api")[:200],
+            limit=_bounded_positive_int(payload.get("limit"), default=5, maximum=50),
+        )
+        return jsonify(result), 409 if result.get("status") == "already_running" else 200
+
+    @app.post("/workflows/recovery/run-due")
+    def run_due_workflow_recovery_form():
+        result = _workflow_recovery_scheduler(
+            ledger,
+            config,
+            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            intake_paths,
+            intake_extensions,
+        ).run_due(actor="local_user", limit=5)
+        session["fab_last_workflow_recovery"] = _compact_scheduled_workflow_recovery(result)
+        return redirect(url_for("dashboard_page", _anchor="workflows"))
 
     @app.get("/api/workflows/<int:workflow_run_id>")
     def workflow_detail_api(workflow_run_id: int):
@@ -6121,6 +6393,83 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         ).rescan(paths)
         return jsonify(summary)
 
+    @app.post("/api/intake/upload")
+    def upload_intake_document():
+        paths = app.config["FAB_LOCAL_INTAKE_PATHS"]
+        if not paths:
+            return jsonify({"error": "No intake folders configured"}), 400
+        payload = request.get_json(silent=True) or {}
+        filename = secure_filename(str(payload.get("filename") or ""))
+        encoded_content = payload.get("contentBase64")
+        if not filename or not isinstance(encoded_content, str):
+            return jsonify({"error": "filename and contentBase64 are required"}), 400
+
+        extension = os.path.splitext(filename)[1].lower().lstrip(".")
+        allowed_extensions = {
+            str(value).lower().lstrip(".")
+            for value in app.config["FAB_LOCAL_INTAKE_EXTENSIONS"]
+        }
+        if "*" not in allowed_extensions and extension not in allowed_extensions:
+            return jsonify({
+                "error": "Unsupported intake file extension",
+                "allowedExtensions": sorted(allowed_extensions),
+            }), 400
+        try:
+            content = base64.b64decode(encoded_content, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "contentBase64 is not valid base64"}), 400
+
+        try:
+            max_bytes = int(
+                config.get("fab_local_upload_max_bytes")
+                or config.get("operations_local_upload_max_bytes")
+                or config.get("local_upload_max_bytes")
+                or DEFAULT_LOCAL_UPLOAD_MAX_BYTES
+            )
+        except (TypeError, ValueError):
+            max_bytes = DEFAULT_LOCAL_UPLOAD_MAX_BYTES
+        max_bytes = max(1, min(max_bytes, DEFAULT_LOCAL_UPLOAD_MAX_BYTES))
+        if not content or len(content) > max_bytes:
+            return jsonify({
+                "error": "Uploaded file is empty or exceeds the local upload limit",
+                "maxBytes": max_bytes,
+            }), 413
+
+        intake_root = os.path.abspath(str(paths[0]))
+        os.makedirs(intake_root, exist_ok=True)
+        destination = os.path.abspath(os.path.join(intake_root, filename))
+        if os.path.commonpath((intake_root, destination)) != intake_root:
+            return jsonify({"error": "Invalid intake filename"}), 400
+        if os.path.exists(destination):
+            stem, suffix = os.path.splitext(filename)
+            destination = os.path.join(
+                intake_root,
+                f"{stem}-{hashlib.sha256(content).hexdigest()[:12]}{suffix}",
+            )
+        try:
+            with open(destination, "xb") as handle:
+                handle.write(content)
+        except FileExistsError:
+            return jsonify({"error": "An identical intake filename already exists"}), 409
+
+        summary = LocalFolderIntake(
+            ledger,
+            allowed_extensions=app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
+        ).rescan([intake_root])
+        normalized_destination = os.path.normcase(os.path.abspath(destination))
+        document = next((
+            item for item in summary.get("documents", [])
+            if os.path.normcase(os.path.abspath(str(item.get("path") or ""))) == normalized_destination
+        ), None)
+        return jsonify({
+            "success": True,
+            "status": "registered",
+            "filename": os.path.basename(destination),
+            "sizeBytes": len(content),
+            "document": document,
+            "externalSubmission": "not_executed",
+        }), 201
+
     @app.post("/intake/rescan")
     def rescan_intake_form():
         paths = app.config["FAB_LOCAL_INTAKE_PATHS"]
@@ -6451,6 +6800,22 @@ def _workflow_recovery_service(
     )
 
 
+def _workflow_recovery_scheduler(
+    ledger: LocalOperationsLedger,
+    config: Dict[str, Any],
+    readiness: LocalReadinessService,
+    intake_paths: list,
+    intake_extensions: list,
+) -> LocalWorkflowRecoveryScheduler:
+    return LocalWorkflowRecoveryScheduler(
+        ledger,
+        config,
+        readiness=readiness,
+        intake_paths=intake_paths,
+        intake_extensions=intake_extensions,
+    )
+
+
 def _compact_wave_plan_summary(plan: Dict[str, Any]) -> Dict[str, Any]:
     workflow_plan = plan.get("workflow_plan") or {}
     operations = plan.get("operations") or []
@@ -6759,6 +7124,19 @@ def _compact_workflow_recovery(result: Dict[str, Any]) -> Dict[str, Any]:
         "recoveryType": result.get("recoveryType") or plan.get("recoveryType"),
         "selectedStepKeys": result.get("selectedStepKeys") or plan.get("selectedStepKeys") or [],
         "nextAction": plan.get("nextAction"),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _compact_scheduled_workflow_recovery(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "attempted": result.get("attempted", 0),
+        "succeeded": result.get("succeeded", 0),
+        "failed": result.get("failed", 0),
+        "interruptedWorkflowRunIds": result.get("interruptedWorkflowRunIds") or [],
+        "connectorSourcesHeldBack": result.get("connectorSourcesHeldBack") or [],
         "externalSubmission": "not_executed",
     }
 

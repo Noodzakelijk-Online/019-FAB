@@ -110,6 +110,7 @@ backup_config = {\"type\": \"zip\"}
 
 [workflow]
 workflow_state_file = __WORKFLOW_STATE_FILE__
+workflow_execute_external_posting = true
 
 [error_handling]
 error_recovery_max_retries = 1
@@ -207,6 +208,7 @@ email_notifications_enabled = False
 
         # Initialize and run the WorkflowController
         controller = WorkflowController(config)
+        self.addCleanup(controller.close)
         controller.run_workflow()
 
         # Assert that each stage was called with appropriate arguments

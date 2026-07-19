@@ -867,6 +867,28 @@ class TestLocalOperationsLedger(unittest.TestCase):
 
             self.assertEqual(ledger.get_document(document_id)["reconciliation_status"], "not_started")
 
+    def test_audit_event_details_redact_nested_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            ledger.record_audit_event({
+                "action": "test.secret_redaction",
+                "entityType": "test",
+                "details": {
+                    "accessToken": "top-secret",
+                    "nested": {"password": "also-secret", "status": "failed"},
+                    "error": "provider failed?access_token=query-secret Authorization: Bearer header-secret",
+                },
+            })
+
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["details"]["accessToken"], "<redacted>")
+            self.assertEqual(event["details"]["nested"]["password"], "<redacted>")
+            self.assertEqual(event["details"]["nested"]["status"], "failed")
+            self.assertNotIn("query-secret", event["details"]["error"])
+            self.assertNotIn("header-secret", event["details"]["error"])
+            self.assertIn("[REDACTED]", event["details"]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

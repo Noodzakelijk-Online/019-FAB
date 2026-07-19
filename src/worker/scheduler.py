@@ -1,3 +1,4 @@
+import re
 import signal
 import time
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from src.operations.local_exports import LocalExportAttemptService
 from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
 from src.operations.local_runtime import build_local_operations_ledger
+from src.operations.local_workflow_recovery import LocalWorkflowRecoveryScheduler
 from src.storage.database import Database
 from src.workflow.controller import WorkflowController
 
@@ -37,6 +39,14 @@ class FabWorker:
         self.run_local_autonomy = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_run_local_autonomy", True)
         )
+        self.recover_workflows = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_recover_workflows", True)
+        )
+        self.recovery_batch_limit = _bounded_positive_int(
+            self.config.get("worker_recovery_batch_limit"),
+            default=5,
+            maximum=50,
+        )
         self.include_wave_plan = _as_bool(self.config.get("worker_include_wave_plan", True))
         self.include_wave_sync = _as_bool(self.config.get("worker_include_wave_sync", True))
         self.generate_scheduled_reports = bool(self.operations_ledger) and _as_bool(
@@ -53,6 +63,7 @@ class FabWorker:
         )
         self.database = Database(config) if self.process_legacy_postings or not self.operations_ledger else None
         self._stop_requested = False
+        self._recovery_held_connector_sources = set()
 
     def install_signal_handlers(self) -> None:
         def handle_stop(signum, frame):
@@ -66,9 +77,11 @@ class FabWorker:
         self._record_audit("started", {"intervalSeconds": self.interval_seconds}, "Worker started")
         while not self._stop_requested:
             started_at = self._now()
+            self._recovery_held_connector_sources = set()
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")
             stage_errors = []
             stages = (
+                ("workflow_recovery", self._recover_workflows),
                 ("connector_intake", self._sync_source_connectors),
                 ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
@@ -82,12 +95,13 @@ class FabWorker:
                 try:
                     action()
                 except Exception as exc:
-                    failure = {"stage": stage, "error": str(exc)}
+                    safe_error = _safe_worker_error(exc, self.config)
+                    failure = {"stage": stage, "error": safe_error}
                     stage_errors.append(failure)
                     self._record_audit(
                         "stage_failed",
                         {"startedAt": started_at, **failure},
-                        f"Worker stage {stage} failed: {exc}",
+                        f"Worker stage {stage} failed: {safe_error}",
                     )
             if stage_errors:
                 self._record_audit(
@@ -118,11 +132,40 @@ class FabWorker:
     def _sync_source_connectors(self) -> None:
         if not self.sync_source_connectors or not self.operations_ledger:
             return
-        result = LocalConnectorIntakeService(
+        service = LocalConnectorIntakeService(
             self.operations_ledger,
             self.config,
-        ).sync(
-            sources=self.source_connectors or None,
+        )
+        selected_sources = list(self.source_connectors)
+        if not selected_sources:
+            selected_sources = list(service.plan().get("syncableSources") or [])
+        selected_sources = [
+            source
+            for source in selected_sources
+            if source not in self._recovery_held_connector_sources
+        ]
+        if not selected_sources:
+            status = (
+                "held_back_by_recovery"
+                if self._recovery_held_connector_sources
+                else "no_syncable_sources"
+            )
+            self._record_audit(
+                "connector_intake_cycle",
+                {
+                    "success": True,
+                    "status": status,
+                    "workflowRunId": None,
+                    "summary": {},
+                    "sources": [],
+                    "heldBackSources": sorted(self._recovery_held_connector_sources),
+                    "externalSubmission": "not_executed",
+                },
+                f"Connector intake cycle ended as {status}",
+            )
+            return
+        result = service.sync(
+            sources=selected_sources,
             actor="local_worker",
         )
         self._record_audit(
@@ -132,6 +175,41 @@ class FabWorker:
         )
         if not result.get("success"):
             raise RuntimeError("One or more configured source connectors failed")
+
+    def _recover_workflows(self) -> None:
+        if not self.recover_workflows or not self.operations_ledger:
+            return
+        result = LocalWorkflowRecoveryScheduler(
+            self.operations_ledger,
+            self.config,
+            intake_paths=_list_config(
+                self.config,
+                "fab_local_intake_paths",
+                "operations_local_intake_paths",
+                "local_intake_paths",
+            ),
+            intake_extensions=_list_config(
+                self.config,
+                "fab_local_intake_extensions",
+                "operations_local_intake_extensions",
+                "local_intake_extensions",
+            ),
+        ).run_due(
+            actor="local_worker",
+            limit=self.recovery_batch_limit,
+        )
+        self._recovery_held_connector_sources = set(
+            result.get("connectorSourcesHeldBack") or []
+        )
+        self._record_audit(
+            "workflow_recovery_cycle",
+            _compact_workflow_recovery(result),
+            f"Governed workflow recovery ended as {result.get('status')}",
+        )
+        if result.get("status") == "already_running":
+            return
+        if not result.get("success"):
+            raise RuntimeError("One or more due governed workflow recoveries failed")
 
     def _run_local_autonomy(self) -> None:
         if not self.run_local_autonomy or not self.operations_ledger:
@@ -330,6 +408,19 @@ def _compact_connector_intake(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _compact_workflow_recovery(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "attempted": result.get("attempted", 0),
+        "succeeded": result.get("succeeded", 0),
+        "failed": result.get("failed", 0),
+        "interruptedWorkflowRunIds": result.get("interruptedWorkflowRunIds") or [],
+        "connectorSourcesHeldBack": result.get("connectorSourcesHeldBack") or [],
+        "externalSubmission": "not_executed",
+    }
+
+
 def _compact_scheduled_report(result: Dict[str, Any]) -> Dict[str, Any]:
     report_run = result.get("reportRun") if isinstance(result.get("reportRun"), dict) else {}
     return {
@@ -396,3 +487,35 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "off"}
     return bool(value)
+
+
+def _bounded_positive_int(value: Any, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _safe_worker_error(error: Any, config: Dict[str, Any]) -> str:
+    message = f"{type(error).__name__}: {error}"
+    for key, value in config.items():
+        if not re.search(
+            r"(?i)(token|secret|password|api[_-]?key|authorization|credential)",
+            str(key),
+        ):
+            continue
+        secret = str(value or "")
+        if len(secret) >= 4:
+            message = message.replace(secret, "[REDACTED]")
+    message = re.sub(
+        r"(?i)((?:access[_-]?token|refresh[_-]?token|token|password|secret|(?:x[_-]?)?api[_-]?key)\s*[:=]\s*)[^&,;\s]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    return message[:2000]

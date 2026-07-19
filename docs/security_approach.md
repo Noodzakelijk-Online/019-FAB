@@ -52,7 +52,9 @@ Robust error handling is implemented to prevent security vulnerabilities arising
 
 ## 7. User Interaction Security
 
-- **Manual Review Interface**: The manual review interface is designed with security in mind, ensuring authenticated access and protection against common web vulnerabilities (e.g., XSS, CSRF).
+- **Manual Review Interface**: When configured, the operations dashboard token is checked with constant-time comparison. FAB rejects cross-origin mutations even in tokenless loopback mode, rejects non-loopback `Host` headers for a tokenless service, and sets `SameSite=Lax`/`HttpOnly` session cookies. Tokenless sessions use an unpredictable process-local signing key. Opaque-origin form posts used by the in-app local browser require a signed session established by a prior FAB page load; opaque-origin API writes remain blocked. Reverse proxies must declare their trusted public origin with `operations.api_base_url`; forwarded host headers are not trusted implicitly.
+- **Financial Response Hardening**: Dashboard and API responses are marked `no-store` and include content-type, frame, referrer, and content-security-policy headers so financial data is not cached or embedded by another site.
+- **Audit Redaction**: Audit-event details pass through the same recursive credential redaction used by workflow, connector, and document metadata before SQLite persistence.
 - **Browser Automation**: Playwright is used for browser automation, and its interactions are carefully controlled to prevent unintended actions or exposure of sensitive information.
 
 

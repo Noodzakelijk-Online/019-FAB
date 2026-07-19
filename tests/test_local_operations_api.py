@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import unittest
@@ -1689,6 +1690,58 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(sources[0]["documents_seen"], 1)
             self.assertEqual(sources[0]["documents_imported"], 1)
 
+    def test_api_uploads_and_registers_a_local_intake_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": intake_dir,
+                "fab_local_intake_extensions": "pdf,png",
+            })
+            client = app.test_client()
+
+            response = client.post("/api/intake/upload", json={
+                "filename": "../receipt.pdf",
+                "contentBase64": base64.b64encode(b"receipt bytes").decode("ascii"),
+            })
+
+            self.assertEqual(response.status_code, 201)
+            payload = response.get_json()
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["filename"], "receipt.pdf")
+            self.assertEqual(payload["externalSubmission"], "not_executed")
+            self.assertTrue(os.path.isfile(os.path.join(intake_dir, "receipt.pdf")))
+            documents = client.get("/api/documents").get_json()["documents"]
+            self.assertEqual(len(documents), 1)
+            self.assertEqual(documents[0]["processing_status"], "imported")
+
+    def test_api_rejects_invalid_or_oversized_local_intake_uploads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": os.path.join(temp_dir, "sort-out"),
+                "fab_local_intake_extensions": "pdf",
+                "fab_local_upload_max_bytes": 4,
+            })
+            client = app.test_client()
+
+            unsupported = client.post("/api/intake/upload", json={
+                "filename": "receipt.exe",
+                "contentBase64": base64.b64encode(b"x").decode("ascii"),
+            })
+            invalid = client.post("/api/intake/upload", json={
+                "filename": "receipt.pdf",
+                "contentBase64": "not-base64",
+            })
+            oversized = client.post("/api/intake/upload", json={
+                "filename": "receipt.pdf",
+                "contentBase64": base64.b64encode(b"12345").decode("ascii"),
+            })
+
+            self.assertEqual(unsupported.status_code, 400)
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(oversized.status_code, 413)
+
     def test_source_connector_readiness_sync_api_and_dashboard_form(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -2679,6 +2732,168 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(good_login.status_code, 200)
             self.assertIn("FAB Operations", good_login.data.decode("utf-8"))
             self.assertEqual(client.get("/").status_code, 200)
+
+    def test_dashboard_exposes_and_runs_due_governed_workflow_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "local_autonomous_cycle",
+            })
+            ledger.create_workflow_step({
+                "workflowRunId": workflow_run_id,
+                "stepKey": "rescan_intake",
+                "stage": "intake",
+                "status": "failed",
+                "stepOrder": 1,
+                "metadata": {"risk": "low", "mode": "safe_auto"},
+            })
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_intake_paths": [intake_dir],
+                "fab_autonomy_ignore_health_blocks": True,
+                "fab_workflow_recovery_base_delay_seconds": 0,
+            })
+            client = app.test_client()
+
+            queue = client.get("/api/workflows/recovery")
+            recovered = client.post(
+                "/api/workflows/recovery/run-due",
+                json={"actor": "test_api"},
+            )
+            dashboard = client.get("/")
+
+            self.assertEqual(queue.status_code, 200)
+            self.assertEqual(queue.get_json()["dueCount"], 1)
+            self.assertEqual(recovered.status_code, 200)
+            self.assertTrue(recovered.get_json()["success"])
+            self.assertEqual(recovered.get_json()["attempted"], 1)
+            self.assertIn("Recovery policy", dashboard.data.decode("utf-8"))
+            self.assertIn("Run due safe recovery", dashboard.data.decode("utf-8"))
+
+    def test_authenticated_dashboard_rejects_cross_origin_mutations_and_disables_caching(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_token": "secret",
+                "fab_local_api_base_url": "https://fab.example.test",
+            })
+            client = app.test_client()
+            login = client.post(
+                "/login",
+                base_url="https://fab.example.test",
+                data={"token": "secret"},
+            )
+
+            rejected = client.post(
+                "/api/workflows/recovery/run-due",
+                base_url="https://fab.example.test",
+                headers={
+                    "Origin": "https://attacker.example",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+            )
+            allowed = client.post(
+                "/api/workflows/recovery/run-due",
+                base_url="https://fab.example.test",
+                headers={
+                    "Origin": "https://fab.example.test",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+            )
+            configured_proxy_origin = client.post(
+                "/api/workflows/recovery/run-due",
+                headers={
+                    "Origin": "https://fab.example.test",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Authorization": "Bearer secret",
+                },
+            )
+            dashboard = client.get("/", base_url="https://fab.example.test")
+
+            self.assertEqual(rejected.status_code, 403)
+            self.assertEqual(allowed.status_code, 200)
+            self.assertEqual(configured_proxy_origin.status_code, 200)
+            self.assertIn("Secure", login.headers["Set-Cookie"])
+            self.assertEqual(dashboard.headers["Cache-Control"], "no-store, max-age=0")
+            self.assertEqual(dashboard.headers["X-Frame-Options"], "DENY")
+            self.assertIn("frame-ancestors 'none'", dashboard.headers["Content-Security-Policy"])
+
+    def test_loopback_mode_without_token_still_rejects_cross_origin_mutations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+
+            response = client.post(
+                "/api/workflows/recovery/run-due",
+                headers={
+                    "Origin": "https://attacker.example",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+            )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.get_json()["error"], "Cross-origin mutation rejected")
+
+    def test_loopback_mode_rejects_untrusted_host_headers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+
+            response = client.get(
+                "/api/health",
+                headers={"Host": "attacker.example"},
+            )
+
+            self.assertEqual(response.status_code, 421)
+            self.assertEqual(
+                response.get_json()["error"],
+                "Untrusted host for loopback-only service",
+            )
+
+    def test_dashboard_session_allows_opaque_origin_forms_but_not_api_mutations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+
+            unprimed = client.post(
+                "/workflows/recovery/run-due",
+                headers={"Origin": "null"},
+            )
+            client.get("/")
+            form_response = client.post(
+                "/workflows/recovery/run-due",
+                data={"source": "dashboard"},
+                headers={"Origin": "null"},
+            )
+            api_response = client.post(
+                "/api/workflows/recovery/run-due",
+                headers={"Origin": "null"},
+            )
+
+            self.assertEqual(unprimed.status_code, 403)
+            self.assertEqual(form_response.status_code, 302)
+            self.assertEqual(api_response.status_code, 403)
+
+    def test_tokenless_apps_use_unpredictable_session_signing_keys(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            }
+
+            first = create_app(config)
+            second = create_app(config)
+
+            self.assertNotEqual(first.secret_key, second.secret_key)
 
     def test_remote_host_requires_token(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -89,6 +89,24 @@ class TestConfigLoader(unittest.TestCase):
         self.assertFalse(config["google_drive_enabled"])
         self.assertEqual(config["google_photos_mode"], "picker")
 
+    def test_duplicate_option_names_do_not_overwrite_earlier_legacy_aliases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = os.path.join(temp_dir, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[operations]\napi_url=\n"
+                    "[waveapps]\napi_url=https://gql.waveapps.com/graphql/public\n"
+                )
+
+            config = ConfigLoader(config_file=config_path).get_all_config()
+
+        self.assertEqual(config["api_url"], "")
+        self.assertEqual(config["operations_api_url"], "")
+        self.assertEqual(
+            config["waveapps_api_url"],
+            "https://gql.waveapps.com/graphql/public",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

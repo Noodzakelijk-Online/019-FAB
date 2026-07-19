@@ -4,6 +4,7 @@ import json
 import os
 
 from src.document_processors.base import BaseProcessor
+from src.document_processors.tesseract_processor import _parse_amount
 
 class VendorTemplateProcessor(BaseProcessor):
     """Processes documents using predefined templates for specific vendors, with self-learning capabilities."""
@@ -15,12 +16,18 @@ class VendorTemplateProcessor(BaseProcessor):
 
     def _load_templates(self) -> Dict[str, Any]:
         if os.path.exists(self.templates_file):
-            with open(self.templates_file, "r") as f:
-                return json.load(f)
+            try:
+                with open(self.templates_file, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                return loaded if isinstance(loaded, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                return {}
         return {}
 
     def _save_templates(self):
-        with open(self.templates_file, "w") as f:
+        parent = os.path.dirname(os.path.abspath(self.templates_file))
+        os.makedirs(parent, exist_ok=True)
+        with open(self.templates_file, "w", encoding="utf-8") as f:
             json.dump(self.templates, f, indent=4)
 
     def process_document(self, document_path: str, ocr_text: str) -> Dict[str, Any]:
@@ -43,12 +50,7 @@ class VendorTemplateProcessor(BaseProcessor):
                     if match:
                         # Basic handling for common fields, needs more robust parsing
                         if field == "total_amount":
-                            try:
-                                # Assuming pattern extracts a string like "123,45" or "123.45"
-                                val = match.group(1).replace(".", "").replace(",", ".")
-                                extracted_data[field] = float(val)
-                            except ValueError:
-                                extracted_data[field] = match.group(1)
+                            extracted_data[field] = _parse_amount(match.group(1))
                         elif field == "transaction_date":
                             extracted_data[field] = match.group(1) # Date parsing needed
                         else:

@@ -12,7 +12,7 @@ This project aims to develop a fully automated system to fetch financial documen
 - **Validation**: Validates extracted data against predefined rules and patterns.
 - **Error Handling & Recovery**: Robust error handling with retry mechanisms and manual review interfaces for flagged documents.
 - **Workflow Evidence**: Persists ordered autonomous actions and connector-source steps with attempts, timestamps, duration, result metadata, failures, and aborted downstream work.
-- **Governed Workflow Recovery**: Plans and executes linked attempt-2+ retries for failed read-only connector sources or the exact failed low-risk autonomous step, without replaying approved exports or other external actions.
+- **Governed Workflow Recovery**: Plans and executes linked attempt-2+ retries for failed read-only connector sources or the exact failed low-risk autonomous step, without replaying approved exports or other external actions. The worker applies bounded exponential backoff, stops at a configurable retry depth, and safely finalizes abandoned runs only after their runtime lease has expired.
 - **Performance Optimization**: Includes batch processing, caching, and performance optimization strategies.
 - **Security**: Manages credentials securely using encryption.
 - **Compliance**: Checks documents against regulatory compliance rules.
@@ -206,6 +206,61 @@ automated_bookkeeping/
     (Replace `/path/to/your/local/data` with a path on your host machine to persist data like logs, downloaded documents, etc. Provide necessary environment variables for credentials.)
 
 ## Usage
+
+### FAB Operator Dashboard
+
+The React operator dashboard is a local-first control surface backed by the
+authoritative SQLite operations ledger. It shows health, review and
+reconciliation backlogs, autonomous pipeline gates, exceptions, recovery,
+audit activity, source readiness, and close evidence. Its command drawer only
+exposes local safe-cycle actions; approvals, exports, and external submissions
+remain outside this command boundary.
+
+On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
+the ignored local configuration files when needed, installs missing dashboard
+and Python runtime dependencies, provisions Tesseract plus Dutch/English OCR
+data and Poppler PDF tools when `winget` is available, starts the ledger API,
+autonomous worker, and dashboard on loopback, then opens the control room.
+Double-click `Stop-FAB.cmd` to stop only the processes recorded by that FAB
+runtime. Runtime logs are written under `logs/`.
+
+For manual startup or development:
+
+1. Start the Python ledger API from the repository root:
+
+    ```powershell
+    python -m src.operations.local_api
+    ```
+
+2. Configure and start the web application:
+
+    ```powershell
+    Copy-Item web/.env.example web/.env
+    pnpm.cmd --dir web install
+    pnpm.cmd --dir web dev
+    ```
+
+3. Open `http://127.0.0.1:3000/admin/operations`. The server selects the next
+   available port when `3000` is already in use.
+
+4. Use **Add receipts** to upload one or more PDF/image/CSV files of up to 6 MB
+   each. FAB stores them in the configured local intake folder, registers them
+   in the authoritative ledger, and starts local processing. Use **Run safe
+   cycle** to collect and process anything later added to the intake folder.
+   **Detailed ledger** opens the complete local document, review,
+   reconciliation, reporting, backup, and approval interface.
+
+Set `FAB_LOCAL_API_TOKEN` in `web/.env` to the same value as
+`operations.api_token` in `config/config.ini` when API authentication is
+enabled. The token is used only by the web server and is never sent to the
+browser. Local operator access accepts direct loopback requests in development;
+deployed environments require an authenticated administrator unless
+`FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
+
+The HAI connector publishes discovery at `/api/hai/manifest` and status at
+`/api/hai/status`. The default local configuration enables the bounded
+safe-command allowlist used by the dashboard. HAI cannot approve, export,
+restore, change access controls, or submit downstream bookkeeping changes.
 
 ### Running the Workflow Locally
 To run the main automated bookkeeping workflow:

@@ -16,6 +16,10 @@ from src.operations.local_reconciliation import LocalReconciliationService
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.operations.local_workflow_recovery import (
+    LocalWorkflowRecoveryScheduler,
+    LocalWorkflowRecoveryService,
+)
 from src.operations.operations_client import OperationsClient
 
 __all__ = [
@@ -35,5 +39,7 @@ __all__ = [
     "LocalReviewService",
     "LocalRoutingService",
     "LocalWaveControlService",
+    "LocalWorkflowRecoveryScheduler",
+    "LocalWorkflowRecoveryService",
     "OperationsClient",
 ]

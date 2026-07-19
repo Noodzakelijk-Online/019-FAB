@@ -11,6 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { webhookLimiter, relaxedLimiter } from "../lib/rateLimiter";
 import { createLogger } from "../lib/logger";
 import { registerFabOperationsRoutes } from "../fabOperations";
+import { ENV } from "./env";
 
 const log = createLogger("Server");
 
@@ -129,8 +130,9 @@ async function startServer() {
     log.info(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
 
-  server.listen(port, () => {
-    log.info(`Server running on http://localhost:${port}/`);
+  server.listen(port, ENV.fabWebHost, () => {
+    const displayHost = ENV.fabWebHost === "0.0.0.0" ? "localhost" : ENV.fabWebHost;
+    log.info(`Server running on http://${displayHost}:${port}/`);
   });
 }
 

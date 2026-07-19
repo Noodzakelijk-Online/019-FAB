@@ -1,0 +1,10 @@
+Flask
+Pillow
+pytesseract
+pdf2image
+langdetect
+python-dateutil
+requests
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

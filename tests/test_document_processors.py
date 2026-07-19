@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
+import json
 import os
 import shutil
 import tempfile
@@ -18,6 +19,8 @@ from src.document_processors.dutch_ocr_processor import DutchOcrProcessor
 from src.document_processors.handwritten_recognition_processor import HandwrittenRecognitionProcessor
 from src.document_processors.vendor_template_processor import VendorTemplateProcessor
 from src.document_processors.bilingual_processor import BilingualProcessor
+import src.document_processors.handwritten_recognition_processor as handwritten_module
+import src.document_processors.vision_processor as vision_module
 
 class TestDocumentProcessors(unittest.TestCase):
 
@@ -27,10 +30,19 @@ class TestDocumentProcessors(unittest.TestCase):
 
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        fake_tesseract = os.path.join(self.temp_dir.name, "tesseract.exe")
+        with open(fake_tesseract, "wb") as handle:
+            handle.write(b"test")
+        tessdata_dir = os.path.join(self.temp_dir.name, "tessdata")
+        os.makedirs(tessdata_dir)
+        for language in ("eng", "nld"):
+            with open(os.path.join(tessdata_dir, f"{language}.traineddata"), "wb") as handle:
+                handle.write(b"test")
         self.config = {
             "google_vision_credentials_file": os.path.join(self.temp_dir.name, "vision_credentials.json"),
-            "tesseract_cmd": "tesseract",
-            "tesseract_lang": "eng",
+            "tesseract_cmd": fake_tesseract,
+            "tesseract_data_dir": tessdata_dir,
+            "tesseract_lang": "nld+eng",
             "dutch_ocr_lang": "nld",
             "handwritten_model_path": os.path.join(self.temp_dir.name, "handwritten_model.pth"),
             "template_matching_templates_dir": os.path.join(self.temp_dir.name, "templates"),
@@ -52,16 +64,17 @@ class TestDocumentProcessors(unittest.TestCase):
         with open(self.dummy_pdf_path, "w") as f:
             f.write("%PDF-1.4\n1 0 obj<</Type/Page/Contents 2 0 R>>endobj 2 0 obj<</Length 11>>stream\nHello World\nendstream endobj\nxref\n0 3\n0000000000 65535 f\n0000000009 00000 n\n0000000045 00000 n\ntrailer<</Size 3/Root 1 0 R>>startxref\n103\n%%EOF")
 
-    @patch("src.document_processors.vision_processor.vision.ImageAnnotatorClient")
-    def test_vision_processor(self, mock_client):
+    def test_vision_processor(self):
+        fake_vision = MagicMock()
         mock_client_instance = MagicMock()
-        mock_client.return_value = mock_client_instance
+        fake_vision.ImageAnnotatorClient.return_value = mock_client_instance
         mock_client_instance.document_text_detection.return_value = MagicMock(
-            full_text_annotation=MagicMock(text="Vision OCR Text")
+            full_text_annotation=MagicMock(text="Vision OCR Text", pages=[])
         )
 
-        processor = VisionProcessor(self.config)
-        result = processor.process_document(self.dummy_image_path)
+        with patch.object(vision_module, "vision", fake_vision):
+            processor = VisionProcessor(self.config)
+            result = processor.process_document(self.dummy_image_path)
         self.assertIn("Vision OCR Text", result["ocr_text"])
 
     @patch("src.document_processors.tesseract_processor.pytesseract.image_to_string")
@@ -73,26 +86,72 @@ class TestDocumentProcessors(unittest.TestCase):
         processor = TesseractProcessor(self.config)
         result = processor.process_document(self.dummy_image_path)
         self.assertIn("Tesseract OCR Text", result["ocr_text"])
+        self.assertEqual(result["language"], "nld+eng")
 
-    @patch("src.document_processors.dutch_ocr_processor.pytesseract.image_to_string")
-    @patch("src.document_processors.dutch_ocr_processor.Image.open")
-    def test_dutch_ocr_processor(self, mock_image_open, mock_image_to_string):
-        mock_image_to_string.return_value = "Dutch OCR Text"
-        mock_image_open.return_value = MagicMock()
+    def test_tesseract_processor_extracts_dutch_receipt_fields(self):
+        fields = TesseractProcessor._extract_data_from_text(
+            "Winkel Arnhem\nDatum 19-07-2026\nBTW 21% 2,10\nTotaal EUR 12,10"
+        )
 
-        processor = DutchOcrProcessor(self.config)
-        result = processor.process_document(self.dummy_image_path)
-        self.assertIn("Dutch OCR Text", result["ocr_text"])
-        mock_image_to_string.assert_called_with(mock_image_open.return_value, lang="nld")
+        self.assertEqual(fields["vendor_name"], "Winkel Arnhem")
+        self.assertEqual(fields["transaction_date"], "19-07-2026")
+        self.assertEqual(fields["total_amount"], 12.1)
+        self.assertEqual(fields["vat_amount"], 2.1)
+        self.assertEqual(fields["currency"], "EUR")
 
-    @patch("src.document_processors.handwritten_recognition_processor.HandwrittenRecognitionModel")
-    def test_handwritten_recognition_processor(self, mock_model):
-        mock_model_instance = MagicMock()
-        mock_model.return_value = mock_model_instance
-        mock_model_instance.recognize.return_value = "Handwritten Text"
+        common_ocr_variant = TesseractProcessor._extract_data_from_text("BIW 21% 2,10\nTotaal EUR 12,10")
+        self.assertEqual(common_ocr_variant["vat_amount"], 2.1)
 
-        processor = HandwrittenRecognitionProcessor(self.config)
-        result = processor.process_document(self.dummy_image_path)
+    @patch("src.document_processors.tesseract_processor.convert_from_path")
+    @patch("src.document_processors.tesseract_processor.pytesseract.image_to_string")
+    def test_tesseract_processor_renders_and_reads_pdf_pages(self, mock_image_to_string, mock_convert):
+        mock_convert.return_value = [MagicMock(), MagicMock()]
+        mock_image_to_string.side_effect = ["Page one", "Page two"]
+        with open(os.path.join(self.temp_dir.name, "pdftoppm.exe"), "wb") as handle:
+            handle.write(b"test")
+        self.config["poppler_path"] = self.temp_dir.name
+
+        result = TesseractProcessor(self.config).process_document(self.dummy_pdf_path)
+
+        self.assertEqual(result["ocr_text"], "Page one\n\nPage two")
+        self.assertEqual(mock_image_to_string.call_count, 2)
+        mock_convert.assert_called_once_with(
+            self.dummy_pdf_path,
+            dpi=220,
+            first_page=1,
+            last_page=20,
+            poppler_path=self.temp_dir.name,
+        )
+
+    @patch("src.document_processors.dutch_ocr_processor.TesseractProcessor")
+    def test_dutch_ocr_processor(self, MockTesseractProcessor):
+        MockTesseractProcessor.return_value.process_document.return_value = {
+            "ocr_text": "Winkel\nTotaal EUR 12,10",
+            "extracted_data": {},
+            "language": "nld",
+        }
+
+        result = DutchOcrProcessor(self.config).process_document(self.dummy_image_path)
+        self.assertIn("Winkel", result["ocr_text"])
+        self.assertEqual(result["extracted_data"]["total_amount"], 12.1)
+        self.assertEqual(result["language"], "nl")
+
+    def test_handwritten_recognition_processor(self):
+        fake_cv2 = MagicMock()
+        fake_cv2.imread.return_value = MagicMock()
+        fake_np = MagicMock()
+        fake_image = MagicMock()
+        fake_pytesseract = MagicMock()
+        fake_pytesseract.image_to_string.return_value = "Handwritten Text"
+
+        with (
+            patch.object(handwritten_module, "cv2", fake_cv2),
+            patch.object(handwritten_module, "np", fake_np),
+            patch.object(handwritten_module, "Image", fake_image),
+            patch.object(handwritten_module, "pytesseract", fake_pytesseract),
+        ):
+            processor = HandwrittenRecognitionProcessor(self.config)
+            result = processor.process_document(self.dummy_image_path)
         self.assertIn("Handwritten Text", result["ocr_text"])
 
     def test_template_matching_processor(self):
@@ -113,55 +172,40 @@ class TestDocumentProcessors(unittest.TestCase):
     def test_enhanced_processor(self):
         config = {"ocr_processor": "tesseract", "line_item_extraction_enabled": True}
         processor = EnhancedProcessor(config)
-        # This test would require mocking internal calls to Tesseract and LineItemExtractor
-        # For simplicity, we'll just check if it runs without error.
-        ocr_text = "Enhanced Processor Test\nTotal: 100.00"
-        result = processor.process_document(self.dummy_image_path, ocr_text=ocr_text)
-        self.assertIn("ocr_text", result)
+        result = processor.process_document(self.dummy_image_path)
+        self.assertIn("processed_image_path", result)
 
-    @patch("src.document_processors.vendor_template_processor.json")
-    @patch("src.document_processors.vendor_template_processor.os.path.exists")
-    def test_vendor_template_processor(self, mock_exists, mock_json):
-        mock_exists.return_value = True
-        mock_json.load.return_value = {
-            "VendorA": {
-                "keywords": "VendorA",
-                "extraction_patterns": {"total_amount": r"Total: (\d+\.\d{2})"}
-            }
-        }
+    def test_vendor_template_processor(self):
+        with open(self.config["vendor_templates_file"], "w", encoding="utf-8") as handle:
+            json.dump({
+                "VendorA": {
+                    "keywords": "VendorA",
+                    "extraction_patterns": {"total_amount": r"Total: (\d+\.\d{2})"},
+                }
+            }, handle)
         processor = VendorTemplateProcessor(self.config)
         ocr_text = "This is a document from VendorA. Total: 123.45"
         result = processor.process_document(self.dummy_image_path, ocr_text=ocr_text)
         self.assertEqual(result["extracted_data"]["vendor_name"], "VendorA")
         self.assertEqual(result["extracted_data"]["total_amount"], 123.45)
 
-    @patch("src.document_processors.bilingual_processor.pytesseract.image_to_string")
     @patch("src.document_processors.bilingual_processor.langdetect.detect")
-    @patch("src.document_processors.bilingual_processor.DutchOcrProcessor")
-    @patch("src.document_processors.bilingual_processor.VisionProcessor")
-    def test_bilingual_processor(self, MockVisionProcessor, MockDutchOcrProcessor, mock_langdetect, mock_image_to_string):
-        mock_image_to_string.return_value = "Some text in Dutch"
+    @patch("src.document_processors.bilingual_processor.TesseractProcessor")
+    def test_bilingual_processor(self, MockTesseractProcessor, mock_langdetect):
         mock_langdetect.return_value = "nl"
-
-        mock_dutch_processor_instance = MagicMock()
-        MockDutchOcrProcessor.return_value = mock_dutch_processor_instance
-        mock_dutch_processor_instance.process_document.return_value = {"ocr_text": "Dutch Processed Text"}
+        MockTesseractProcessor.return_value.process_document.return_value = {
+            "ocr_text": "Winkel\nTotaal EUR 12,10",
+            "extracted_data": {},
+        }
 
         processor = BilingualProcessor(self.config)
         result = processor.process_document(self.dummy_image_path)
-        self.assertIn("Dutch Processed Text", result["ocr_text"])
-        MockDutchOcrProcessor.assert_called_once()
-        MockVisionProcessor.assert_not_called()
+        self.assertEqual(result["language"], "nl")
+        self.assertEqual(result["extracted_data"]["total_amount"], 12.1)
 
-        # Test with English
         mock_langdetect.return_value = "en"
-        mock_vision_processor_instance = MagicMock()
-        MockVisionProcessor.return_value = mock_vision_processor_instance
-        mock_vision_processor_instance.process_document.return_value = {"ocr_text": "English Processed Text"}
-
         result = processor.process_document(self.dummy_image_path)
-        self.assertIn("English Processed Text", result["ocr_text"])
-        MockVisionProcessor.assert_called_once()
+        self.assertEqual(result["language"], "en")
 
     def test_processor_pipeline(self):
         config = {
