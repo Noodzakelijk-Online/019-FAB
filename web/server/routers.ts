@@ -90,6 +90,7 @@ import {
   FAB_OPERATOR_COMMAND_IDS,
   getFabControlCenter,
   runFabOperatorCommand,
+  uploadFabIntakeFile,
 } from "./fabLocalGateway";
 import { z } from "zod";
 
@@ -431,6 +432,13 @@ export const appRouter = router({
       operatorLabel: ctx.user?.name || ctx.user?.email || "Local operator",
     })),
     controlCenter: fabOperatorProcedure.query(async () => getFabControlCenter()),
+    uploadIntake: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255),
+        mimeType: z.string().trim().max(150).optional(),
+        contentBase64: z.string().min(4).max(8_500_000),
+      }).strict())
+      .mutation(async ({ input }) => uploadFabIntakeFile(input)),
     runCommand: fabOperatorProcedure
       .input(z.object({
         commandId: z.enum(FAB_OPERATOR_COMMAND_IDS),

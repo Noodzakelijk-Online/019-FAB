@@ -251,6 +251,17 @@ export async function runFabOperatorCommand(
   });
 }
 
+export async function uploadFabIntakeFile(input: {
+  filename: string;
+  mimeType?: string;
+  contentBase64: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/intake/upload", {
+    method: "POST",
+    body: JSON.stringify(input),
+  }, { timeoutMs: 20_000 });
+}
+
 function disconnectedControlCenter(endpoint: string, checkedAt: string, error: string): FabControlCenter {
   return {
     connection: {

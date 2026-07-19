@@ -216,6 +216,15 @@ audit activity, source readiness, and close evidence. Its command drawer only
 exposes local safe-cycle actions; approvals, exports, and external submissions
 remain outside this command boundary.
 
+On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
+the ignored local configuration files when needed, installs missing dashboard
+dependencies, starts the ledger API, autonomous worker, and dashboard on
+loopback, then opens the control room. Double-click `Stop-FAB.cmd` to stop only
+the processes recorded by that FAB runtime. Runtime logs are written under
+`logs/`.
+
+For manual startup or development:
+
 1. Start the Python ledger API from the repository root:
 
     ```powershell
@@ -232,6 +241,13 @@ remain outside this command boundary.
 
 3. Open `http://127.0.0.1:3000/admin/operations`. The server selects the next
    available port when `3000` is already in use.
+
+4. Use **Add receipts** to upload one or more PDF/image/CSV files of up to 6 MB
+   each. FAB stores them in the configured local intake folder, registers them
+   in the authoritative ledger, and starts local processing. Use **Run safe
+   cycle** to collect and process anything later added to the intake folder.
+   **Detailed ledger** opens the complete local document, review,
+   reconciliation, reporting, backup, and approval interface.
 
 Set `FAB_LOCAL_API_TOKEN` in `web/.env` to the same value as
 `operations.api_token` in `config/config.ini` when API authentication is

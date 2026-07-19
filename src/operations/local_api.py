@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -7,6 +9,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from werkzeug.utils import secure_filename
 
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
@@ -56,6 +59,7 @@ from src.operations.local_workflow_recovery import (
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 6 * 1024 * 1024
 LOCAL_FORM_SESSION_KEY = "fab_local_form_session"
 REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
@@ -6388,6 +6392,83 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             allowed_extensions=app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
         ).rescan(paths)
         return jsonify(summary)
+
+    @app.post("/api/intake/upload")
+    def upload_intake_document():
+        paths = app.config["FAB_LOCAL_INTAKE_PATHS"]
+        if not paths:
+            return jsonify({"error": "No intake folders configured"}), 400
+        payload = request.get_json(silent=True) or {}
+        filename = secure_filename(str(payload.get("filename") or ""))
+        encoded_content = payload.get("contentBase64")
+        if not filename or not isinstance(encoded_content, str):
+            return jsonify({"error": "filename and contentBase64 are required"}), 400
+
+        extension = os.path.splitext(filename)[1].lower().lstrip(".")
+        allowed_extensions = {
+            str(value).lower().lstrip(".")
+            for value in app.config["FAB_LOCAL_INTAKE_EXTENSIONS"]
+        }
+        if "*" not in allowed_extensions and extension not in allowed_extensions:
+            return jsonify({
+                "error": "Unsupported intake file extension",
+                "allowedExtensions": sorted(allowed_extensions),
+            }), 400
+        try:
+            content = base64.b64decode(encoded_content, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "contentBase64 is not valid base64"}), 400
+
+        try:
+            max_bytes = int(
+                config.get("fab_local_upload_max_bytes")
+                or config.get("operations_local_upload_max_bytes")
+                or config.get("local_upload_max_bytes")
+                or DEFAULT_LOCAL_UPLOAD_MAX_BYTES
+            )
+        except (TypeError, ValueError):
+            max_bytes = DEFAULT_LOCAL_UPLOAD_MAX_BYTES
+        max_bytes = max(1, min(max_bytes, DEFAULT_LOCAL_UPLOAD_MAX_BYTES))
+        if not content or len(content) > max_bytes:
+            return jsonify({
+                "error": "Uploaded file is empty or exceeds the local upload limit",
+                "maxBytes": max_bytes,
+            }), 413
+
+        intake_root = os.path.abspath(str(paths[0]))
+        os.makedirs(intake_root, exist_ok=True)
+        destination = os.path.abspath(os.path.join(intake_root, filename))
+        if os.path.commonpath((intake_root, destination)) != intake_root:
+            return jsonify({"error": "Invalid intake filename"}), 400
+        if os.path.exists(destination):
+            stem, suffix = os.path.splitext(filename)
+            destination = os.path.join(
+                intake_root,
+                f"{stem}-{hashlib.sha256(content).hexdigest()[:12]}{suffix}",
+            )
+        try:
+            with open(destination, "xb") as handle:
+                handle.write(content)
+        except FileExistsError:
+            return jsonify({"error": "An identical intake filename already exists"}), 409
+
+        summary = LocalFolderIntake(
+            ledger,
+            allowed_extensions=app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
+        ).rescan([intake_root])
+        normalized_destination = os.path.normcase(os.path.abspath(destination))
+        document = next((
+            item for item in summary.get("documents", [])
+            if os.path.normcase(os.path.abspath(str(item.get("path") or ""))) == normalized_destination
+        ), None)
+        return jsonify({
+            "success": True,
+            "status": "registered",
+            "filename": os.path.basename(destination),
+            "sizeBytes": len(content),
+            "document": document,
+            "externalSubmission": "not_executed",
+        }), 201
 
     @app.post("/intake/rescan")
     def rescan_intake_form():

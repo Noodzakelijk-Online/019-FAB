@@ -10,6 +10,7 @@ export const ENV = {
   fabOperationsServiceToken: process.env.FAB_OPERATIONS_SERVICE_TOKEN ?? "",
   fabLocalApiUrl: process.env.FAB_LOCAL_API_URL ?? "http://127.0.0.1:5001",
   fabLocalApiToken: process.env.FAB_LOCAL_API_TOKEN ?? "",
+  fabWebHost: process.env.FAB_WEB_HOST ?? (process.env.NODE_ENV === "development" ? "127.0.0.1" : "0.0.0.0"),
   fabOperatorLocalMode: process.env.FAB_OPERATOR_LOCAL_MODE
     ? ["1", "true", "yes", "on"].includes(process.env.FAB_OPERATOR_LOCAL_MODE.toLowerCase())
     : process.env.NODE_ENV === "development",

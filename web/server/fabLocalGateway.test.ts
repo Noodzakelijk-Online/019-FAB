@@ -4,6 +4,7 @@ import {
   getFabControlCenter,
   getFabLocalApiBaseUrl,
   runFabOperatorCommand,
+  uploadFabIntakeFile,
 } from "./fabLocalGateway";
 
 afterEach(() => {
@@ -102,6 +103,31 @@ describe("FAB local API gateway", () => {
       status: "completed",
       path: "/api/workflows/recovery/run-due",
       body: { limit: 2, actor: "operator-12" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads intake files only through the fixed local API path", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        status: "registered",
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 201, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await uploadFabIntakeFile({
+      filename: "receipt.pdf",
+      mimeType: "application/pdf",
+      contentBase64: "cmVjZWlwdA==",
+    });
+
+    expect(result).toMatchObject({
+      status: "registered",
+      path: "/api/intake/upload",
+      body: { filename: "receipt.pdf", mimeType: "application/pdf" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

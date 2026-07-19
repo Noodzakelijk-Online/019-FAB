@@ -21,7 +21,10 @@ class ConfigLoader:
                 for key, value in parser.items(section):
                     parsed_value = self._parse_value(value)
                     config_data[section][key] = parsed_value
-                    config_data[key] = parsed_value
+                    # Preserve the first legacy unqualified alias. Later
+                    # sections still receive collision-safe section aliases
+                    # such as waveapps_api_url and operations_api_url.
+                    config_data.setdefault(key, parsed_value)
         
         # Override with environment variables (e.g., for sensitive data)
         for key, value in os.environ.items():

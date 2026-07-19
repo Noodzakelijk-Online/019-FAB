@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import {
   ArrowRight,
   BadgeCheck,
@@ -6,6 +7,8 @@ import {
   CircleDollarSign,
   FileInput,
   FileSearch,
+  FileUp,
+  ExternalLink,
   ListChecks,
   MoreHorizontal,
   Play,
@@ -27,7 +30,10 @@ type FabControlOverviewProps = {
   autonomy: FabRecord;
   closeReadiness: FabRecord;
   commandPending: boolean;
+  uploading: boolean;
+  localApiEndpoint: string;
   onCommand: (commandId: FabCommandId) => void;
+  onUpload: (files: File[]) => void;
   onOpenCommands: () => void;
 };
 
@@ -46,9 +52,13 @@ export function FabControlOverview({
   autonomy,
   closeReadiness,
   commandPending,
+  uploading,
+  localApiEndpoint,
   onCommand,
+  onUpload,
   onOpenCommands,
 }: FabControlOverviewProps) {
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const operations = asRecord(health.operations);
   const healthStatus = text(operations.status || health.status, connected ? "unknown" : "disconnected");
   const autonomyStatus = text(autonomy.status, "unavailable");
@@ -95,9 +105,27 @@ export function FabControlOverview({
           <p>Operate the local FAB ledger, review exceptions, and supervise downstream bookkeeping readiness.</p>
         </div>
         <div className="fab-heading-actions">
+          <input
+            ref={uploadInputRef}
+            className="sr-only"
+            type="file"
+            multiple
+            accept=".pdf,.jpg,.jpeg,.png,.heic,.tif,.tiff,.txt,.csv"
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files || []);
+              event.currentTarget.value = "";
+              if (files.length) onUpload(files);
+            }}
+          />
+          <button className="fab-secondary-button" onClick={() => uploadInputRef.current?.click()} disabled={!connected || commandPending || uploading}>
+            <FileUp aria-hidden="true" /> {uploading ? "Adding..." : "Add receipts"}
+          </button>
           <button className="fab-primary-button" onClick={() => onCommand("run_safe_cycle")} disabled={!connected || commandPending || !bool(autonomy.canRunAutonomously)}>
             <Play aria-hidden="true" /> Run safe cycle
           </button>
+          <a className="fab-secondary-button" href={localApiEndpoint} target="_blank" rel="noreferrer">
+            <ExternalLink aria-hidden="true" /> Detailed ledger
+          </a>
           <button className="fab-secondary-button" onClick={onOpenCommands} disabled={!connected}>
             <MoreHorizontal aria-hidden="true" /> More actions
           </button>

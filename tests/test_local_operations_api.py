@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import unittest
@@ -1688,6 +1689,58 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(sources[0]["source_type"], "local_folder")
             self.assertEqual(sources[0]["documents_seen"], 1)
             self.assertEqual(sources[0]["documents_imported"], 1)
+
+    def test_api_uploads_and_registers_a_local_intake_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": intake_dir,
+                "fab_local_intake_extensions": "pdf,png",
+            })
+            client = app.test_client()
+
+            response = client.post("/api/intake/upload", json={
+                "filename": "../receipt.pdf",
+                "contentBase64": base64.b64encode(b"receipt bytes").decode("ascii"),
+            })
+
+            self.assertEqual(response.status_code, 201)
+            payload = response.get_json()
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["filename"], "receipt.pdf")
+            self.assertEqual(payload["externalSubmission"], "not_executed")
+            self.assertTrue(os.path.isfile(os.path.join(intake_dir, "receipt.pdf")))
+            documents = client.get("/api/documents").get_json()["documents"]
+            self.assertEqual(len(documents), 1)
+            self.assertEqual(documents[0]["processing_status"], "imported")
+
+    def test_api_rejects_invalid_or_oversized_local_intake_uploads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": os.path.join(temp_dir, "sort-out"),
+                "fab_local_intake_extensions": "pdf",
+                "fab_local_upload_max_bytes": 4,
+            })
+            client = app.test_client()
+
+            unsupported = client.post("/api/intake/upload", json={
+                "filename": "receipt.exe",
+                "contentBase64": base64.b64encode(b"x").decode("ascii"),
+            })
+            invalid = client.post("/api/intake/upload", json={
+                "filename": "receipt.pdf",
+                "contentBase64": "not-base64",
+            })
+            oversized = client.post("/api/intake/upload", json={
+                "filename": "receipt.pdf",
+                "contentBase64": base64.b64encode(b"12345").decode("ascii"),
+            })
+
+            self.assertEqual(unsupported.status_code, 400)
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(oversized.status_code, 413)
 
     def test_source_connector_readiness_sync_api_and_dashboard_form(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -59,8 +59,6 @@ class LocalReadinessService:
             "fab_local_api_base_url",
             "operations_api_url",
             "operations_api_base_url",
-            "api_base_url",
-            "api_url",
         ))
         self.api_token_configured = (
             api_token_configured
@@ -70,7 +68,6 @@ class LocalReadinessService:
                 "fab_local_api_token",
                 "fab_operations_api_token",
                 "operations_api_token",
-                "api_token",
             )
         )
         self.intake_paths = intake_paths if intake_paths is not None else _list_config(

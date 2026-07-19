@@ -21,11 +21,14 @@ type CommandPayload = {
   targetSystem?: string;
 };
 
+const MAX_LOCAL_UPLOAD_BYTES = 6 * 1024 * 1024;
+
 export default function AdminOperations() {
   const { user, loading: authLoading } = useAuth();
   const [search, setSearch] = useState("");
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
+  const [uploading, setUploading] = useState(false);
   const isAdmin = user?.role === "admin";
   const operatorAccess = trpc.fab.access.useQuery(undefined, {
     retry: false,
@@ -50,12 +53,39 @@ export default function AdminOperations() {
       setPendingCommand(null);
     },
   });
+  const uploadIntake = trpc.fab.uploadIntake.useMutation();
 
   const executeCommand = useCallback((commandId: FabCommandId, payload: FabRecord = {}) => {
     if (!controlCenter.data?.connection.connected || pendingCommand) return;
     setPendingCommand(commandId);
     runCommand.mutate({ commandId, payload: payload as CommandPayload });
   }, [controlCenter.data?.connection.connected, pendingCommand, runCommand]);
+
+  const uploadDocuments = useCallback(async (files: File[]) => {
+    if (!controlCenter.data?.connection.connected || uploading || pendingCommand) return;
+    const oversized = files.find((file) => file.size > MAX_LOCAL_UPLOAD_BYTES);
+    if (oversized) {
+      toast.error(`${oversized.name} exceeds the 6 MB local upload limit.`);
+      return;
+    }
+    setUploading(true);
+    try {
+      for (const file of files) {
+        await uploadIntake.mutateAsync({
+          filename: file.name,
+          mimeType: file.type || "application/octet-stream",
+          contentBase64: await readFileBase64(file),
+        });
+      }
+      toast.success(`${files.length} receipt${files.length === 1 ? "" : "s"} added to FAB intake.`);
+      await controlCenter.refetch();
+      executeCommand("process_imported");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Receipt upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }, [controlCenter, executeCommand, pendingCommand, uploadIntake, uploading]);
 
   const operatorLabel = user?.name || user?.email || operatorAccess.data?.operatorLabel || "Operator";
   const data = controlCenter.data;
@@ -107,8 +137,11 @@ export default function AdminOperations() {
             health={data?.health || {}}
             autonomy={data?.autonomy || {}}
             closeReadiness={data?.closeReadiness || {}}
-            commandPending={Boolean(pendingCommand)}
+            commandPending={Boolean(pendingCommand) || uploading}
+            uploading={uploading}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
+            onUpload={uploadDocuments}
             onOpenCommands={() => setCommandDrawerOpen(true)}
           />
           <FabOperationsPanels
@@ -136,6 +169,23 @@ export default function AdminOperations() {
       />
     </FabOperatorShell>
   );
+}
+
+function readFileBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const separator = result.indexOf(",");
+      if (separator < 0) {
+        reject(new Error(`Could not encode ${file.name}`));
+        return;
+      }
+      resolve(result.slice(separator + 1));
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function FabLoadingState() {
