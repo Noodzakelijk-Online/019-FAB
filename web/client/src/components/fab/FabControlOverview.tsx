@@ -134,7 +134,7 @@ export function FabControlOverview({
 
       <div className="fab-metric-strip" id="documents">
         {metricRows.map(({ label, value, detail, icon: Icon, tone }) => (
-          <div className="fab-metric" key={label}>
+          <div className={`fab-metric fab-metric-${tone}`} key={label}>
             <div className={`fab-metric-icon tone-${tone}`}><Icon aria-hidden="true" /></div>
             <div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
           </div>

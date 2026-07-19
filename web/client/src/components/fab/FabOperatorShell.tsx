@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   BookOpenText,
@@ -55,8 +55,40 @@ export function FabOperatorShell({
   onOpenCommands,
 }: FabOperatorShellProps) {
   const [navOpen, setNavOpen] = useState(false);
+  const [activeSection, setActiveSection] = useState("control-room");
+
+  useEffect(() => {
+    if (!("IntersectionObserver" in window)) return;
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+      if (visible?.target.id) setActiveSection(visible.target.id);
+    }, { rootMargin: "-18% 0px -68%", threshold: [0, 0.15, 0.5] });
+
+    const observed = new Set<HTMLElement>();
+    const observeSections = () => {
+      navigation.forEach(({ id }) => {
+        const section = document.getElementById(id);
+        if (section && !observed.has(section)) {
+          observed.add(section);
+          observer.observe(section);
+        }
+      });
+      if (observed.size === navigation.length) mutationObserver.disconnect();
+    };
+    const mutationObserver = new MutationObserver(observeSections);
+    mutationObserver.observe(document.body, { childList: true, subtree: true });
+    observeSections();
+
+    return () => {
+      mutationObserver.disconnect();
+      observer.disconnect();
+    };
+  }, []);
 
   function navigate(sectionId: string) {
+    setActiveSection(sectionId);
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
     setNavOpen(false);
   }
@@ -73,14 +105,14 @@ export function FabOperatorShell({
         </div>
         <nav className="fab-nav">
           <span className="fab-nav-label">Workspace</span>
-          {navigation.map(({ id, label, icon: Icon }, index) => (
-            <button key={id} className={index === 0 ? "is-active" : ""} onClick={() => navigate(id)}>
+          {navigation.map(({ id, label, icon: Icon }) => (
+            <button key={id} className={activeSection === id ? "is-active" : ""} onClick={() => navigate(id)} aria-current={activeSection === id ? "page" : undefined}>
               <Icon aria-hidden="true" /><span>{label}</span>
             </button>
           ))}
         </nav>
         <div className="fab-sidebar-footer">
-          <button onClick={onOpenCommands}><Settings2 aria-hidden="true" /><span>Safe commands</span></button>
+          <button onClick={() => { setNavOpen(false); onOpenCommands(); }}><Settings2 aria-hidden="true" /><span>Safe commands</span></button>
           <div className="fab-operator-id"><Activity aria-hidden="true" /><span><strong>{operatorLabel}</strong><small>Authenticated operator</small></span></div>
         </div>
       </aside>
