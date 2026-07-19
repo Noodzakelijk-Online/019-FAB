@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Activity,
   BookOpenText,
@@ -56,36 +56,6 @@ export function FabOperatorShell({
 }: FabOperatorShellProps) {
   const [navOpen, setNavOpen] = useState(false);
   const [activeSection, setActiveSection] = useState("control-room");
-
-  useEffect(() => {
-    if (!("IntersectionObserver" in window)) return;
-    const observer = new IntersectionObserver((entries) => {
-      const visible = entries
-        .filter((entry) => entry.isIntersecting)
-        .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
-      if (visible?.target.id) setActiveSection(visible.target.id);
-    }, { rootMargin: "-18% 0px -68%", threshold: [0, 0.15, 0.5] });
-
-    const observed = new Set<HTMLElement>();
-    const observeSections = () => {
-      navigation.forEach(({ id }) => {
-        const section = document.getElementById(id);
-        if (section && !observed.has(section)) {
-          observed.add(section);
-          observer.observe(section);
-        }
-      });
-      if (observed.size === navigation.length) mutationObserver.disconnect();
-    };
-    const mutationObserver = new MutationObserver(observeSections);
-    mutationObserver.observe(document.body, { childList: true, subtree: true });
-    observeSections();
-
-    return () => {
-      mutationObserver.disconnect();
-      observer.disconnect();
-    };
-  }, []);
 
   function navigate(sectionId: string) {
     setActiveSection(sectionId);
