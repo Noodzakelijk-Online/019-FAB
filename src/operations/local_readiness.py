@@ -3,10 +3,16 @@ from __future__ import annotations
 import importlib.util
 import os
 import platform
-import shutil
 import sqlite3
 import sys
 from typing import Any, Dict, List, Optional
+
+from src.utils.tesseract_runtime import (
+    available_tesseract_languages,
+    configured_tesseract_languages,
+    resolve_poppler_path,
+    resolve_tesseract_command,
+)
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -123,10 +129,12 @@ class LocalReadinessService:
         }
 
     def _dependencies(self) -> List[Dict[str, Any]]:
-        tesseract_cmd = str(
-            _config_value(self.config, "tesseract_cmd", "ocr_tesseract_cmd", default="tesseract")
-        )
-        tesseract_resolved = _resolve_executable(tesseract_cmd)
+        tesseract_cmd = str(_config_value(self.config, "tesseract_cmd", "ocr_tesseract_cmd", default="tesseract"))
+        tesseract_resolved = resolve_tesseract_command(self.config)
+        configured_languages = configured_tesseract_languages(self.config)
+        available_languages = available_tesseract_languages(self.config)
+        missing_languages = sorted(set(configured_languages) - set(available_languages))
+        poppler_path = resolve_poppler_path(self.config)
         return [
             {
                 "id": "python",
@@ -154,6 +162,25 @@ class LocalReadinessService:
                 "command": tesseract_cmd,
                 "resolved": tesseract_resolved,
                 "details": "Required for local OCR when Tesseract is selected.",
+            },
+            {
+                "id": "tesseract_languages",
+                "label": "Tesseract language data",
+                "status": "ok" if available_languages and not missing_languages else "attention",
+                "configured": bool(configured_languages),
+                "configuredLanguages": configured_languages,
+                "availableLanguages": available_languages,
+                "missingLanguages": missing_languages,
+                "details": "Dutch and English trained-data files are required for local bookkeeping OCR.",
+            },
+            _python_dependency("pdf2image", "pdf2image", "PDF page rendering before local OCR"),
+            {
+                "id": "poppler",
+                "label": "Poppler PDF tools",
+                "status": "ok" if poppler_path else "attention",
+                "configured": bool(poppler_path),
+                "resolved": poppler_path,
+                "details": "Required to render PDF receipts before Tesseract OCR.",
             },
             _python_dependency("PIL", "Pillow", "Image loading for OCR processors"),
             _python_dependency("googleapiclient", "Google API client", "Gmail, Drive, Photos, and Vision integrations"),
@@ -241,19 +268,13 @@ class LocalReadinessService:
                 "tesseract_ocr",
                 "Tesseract OCR",
                 configured=dependencies["pytesseract"]["configured"] or dependencies["tesseract"]["configured"],
-                ready=dependencies["pytesseract"]["status"] == "ok" and dependencies["tesseract"]["status"] == "ok",
+                ready=all(
+                    dependencies[item]["status"] == "ok"
+                    for item in ("pytesseract", "tesseract", "tesseract_languages", "pdf2image", "poppler")
+                ),
                 details="Local OCR path for PDFs/images converted to images.",
             ),
-            _source_status(
-                "mijngeldzaken",
-                "MijnGeldzaken",
-                configured=paths["mijngeldzakenExportDir"]["configured"],
-                ready=paths["mijngeldzakenExportDir"]["status"] == "ok",
-                details=(
-                    "FAB can prepare checksum-bound import artifacts. External submission "
-                    "requires a supervised user-owned session; stored passwords are ignored."
-                ),
-            ),
+            _mijngeldzaken_source(paths["mijngeldzakenExportDir"]),
             _pair_source(
                 "waveapps_business",
                 "Waveapps Business",
@@ -406,14 +427,6 @@ def _python_dependency(module_name: str, label: str, details: str) -> Dict[str, 
     }
 
 
-def _resolve_executable(command: str) -> Optional[str]:
-    if not command:
-        return None
-    if os.path.isabs(command) and os.path.exists(command):
-        return command
-    return shutil.which(command)
-
-
 def _path_status(path_id: str, label: str, path: Any, kind: str) -> Dict[str, Any]:
     raw_path = str(path or "").strip()
     configured = bool(raw_path)
@@ -524,6 +537,24 @@ def _photos_picker_source(credentials: Dict[str, Any], token: Dict[str, Any]) ->
         source["details"] = (
             "Credentials are ready for a user-owned receipt selection session; background whole-library access is unavailable."
         )
+    return source
+
+
+def _mijngeldzaken_source(export_path: Dict[str, Any]) -> Dict[str, Any]:
+    artifact_ready = export_path["status"] == "ok"
+    source = _source_status(
+        "mijngeldzaken",
+        "MijnGeldzaken",
+        configured=export_path["configured"],
+        ready=False,
+        details=(
+            "FAB can prepare checksum-bound import artifacts. External submission "
+            "requires a supervised user-owned session; stored passwords are ignored."
+        ),
+    )
+    if artifact_ready:
+        source["status"] = "supervision_required"
+        source["localArtifactReady"] = True
     return source
 
 

@@ -6,6 +6,7 @@ from src.document_processors.vision_processor import VisionProcessor
 from src.document_processors.tesseract_processor import TesseractProcessor
 from src.document_processors.template_matching_processor import TemplateMatchingProcessor
 from src.document_processors.line_item_extractor import LineItemExtractor
+from src.document_processors.processor_factory import ProcessorFactory
 
 
 class ProcessorPipeline(BaseProcessor):
@@ -17,10 +18,21 @@ class ProcessorPipeline(BaseProcessor):
         self._initialize_pipeline()
 
     def _initialize_pipeline(self):
+        configured_steps = self.config.get("processor_pipeline_steps")
+        if configured_steps:
+            for step in configured_steps:
+                processor_type = step.get("type") or step.get("name")
+                if not processor_type:
+                    raise ValueError("Each processor pipeline step requires a type.")
+                self.pipeline_steps.append(ProcessorFactory.create_processor(processor_type, self.config))
+            return
+
         if self.config.get("enable_enhanced_preprocessing", True):
             self.pipeline_steps.append(EnhancedProcessor(self.config))
 
-        ocr_method = self.config.get("primary_ocr_method", "vision")
+        # Local OCR is the reliable default; Vision remains opt-in for users
+        # who explicitly configure Google credentials.
+        ocr_method = self.config.get("primary_ocr_method", "tesseract")
         if ocr_method == "vision":
             self.pipeline_steps.append(VisionProcessor(self.config))
         elif ocr_method == "tesseract":
@@ -54,6 +66,8 @@ class ProcessorPipeline(BaseProcessor):
 
             if isinstance(step, (VisionProcessor, TesseractProcessor)):
                 result = step.process_document(current_path)
+                if result.get("error") and not str(result.get("ocr_text") or "").strip():
+                    raise RuntimeError(f"OCR failed: {result['error']}")
                 processed_data["ocr_text"] = result.get("ocr_text", "")
                 self._merge_extracted_data(processed_data, result)
                 processed_data["language"] = result.get("language", "")

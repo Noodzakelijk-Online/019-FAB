@@ -175,6 +175,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const settings = resources.settings || {};
   const sourceReadiness = resources.sourceReadiness || {};
   const registeredSources = arrayValue(resources.sources?.sources);
+  const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
     const sourceId = stringValue(source.id);
     const syncPlan = arrayValue(sourceReadiness.sources).find((item) => stringValue(item.source) === sourceId);
@@ -186,6 +187,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       ...source,
       canSync: Boolean(syncPlan?.canSync),
       enabled: syncPlan ? Boolean(syncPlan.enabled) : Boolean(source.configured),
+      nextAction: syncPlan?.nextAction || null,
       lastSyncAt: account?.last_sync_at || account?.updated_at || null,
       accountStatus: account?.status || null,
     };
@@ -221,8 +223,10 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
         status: stringValue(resources.haiStatus?.status, "unavailable"),
         configured: Boolean(resources.haiStatus?.enabled),
         ready: resources.haiStatus?.status === "ready",
-        details: "Governed machine-control contract for safe local FAB commands.",
-        allowedCommandIds: arrayValue(resources.haiStatus?.allowedCommandIds),
+        details: resources.haiStatus?.status === "ready"
+          ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} local-safe commands.`
+          : "Governed machine-control contract for safe local FAB commands.",
+        allowedCommandIds: haiAllowedCommandIds,
       },
     ],
     workflows: arrayValue(resources.workflows?.workflowRuns),
@@ -296,6 +300,10 @@ function asRecord(value: unknown): JsonRecord | null {
 
 function arrayValue(value: unknown): JsonRecord[] {
   return Array.isArray(value) ? value.flatMap((item) => asRecord(item) ? [asRecord(item)!] : []) : [];
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function stringValue(value: unknown, fallback = ""): string {

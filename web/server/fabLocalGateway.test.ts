@@ -57,7 +57,7 @@ describe("FAB local API gateway", () => {
         sources: [{ id: "google_drive", label: "Google Drive", status: "ready", configured: true }],
       },
       "/api/sources/readiness": {
-        sources: [{ source: "google_drive", enabled: true, canSync: true }],
+        sources: [{ source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." }],
       },
       "/api/sources": { sources: [{ source_type: "google_drive", status: "connected", updated_at: "2026-07-15T08:00:00Z" }] },
       "/api/workflows": { workflowRuns: [{ id: 10, status: "completed" }] },
@@ -66,7 +66,7 @@ describe("FAB local API gateway", () => {
       "/api/reconciliation": { reconciliationMatches: [{ id: 3, status: "needs_review" }] },
       "/api/audit": { auditEvents: [{ id: 2, action: "local_api.source.upsert" }] },
       "/api/close-readiness": { status: "blocked", canClose: false, blockingCount: 2 },
-      "/api/hai/status": { status: "prepared_disabled", enabled: false, allowedCommandIds: [] },
+      "/api/hai/status": { status: "ready", enabled: true, allowedCommandIds: ["run_safe_cycle", "refresh_notifications"] },
       "/api/hai/manifest": { version: "fab-hai-connector-v1", commands: [] },
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -83,8 +83,13 @@ describe("FAB local API gateway", () => {
     expect(result.connection.connected).toBe(true);
     expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, unreconciled: 5, exceptions: 2 });
     expect(result.connections).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "google_drive", canSync: true }),
-      expect.objectContaining({ id: "hai", status: "prepared_disabled" }),
+      expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
+      expect.objectContaining({
+        id: "hai",
+        status: "ready",
+        allowedCommandIds: ["run_safe_cycle", "refresh_notifications"],
+        details: "Governed machine control is enabled for 2 local-safe commands.",
+      }),
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
     expect(JSON.stringify(result)).not.toContain("private-token");

@@ -71,6 +71,15 @@ Set-Location -LiteralPath $root
 $python = Get-Command python -ErrorAction Stop
 $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
 
+& $python.Source -c "import flask, PIL, pytesseract, pdf2image, langdetect, googleapiclient" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Installing FAB local runtime dependencies..."
+    & $python.Source -m pip install -r (Join-Path $root "requirements-local.txt")
+    if ($LASTEXITCODE -ne 0) {
+        throw "FAB local runtime dependency installation failed with exit code $LASTEXITCODE."
+    }
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $root "config\config.ini"))) {
     Copy-Item -LiteralPath (Join-Path $root "config\config_template.ini") -Destination (Join-Path $root "config\config.ini")
 }
@@ -88,6 +97,55 @@ if (-not (Test-Path -LiteralPath (Join-Path $webRoot ".env"))) {
     $logsRoot
 ) | ForEach-Object {
     New-Item -ItemType Directory -Path $_ -Force | Out-Null
+}
+
+$tesseractCandidates = @(
+    "C:\Program Files\Tesseract-OCR\tesseract.exe",
+    "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    (Join-Path $env:LOCALAPPDATA "Programs\Tesseract-OCR\tesseract.exe")
+)
+$tesseractPath = $tesseractCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $tesseractPath -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing the local Tesseract OCR engine..."
+    & winget install --id tesseract-ocr.tesseract --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Host
+    $tesseractPath = $tesseractCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+if (-not $tesseractPath) {
+    Write-Warning "Tesseract OCR is not installed. Receipt OCR will remain unavailable until it is installed."
+}
+else {
+    $tessdataRoot = Join-Path $dataRoot "tessdata"
+    New-Item -ItemType Directory -Path $tessdataRoot -Force | Out-Null
+    $installedTessdata = Join-Path (Split-Path -Parent $tesseractPath) "tessdata"
+    foreach ($languageFile in @("eng.traineddata", "osd.traineddata")) {
+        $sourceLanguage = Join-Path $installedTessdata $languageFile
+        $targetLanguage = Join-Path $tessdataRoot $languageFile
+        if ((Test-Path -LiteralPath $sourceLanguage) -and -not (Test-Path -LiteralPath $targetLanguage)) {
+            Copy-Item -LiteralPath $sourceLanguage -Destination $targetLanguage
+        }
+    }
+
+    $dutchLanguage = Join-Path $tessdataRoot "nld.traineddata"
+    if (-not (Test-Path -LiteralPath $dutchLanguage)) {
+        Write-Host "Installing Dutch OCR language data..."
+        $dutchLanguageUrl = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/nld.traineddata"
+        Invoke-WebRequest -Uri $dutchLanguageUrl -OutFile $dutchLanguage -UseBasicParsing
+    }
+    $dutchLanguageHash = (Get-FileHash -LiteralPath $dutchLanguage -Algorithm SHA256).Hash
+    if ($dutchLanguageHash -ne "CED0E5E046A84C908A6AA7ACCBEF9A232C4A5D9A8276691B81C6EE64D02963F6") {
+        Remove-Item -LiteralPath $dutchLanguage -Force
+        throw "Dutch OCR language data failed checksum verification."
+    }
+}
+
+$popplerPath = & $python.Source -c "from src.utils.tesseract_runtime import resolve_poppler_path; print(resolve_poppler_path({}) or '')"
+if (-not $popplerPath -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host "Installing Poppler PDF rendering tools..."
+    & winget install --id oschwartz10612.Poppler --exact --source winget --silent --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Host
+    $popplerPath = & $python.Source -c "from src.utils.tesseract_runtime import resolve_poppler_path; print(resolve_poppler_path({}) or '')"
+}
+if (-not $popplerPath) {
+    Write-Warning "Poppler is not installed. Image OCR will work, but PDF OCR will remain unavailable."
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $webRoot "node_modules"))) {

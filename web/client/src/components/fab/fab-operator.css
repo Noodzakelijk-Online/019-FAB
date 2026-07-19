@@ -187,6 +187,7 @@ html.fab-operator-active body { max-width: 100%; overflow-x: clip; }
 .fab-proof-band span { margin-top: 2px; color: #577483; font-size: 10px; }
 
 .fab-connection-list { display: grid; }
+.fab-connection-heading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .fab-connection-row { display: grid; grid-template-columns: 38px minmax(260px, 1fr) 150px auto 36px; align-items: center; gap: 12px; min-height: 64px; padding: 9px 14px; border-top: 1px solid var(--fab-line); }
 .fab-connection-row:first-child { border-top: 0; }
 .fab-connection-icon { width: 34px; height: 34px; }

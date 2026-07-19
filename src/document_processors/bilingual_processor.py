@@ -1,4 +1,5 @@
-from typing import Dict, Any
+from typing import Any, Dict
+
 try:
     import langdetect
 except ImportError:
@@ -6,40 +7,31 @@ except ImportError:
 
 from src.document_processors.base import BaseProcessor
 from src.document_processors.dutch_ocr_processor import DutchOcrProcessor
-from src.document_processors.vision_processor import VisionProcessor # Assuming VisionProcessor for English OCR
+from src.document_processors.tesseract_processor import TesseractProcessor
+
 
 class BilingualProcessor(BaseProcessor):
-    """Detects document language and routes to the appropriate OCR processor."""
+    """Run one local OCR pass, detect its language, and apply Dutch enrichment."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.dutch_processor = DutchOcrProcessor(config)
-        self.english_processor = VisionProcessor(config) # Using VisionProcessor for general English OCR
+        self.ocr_processor = TesseractProcessor(config)
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
-        # First, attempt a quick OCR pass to get some text for language detection
-        # Using Tesseract for a quick pass as it's local and fast for this purpose
-        try:
-            import pytesseract
-            from PIL import Image
-            temp_text = pytesseract.image_to_string(Image.open(document_path), lang="+eng+nld")
-        except Exception:
-            temp_text = "" # Fallback if Tesseract is not available or fails
+        result = self.ocr_processor.process_document(document_path)
+        text = str(result.get("ocr_text") or "").strip()
+        detected_language = "en"
 
-        detected_language = "en" # Default to English
-        if temp_text:
+        if text and langdetect is not None:
             try:
-                # langdetect might need more text for accurate detection
-                if langdetect is not None:
-                    detected_language = langdetect.detect(temp_text)
+                detected_language = langdetect.detect(text)
             except Exception:
-                pass # Keep default if detection fails
+                detected_language = "en"
 
         if detected_language == "nl":
-            print(f"Detected Dutch for {document_path}, using Dutch OCR processor.")
-            return self.dutch_processor.process_document(document_path)
-        else:
-            print(f"Detected {detected_language} (or default English) for {document_path}, using English OCR processor.")
-            return self.english_processor.process_document(document_path)
+            extracted_data = result.get("extracted_data", {}) or {}
+            DutchOcrProcessor._enhance_dutch_extraction(text, extracted_data)
+            result["extracted_data"] = extracted_data
 
-
+        result["language"] = detected_language
+        return result

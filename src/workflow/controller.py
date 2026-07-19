@@ -332,6 +332,12 @@ class WorkflowController:
             },
         )
 
+    def close(self) -> None:
+        """Release logger file handles held by this controller."""
+        for handler in list(self.logger.handlers):
+            self.logger.removeHandler(handler)
+            handler.close()
+
     def run_workflow(self):
         if not self.checkpoint_store.acquire_run_lock():
             self.logger.warning("Workflow execution skipped because another run holds the lock.")
@@ -366,6 +372,7 @@ class WorkflowController:
                 "unavailableFetchers": sorted(self.fetcher_initialization_errors),
             },
         )
+
         self.operations_client.record_audit_event(
             "workflow.run.started",
             "workflow_run",

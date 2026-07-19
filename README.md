@@ -218,10 +218,11 @@ remain outside this command boundary.
 
 On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
 the ignored local configuration files when needed, installs missing dashboard
-dependencies, starts the ledger API, autonomous worker, and dashboard on
-loopback, then opens the control room. Double-click `Stop-FAB.cmd` to stop only
-the processes recorded by that FAB runtime. Runtime logs are written under
-`logs/`.
+and Python runtime dependencies, provisions Tesseract plus Dutch/English OCR
+data and Poppler PDF tools when `winget` is available, starts the ledger API,
+autonomous worker, and dashboard on loopback, then opens the control room.
+Double-click `Stop-FAB.cmd` to stop only the processes recorded by that FAB
+runtime. Runtime logs are written under `logs/`.
 
 For manual startup or development:
 
@@ -256,12 +257,10 @@ browser. Local operator access accepts direct loopback requests in development;
 deployed environments require an authenticated administrator unless
 `FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
 
-The future HAI connector publishes discovery at `/api/hai/manifest` and status
-at `/api/hai/status`. Execution remains disabled until both
-`operations.fab_hai_connector_enabled=true` and an explicit
-`operations.fab_hai_allowed_commands` allowlist are configured. HAI receives
-the same narrow safe-command contract as the dashboard and cannot approve or
-submit downstream bookkeeping changes.
+The HAI connector publishes discovery at `/api/hai/manifest` and status at
+`/api/hai/status`. The default local configuration enables the bounded
+safe-command allowlist used by the dashboard. HAI cannot approve, export,
+restore, change access controls, or submit downstream bookkeeping changes.
 
 ### Running the Workflow Locally
 To run the main automated bookkeeping workflow:

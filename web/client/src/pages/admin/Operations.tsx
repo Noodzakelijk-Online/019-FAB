@@ -157,6 +157,7 @@ export default function AdminOperations() {
             connections={data?.connections || []}
             search={search}
             commandPending={Boolean(pendingCommand)}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
           />
         </>

@@ -69,7 +69,7 @@ export function statusTone(value: unknown): "good" | "warn" | "bad" | "neutral" 
   const status = text(value, "").toLowerCase();
   if (["ready", "ok", "healthy", "completed", "connected", "reconciled", "idle"].includes(status)) return "good";
   if (["blocked", "failed", "error", "disconnected", "high", "unavailable"].includes(status)) return "bad";
-  if (["attention", "needs_review", "medium", "due", "deferred", "prepared_disabled", "not_configured"].includes(status)) return "warn";
+  if (["attention", "needs_attention", "needs_auth", "needs_review", "medium", "due", "deferred", "prepared_disabled", "not_configured", "supervision_required"].includes(status)) return "warn";
   if (["running", "syncing", "candidate", "pending"].includes(status)) return "info";
   return "neutral";
 }

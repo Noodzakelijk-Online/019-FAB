@@ -1,58 +1,54 @@
-from typing import Dict, Any
 import re
+from typing import Any, Dict
 
 from src.document_processors.base import BaseProcessor
-from src.document_processors.vision_processor import VisionProcessor # Assuming Vision API for Dutch OCR
+from src.document_processors.tesseract_processor import TesseractProcessor, _parse_amount
+
 
 class DutchOcrProcessor(BaseProcessor):
-    """Specialized OCR processor for Dutch financial documents."""
+    """Run local Dutch OCR and add Dutch financial-document fields."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.vision_processor = VisionProcessor(config) # Use Vision API as backend
+        dutch_config = dict(config)
+        dutch_config["tesseract_lang"] = dutch_config.get("dutch_ocr_lang", "nld")
+        self.ocr_processor = TesseractProcessor(dutch_config)
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
-        # First, get raw OCR text and basic extraction from Vision API
-        vision_result = self.vision_processor.process_document(document_path)
-        full_text = vision_result.get("ocr_text", "")
-        extracted_data = vision_result.get("extracted_data", {})
-        language = vision_result.get("language", "")
-
-        # Enhance extraction with Dutch-specific patterns
+        result = self.ocr_processor.process_document(document_path)
+        full_text = result.get("ocr_text", "")
+        extracted_data = result.get("extracted_data", {}) or {}
         self._enhance_dutch_extraction(full_text, extracted_data)
 
-        return {
+        response = {
             "ocr_text": full_text,
             "extracted_data": extracted_data,
-            "language": language # Should be 'nl' if detected correctly
+            "language": "nl",
         }
+        if result.get("error"):
+            response["error"] = result["error"]
+        return response
 
-    def _enhance_dutch_extraction(self, text: str, data: Dict[str, Any]):
-        """Applies Dutch-specific regex patterns for better data extraction."""
-        # Example: BTW (VAT) number
-        btw_match = re.search(r"BTW(?:-nummer)?\s*[:]?\s*([A-Z]{2}\d{9}B\d{2})", text, re.IGNORECASE)
+    @staticmethod
+    def _enhance_dutch_extraction(text: str, data: Dict[str, Any]) -> None:
+        btw_match = re.search(r"BTW(?:-nummer)?\s*:?\s*([A-Z]{2}\d{9}B\d{2})", text, re.IGNORECASE)
         if btw_match:
-            data["btw_number"] = btw_match.group(1)
+            data["btw_number"] = btw_match.group(1).upper()
 
-        # Example: IBAN
-        iban_match = re.search(r"NL\d{2}[A-Z]{4}\d{10}", text)
+        iban_match = re.search(r"\bNL\d{2}[A-Z]{4}\d{10}\b", text, re.IGNORECASE)
         if iban_match:
-            data["iban"] = iban_match.group(0)
+            data["iban"] = iban_match.group(0).upper()
 
-        # Example: Dutch date formats (dd-mm-yyyy, dd/mm/yyyy)
         date_match = re.search(r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b", text)
         if date_match:
-            # Further parsing might be needed to standardize date format
             data["transaction_date"] = date_match.group(1)
 
-        # Example: Total amount with Dutch currency symbol (Euro)
-        # This is a more robust regex for amounts, considering comma as decimal separator
-        amount_match = re.search(r"Totaal|Totaalbedrag|Te betalen|Bedrag\s*[:]?\s*€\s*(\d{1,3}(?:\.\d{3})*?,\d{2})", text, re.IGNORECASE)
+        amount_match = re.search(
+            r"(?:totaal(?:bedrag)?|te\s+betalen|bedrag)\s*:?\s*(?:EUR)?\s*\u20ac?\s*"
+            r"(\d[\d.,]*[.,]\d{2})",
+            text,
+            re.IGNORECASE,
+        )
         if amount_match:
-            # Replace comma with dot for float conversion
-            data["total_amount"] = float(amount_match.group(1).replace(".", "").replace(",", "."))
+            data["total_amount"] = _parse_amount(amount_match.group(1))
             data["currency"] = "EUR"
-
-        # Add more Dutch-specific patterns as needed
-
-

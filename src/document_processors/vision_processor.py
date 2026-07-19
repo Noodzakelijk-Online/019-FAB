@@ -1,66 +1,63 @@
+from typing import Any, Dict
+
 try:
     from google.cloud import vision
 except ImportError:
     vision = None
-import os
-from typing import Dict, Any
 
 from src.document_processors.base import BaseProcessor
+from src.document_processors.tesseract_processor import TesseractProcessor
+
 
 class VisionProcessor(BaseProcessor):
-    """Processes documents using Google Cloud Vision API for OCR and data extraction."""
+    """Process documents with Google Cloud Vision when it is configured."""
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set
-        # or pass credentials directly if preferred.
         self.client = vision.ImageAnnotatorClient() if vision is not None else None
 
     def process_document(self, document_path: str) -> Dict[str, Any]:
         if self.client is None or vision is None:
-            return {"ocr_text": "", "extracted_data": {}, "language": "", "error": "Google Vision is not installed."}
+            return {
+                "ocr_text": "",
+                "extracted_data": {},
+                "language": "",
+                "error": "Google Vision is not installed or configured.",
+            }
 
-        with open(document_path, "rb") as image_file:
-            content = image_file.read()
+        try:
+            with open(document_path, "rb") as image_file:
+                image = vision.Image(content=image_file.read())
 
-        image = vision.Image(content=content)
+            response = self.client.document_text_detection(image=image)
+            error_message = getattr(getattr(response, "error", None), "message", "")
+            if isinstance(error_message, str) and error_message.strip():
+                raise RuntimeError(error_message)
 
-        response = self.client.document_text_detection(image=image)
-        full_text = response.full_text_annotation.text
+            annotation = response.full_text_annotation
+            full_text = str(getattr(annotation, "text", "") or "")
+            language = self._detected_language(annotation)
+            return {
+                "ocr_text": full_text,
+                "extracted_data": self._extract_data_from_text(full_text),
+                "language": language,
+            }
+        except Exception as exc:
+            return {
+                "ocr_text": "",
+                "extracted_data": {},
+                "language": "",
+                "error": str(exc),
+            }
 
-        # Basic extraction (can be enhanced with more sophisticated parsing)
-        extracted_data = self._extract_data_from_text(full_text)
+    @staticmethod
+    def _detected_language(annotation: Any) -> str:
+        pages = list(getattr(annotation, "pages", None) or [])
+        if not pages:
+            return "en"
+        detected = list(getattr(getattr(pages[0], "property", None), "detected_languages", None) or [])
+        return str(getattr(detected[0], "language_code", "en") or "en") if detected else "en"
 
-        return {
-            "ocr_text": full_text,
-            "extracted_data": extracted_data,
-            "language": response.full_text_annotation.pages[0].property.detected_languages[0].language_code if response.full_text_annotation.pages and response.full_text_annotation.pages[0].property.detected_languages else "en" # Default to English
-        }
-
-    def _extract_data_from_text(self, text: str) -> Dict[str, Any]:
-        """Placeholder for extracting structured data from the OCR text."""
-        # This is a very basic example. Real-world extraction would involve regex, NLP, etc.
-        data = {
-            "vendor_name": None,
-            "transaction_date": None,
-            "total_amount": None,
-            "currency": None,
-            "vat_amount": None,
-            "line_items": []
-        }
-
-        # Example: Simple regex for amount (highly simplified)
-        import re
-        amount_match = re.search(r"Total[:\]?\s*([€$£]?\s*\d+[.,]\d{2})", text, re.IGNORECASE)
-        if amount_match:
-            data["total_amount"] = amount_match.group(1).replace(",", ".").replace("€", "").strip()
-            try:
-                data["total_amount"] = float(data["total_amount"])
-            except ValueError:
-                pass # Keep as string if conversion fails
-
-        # More sophisticated parsing would go here
-
-        return data
-
-
+    @staticmethod
+    def _extract_data_from_text(text: str) -> Dict[str, Any]:
+        return TesseractProcessor._extract_data_from_text(text)
