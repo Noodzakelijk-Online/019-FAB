@@ -1,123 +1,91 @@
 import {
-  AlertTriangle,
   ArrowUpRight,
-  CheckCircle2,
   Clock3,
   FileWarning,
   History,
   RotateCcw,
 } from "lucide-react";
-import { asRecord, compactHumanize, count, humanize, matchesSearch, records, statusTone, text, timeAgo, type FabRecord } from "./fabView";
+import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
+import { useFabLocale } from "./fabLocale";
+import { compactHumanize, count, exactDateTime, matchesSearch, panelState, records, statusTone, text, timeAgo, type FabRecord, type FabResourceState } from "./fabView";
 
 type FabOperationsPanelsProps = {
-  exceptions: FabRecord[];
-  exceptionSummary: FabRecord;
   recovery: FabRecord;
   activity: FabRecord[];
   workflows: FabRecord[];
+  recoveryResource?: FabResourceState;
+  activityResource?: FabResourceState;
+  workflowResource?: FabResourceState;
   search: string;
   localApiEndpoint: string;
 };
 
 export function FabOperationsPanels({
-  exceptions,
-  exceptionSummary,
   recovery,
   activity,
   workflows,
+  recoveryResource,
+  activityResource,
+  workflowResource,
   search,
   localApiEndpoint,
 }: FabOperationsPanelsProps) {
-  const visibleExceptions = exceptions.filter((item) => matchesSearch(item, search));
+  const { copy, status, dateLocale } = useFabLocale();
   const visibleActivity = activity.filter((item) => matchesSearch(item, search));
   const candidates = records(recovery.candidates).filter((item) => matchesSearch(item, search));
-  const bySeverity = asRecord(exceptionSummary.bySeverity);
+  const activityState = activityResource?.state === "live" && visibleActivity.length === 0 ? "empty" : panelState(activityResource, activity.length);
+  const recoveryState = recoveryResource?.state === "live" && candidates.length === 0 ? "empty" : panelState(recoveryResource, candidates.length);
 
   return (
     <>
-      <section id="exceptions" className="fab-section fab-exceptions">
-        <div className="fab-section-heading">
-          <div><span>Manual attention</span><h2>Operating exceptions</h2></div>
-          <div className="fab-severity-summary" aria-label="Exception severity summary">
-            <span className="tone-bad">{count(bySeverity.high)} high</span>
-            <span className="tone-warn">{count(bySeverity.medium)} medium</span>
-            <span>{count(bySeverity.low)} low</span>
-          </div>
-        </div>
-        <div className="fab-table-wrap">
-          <table className="fab-table">
-            <thead><tr><th>Severity</th><th>Exception</th><th>Entity</th><th>Age</th><th>Required next action</th><th><span className="sr-only">Open</span></th></tr></thead>
-            <tbody>
-              {visibleExceptions.map((exception) => {
-                const entity = asRecord(exception.entity);
-                const actions = records(exception.actions);
-                const openAction = actions.find((action) => text(action.method, "GET") === "GET") || actions[0];
-                const path = text(openAction?.dashboardPath || openAction?.path, "");
-                return (
-                  <tr key={text(exception.id)}>
-                    <td data-label="Severity"><span className={`fab-status-chip tone-${statusTone(exception.severity)}`}><AlertTriangle aria-hidden="true" />{humanize(exception.severity)}</span></td>
-                    <td data-label="Exception"><strong>{compactHumanize(exception.type)}</strong><span>{text(exception.message)}</span></td>
-                    <td data-label="Entity"><strong>{compactHumanize(exception.entityType)}</strong><span>#{text(exception.entityId, text(entity.id, "-") )}</span></td>
-                    <td data-label="Age">{exception.ageHours === null || exception.ageHours === undefined ? "-" : `${Math.round(count(exception.ageHours))}h`}</td>
-                    <td data-label="Next action">{text(exception.nextAction)}</td>
-                    <td data-label="Evidence">
-                      {path ? <a className="fab-icon-button fab-table-action" href={`${localApiEndpoint}${path}`} target="_blank" rel="noreferrer" aria-label="Open exception evidence" title="Open exception evidence"><ArrowUpRight aria-hidden="true" /></a> : <span className="fab-muted">-</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-              {!visibleExceptions.length && (
-                <tr><td colSpan={6}><div className="fab-empty-state"><CheckCircle2 aria-hidden="true" /><strong>No matching exceptions</strong><span>{search ? "Adjust the control-center search." : "FAB has no operating exceptions to show."}</span></div></td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <div className="fab-split-band" id="ledger">
+      <div className="fab-split-band">
         <section className="fab-section" id="audit">
           <div className="fab-section-heading">
-            <div><span>Immutable evidence</span><h2>Recent activity</h2></div>
-            <History aria-hidden="true" />
+            <div><span>{copy("Immutable evidence", "Onveranderlijk bewijs")}</span><h2>{copy("Recent activity", "Recente activiteit")}</h2></div>
+            <div className="fab-section-statuses"><FabDataStatus resource={activityResource} state={activityState} /><History aria-hidden="true" /></div>
           </div>
           <div className="fab-activity-list">
-            {visibleActivity.slice(0, 8).map((event) => (
+            {activityResource?.state === "stale" && <FabPanelStateMessage resource={activityResource} title={copy("Audit activity", "Auditactiviteit")} />}
+            {(activityResource?.state === "live" || activityResource?.state === "stale") && visibleActivity.slice(0, 8).map((event) => (
               <div className="fab-activity-row" key={text(event.id)}>
                 <span className={`fab-timeline-dot tone-${statusTone(event.action)}`} />
                 <div><strong>{compactHumanize(event.action)}</strong><span>{compactHumanize(event.entity_type || event.entityType)} #{text(event.entity_id || event.entityId, "-")}</span></div>
-                <time>{timeAgo(event.created_at || event.createdAt)}</time>
+                <time>{exactDateTime(event.created_at || event.createdAt, dateLocale)}</time>
               </div>
             ))}
-            {!visibleActivity.length && <div className="fab-empty-state compact"><History aria-hidden="true" /><strong>No matching audit events</strong><span>Actions performed in FAB appear here.</span></div>}
+            {activityResource?.state !== "live" && activityResource?.state !== "stale" && <FabPanelStateMessage resource={activityResource} title={copy("Audit activity", "Auditactiviteit")} />}
+            {activityResource?.state === "live" && !visibleActivity.length && <FabPanelStateMessage resource={{ ...activityResource, state: "empty" }} title={copy("Audit activity", "Auditactiviteit")} emptyTitle={search ? copy("No matching audit events", "Geen overeenkomende auditgebeurtenissen") : copy("No audit events", "Geen auditgebeurtenissen")} emptyMessage={search ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : copy("The audit service positively returned no events.", "De auditservice heeft bevestigd dat er geen gebeurtenissen zijn.")} />}
           </div>
+          <div className="fab-panel-footer"><a href={`${localApiEndpoint}/#audit`} target="_blank" rel="noreferrer">{copy("View full audit log", "Volledig auditlog bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Showing up to 8 of the latest 12 fetched events.", "Maximaal 8 van de 12 laatst opgehaalde gebeurtenissen worden getoond.")}</span></div>
         </section>
 
-        <section className="fab-section" id="reconciliation">
+        <section className="fab-section" id="recovery">
           <div className="fab-section-heading">
-            <div><span>Governed retries</span><h2>Recovery queue</h2></div>
-            <span className={`fab-status-chip tone-${statusTone(recovery.status)}`}>{count(recovery.dueCount)} due</span>
+            <div><span>{copy("Governed retries", "Beheerde herpogingen")}</span><h2>{copy("Recovery queue", "Herstelwachtrij")}</h2></div>
+            <div className="fab-section-statuses"><FabDataStatus resource={recoveryResource} state={recoveryState} /><span className={`fab-status-chip tone-${statusTone(recovery.status)}`}>{recoveryResource?.state === "live" || recoveryResource?.state === "stale" ? `${count(recovery.dueCount)} due` : "- due"}</span></div>
           </div>
           <div className="fab-recovery-list">
-            {candidates.slice(0, 6).map((candidate) => (
+            {recoveryResource?.state === "stale" && <FabPanelStateMessage resource={recoveryResource} title={copy("Recovery queue", "Herstelwachtrij")} />}
+            {(recoveryResource?.state === "live" || recoveryResource?.state === "stale") && candidates.slice(0, 6).map((candidate) => (
               <div className="fab-recovery-row" key={text(candidate.workflowRunId)}>
                 <div className={`fab-recovery-icon tone-${statusTone(candidate.status)}`}><RotateCcw aria-hidden="true" /></div>
                 <div><strong>Workflow #{text(candidate.workflowRunId)}</strong><span>{compactHumanize(candidate.triggerSource)} - retry {count(candidate.retryDepth)}/{count(candidate.maxRetries)}</span></div>
-                <div><span className={`fab-status-chip tone-${statusTone(candidate.status)}`}>{humanize(candidate.status)}</span><small>{timeAgo(candidate.eligibleAt)}</small></div>
+                <div><span className={`fab-status-chip tone-${statusTone(candidate.status)}`}>{status(candidate.status)}</span><small>{exactDateTime(candidate.eligibleAt, dateLocale)}</small></div>
               </div>
             ))}
-            {!candidates.length && (
-              <div className="fab-empty-state compact"><CheckCircle2 aria-hidden="true" /><strong>No recovery work due</strong><span>{count(recovery.candidateCount)} candidate workflows are being monitored.</span></div>
-            )}
+            {recoveryResource?.state !== "live" && recoveryResource?.state !== "stale" && <FabPanelStateMessage resource={recoveryResource} title={copy("Recovery queue", "Herstelwachtrij")} />}
+            {recoveryResource?.state === "live" && !candidates.length && <FabPanelStateMessage resource={{ ...recoveryResource, state: "empty" }} title={copy("Recovery queue", "Herstelwachtrij")} emptyTitle={copy("No recovery work due", "Geen herstelwerk gepland")} emptyMessage={`${count(recovery.candidateCount)} ${copy("candidate workflows are being monitored.", "kandidaatworkflows worden bewaakt.")}`} />}
           </div>
           <div className="fab-workflow-footnote">
-            <Clock3 aria-hidden="true" /> {workflows.length ? `Latest workflow: ${compactHumanize(workflows[0].status)} ${timeAgo(workflows[0].finished_at || workflows[0].updated_at)}` : "No workflow runs recorded yet."}
+            <Clock3 aria-hidden="true" /> {workflowResource?.state === "live" || workflowResource?.state === "stale" ? (workflows.length ? `${copy("Latest workflow", "Laatste workflow")}: ${status(workflows[0].status)} ${timeAgo(workflows[0].finished_at || workflows[0].updated_at, dateLocale)}` : copy("The workflow service positively returned no runs.", "De workflowservice heeft bevestigd dat er geen runs zijn.")) : copy("Workflow history unavailable.", "Workflowgeschiedenis niet beschikbaar.")}
           </div>
+          <div className="fab-panel-footer"><a href={`${localApiEndpoint}/#workflows`} target="_blank" rel="noreferrer">{copy("View recovery centre", "Herstelcentrum bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Automatic retries remain policy-bound.", "Automatische herpogingen blijven beleidsgebonden.")}</span></div>
         </section>
       </div>
 
-      <section id="reports" className="fab-proof-band">
+      <section className="fab-proof-band">
         <FileWarning aria-hidden="true" />
-        <div><strong>Close and report evidence stays local until approved.</strong><span>FAB records every prepared artifact, checksum, review gate, and downstream execution result in the authoritative ledger.</span></div>
+        <div><strong>{copy("Close and report evidence stays local until approved.", "Afsluit- en rapportbewijs blijft lokaal tot goedkeuring.")}</strong><span>{copy("FAB records every prepared artifact, checksum, review gate, and downstream execution result in the authoritative ledger.", "FAB legt ieder voorbereid artefact, controlegetal, controlemoment en uitvoeringsresultaat vast in het gezaghebbende grootboek.")}</span></div>
       </section>
     </>
   );

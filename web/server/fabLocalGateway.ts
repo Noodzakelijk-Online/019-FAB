@@ -2,6 +2,15 @@ import { ENV } from "./_core/env";
 
 type JsonRecord = Record<string, unknown>;
 
+export type FabDataState = "live" | "stale" | "unavailable" | "error";
+
+export type FabResourceState = {
+  state: FabDataState;
+  checkedAt: string;
+  updatedAt: string | null;
+  error: string | null;
+};
+
 export const FAB_OPERATOR_COMMAND_IDS = [
   "run_safe_cycle",
   "rescan_intake",
@@ -27,11 +36,13 @@ export type FabControlCenter = {
     error: string | null;
   };
   metrics: {
-    documents: number;
-    pendingReview: number;
-    unreconciled: number;
-    exceptions: number;
-    failedDocuments: number;
+    documents: number | null;
+    pendingReview: number | null;
+    unreconciled: number | null;
+    unreconciledDocuments: number | null;
+    unreconciledBankTransactions: number | null;
+    exceptions: number | null;
+    failedDocuments: number | null;
   };
   health: JsonRecord;
   autonomy: JsonRecord;
@@ -48,7 +59,8 @@ export type FabControlCenter = {
     status: JsonRecord;
     manifest: JsonRecord;
   };
-  partialErrors: Array<{ resource: string; error: string }>;
+  resourceStates: Record<FabResourceKey, FabResourceState>;
+  partialErrors: Array<{ resource: FabResourceKey; error: string; state: FabDataState; updatedAt: string | null }>;
 };
 
 const DEFAULT_FAB_LOCAL_API_URL = "http://127.0.0.1:5001";
@@ -70,6 +82,10 @@ const READ_PATHS = {
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
 } as const;
+
+export type FabResourceKey = keyof typeof READ_PATHS;
+
+const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
 
 const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord }> = {
   run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true } },
@@ -146,29 +162,36 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     );
   }
 
-  const entries = Object.entries(READ_PATHS) as Array<[keyof typeof READ_PATHS, string]>;
+  const entries = Object.entries(READ_PATHS) as Array<[FabResourceKey, string]>;
   const settled = await Promise.allSettled(entries.map(([, path]) => fabLocalRequest(path)));
-  const resources: Record<string, JsonRecord> = {};
-  const partialErrors: Array<{ resource: string; error: string }> = [];
+  const resources: Partial<Record<FabResourceKey, JsonRecord>> = {};
+  const resourceStates = {} as Record<FabResourceKey, FabResourceState>;
+  const partialErrors: FabControlCenter["partialErrors"] = [];
   settled.forEach((result, index) => {
     const resource = entries[index][0];
     if (result.status === "fulfilled") {
       resources[resource] = result.value;
+      resourceCache.set(resource, { value: result.value, updatedAt: checkedAt });
+      resourceStates[resource] = { state: "live", checkedAt, updatedAt: checkedAt, error: null };
       return;
+    }
+    const error = result.reason instanceof Error ? result.reason.message : "Request failed";
+    const cached = resourceCache.get(resource);
+    if (cached) {
+      resources[resource] = cached.value;
+      resourceStates[resource] = { state: "stale", checkedAt, updatedAt: cached.updatedAt, error };
+    } else {
+      resourceStates[resource] = { state: "error", checkedAt, updatedAt: null, error };
     }
     partialErrors.push({
       resource,
-      error: result.reason instanceof Error ? result.reason.message : "Request failed",
+      error,
+      state: resourceStates[resource].state,
+      updatedAt: resourceStates[resource].updatedAt,
     });
   });
 
-  const connected = Boolean(resources.health);
-  if (!connected) {
-    return {
-      ...disconnectedControlCenter(endpoint, checkedAt, partialErrors[0]?.error || "FAB local API is unavailable"),
-      partialErrors,
-    };
-  }
+  const connected = resourceStates.health.state === "live";
 
   const metrics = resources.metrics || {};
   const exceptionsPayload = resources.exceptions || {};
@@ -195,22 +218,24 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
 
   return {
     connection: {
-      connected: true,
-      status: stringValue(resources.health.status, "connected"),
+      connected,
+      status: connected ? stringValue(resources.health?.status, "connected") : "disconnected",
       endpoint,
       authConfigured: Boolean(ENV.fabLocalApiToken),
       checkedAt,
-      latencyMs: Date.now() - startedAt,
-      error: null,
+      latencyMs: connected ? Date.now() - startedAt : null,
+      error: connected ? null : resourceStates.health.error || "FAB local API is unavailable",
     },
     metrics: {
-      documents: numberValue(metrics.documents),
-      pendingReview: numberValue(metrics.pending_review),
-      unreconciled: numberValue(metrics.unreconciled_bank_transactions) + numberValue(metrics.unreconciled_documents),
-      exceptions: numberValue(asRecord(exceptionsPayload.summary)?.total),
-      failedDocuments: numberValue(metrics.failed_documents),
+      documents: nullableNumber(metrics.documents),
+      pendingReview: nullableNumber(metrics.pending_review),
+      unreconciled: sumNullable(metrics.unreconciled_bank_transactions, metrics.unreconciled_documents),
+      unreconciledDocuments: nullableNumber(metrics.unreconciled_documents),
+      unreconciledBankTransactions: nullableNumber(metrics.unreconciled_bank_transactions),
+      exceptions: nullableNumber(asRecord(exceptionsPayload.summary)?.total),
+      failedDocuments: nullableNumber(metrics.failed_documents),
     },
-    health: resources.health,
+    health: resources.health || {},
     autonomy: resources.autonomy || {},
     closeReadiness: resources.closeReadiness || {},
     exceptions: arrayValue(exceptionsPayload.exceptions),
@@ -238,8 +263,13 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       status: resources.haiStatus || {},
       manifest: resources.haiManifest || {},
     },
+    resourceStates,
     partialErrors,
   };
+}
+
+export function resetFabControlCenterCacheForTests() {
+  resourceCache.clear();
 }
 
 export async function runFabOperatorCommand(
@@ -267,6 +297,12 @@ export async function uploadFabIntakeFile(input: {
 }
 
 function disconnectedControlCenter(endpoint: string, checkedAt: string, error: string): FabControlCenter {
+  const resourceStates = Object.fromEntries(
+    (Object.keys(READ_PATHS) as FabResourceKey[]).map((resource) => [
+      resource,
+      { state: "unavailable", checkedAt, updatedAt: null, error },
+    ]),
+  ) as Record<FabResourceKey, FabResourceState>;
   return {
     connection: {
       connected: false,
@@ -277,7 +313,15 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
       latencyMs: null,
       error,
     },
-    metrics: { documents: 0, pendingReview: 0, unreconciled: 0, exceptions: 0, failedDocuments: 0 },
+    metrics: {
+      documents: null,
+      pendingReview: null,
+      unreconciled: null,
+      unreconciledDocuments: null,
+      unreconciledBankTransactions: null,
+      exceptions: null,
+      failedDocuments: null,
+    },
     health: {},
     autonomy: {},
     closeReadiness: {},
@@ -290,6 +334,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     reconciliation: [],
     activity: [],
     hai: { status: {}, manifest: {} },
+    resourceStates,
     partialErrors: [],
   };
 }
@@ -310,8 +355,15 @@ function stringValue(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
-function numberValue(value: unknown): number {
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sumNullable(left: unknown, right: unknown): number | null {
+  const leftNumber = nullableNumber(left);
+  const rightNumber = nullableNumber(right);
+  return leftNumber === null || rightNumber === null ? null : leftNumber + rightNumber;
 }

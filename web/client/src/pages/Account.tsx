@@ -179,8 +179,8 @@ export default function Account() {
   }
 
   const hasSubscription = subData?.hasSubscription ?? false;
+  const billingReady = subData?.billingReady ?? hasSubscription;
   const subscriptionStatus = subData?.status ?? "none";
-  const subscription = subData?.subscription;
   const invoices = invoiceData?.invoices ?? [];
 
   return (
@@ -272,7 +272,7 @@ export default function Account() {
                   <div>
                     <div className="text-xs text-charcoal-light">{t("account.plan")}</div>
                     <div className="text-sm text-charcoal font-medium">
-                      {hasSubscription ? "Pay-As-You-Go" : t("account.freePlan")}
+                      {billingReady ? "Usage billing" : t("account.freePlan")}
                     </div>
                   </div>
                 </div>
@@ -303,26 +303,19 @@ export default function Account() {
                 <div className="flex justify-center py-8">
                   <Loader2 className="w-6 h-6 animate-spin text-teal" />
                 </div>
-              ) : hasSubscription && subscription ? (
+              ) : billingReady ? (
                 <div className="space-y-4">
                   <div className="grid sm:grid-cols-2 gap-4">
                     <div className="p-4 rounded-xl bg-sand/40">
-                      <div className="text-xs text-charcoal-light mb-1">{t("account.currentPeriodEnd")}</div>
-                      <div className="text-sm text-charcoal font-medium">
-                        {subscription.currentPeriodEnd
-                          ? formatDate(subscription.currentPeriodEnd)
-                          : "—"}
-                      </div>
+                      <div className="text-xs text-charcoal-light mb-1">Billing model</div>
+                      <div className="text-sm text-charcoal font-medium">Resource cost x 2.5</div>
                     </div>
                     <div className="p-4 rounded-xl bg-sand/40">
-                      <div className="text-xs text-charcoal-light mb-1">{t("account.autoRenew")}</div>
-                      <div className="text-sm text-charcoal font-medium">
-                        {subscription.cancelAtPeriodEnd
-                          ? t("account.cancelAtEnd")
-                          : t("account.autoRenewYes")}
-                      </div>
+                      <div className="text-xs text-charcoal-light mb-1">Fixed monthly fee</div>
+                      <div className="text-sm text-charcoal font-medium">None</div>
                     </div>
                   </div>
+                  <p className="text-sm text-charcoal-light">Your saved payment method is used only for verified resource-usage invoices. A successful setup does not create a recurring subscription.</p>
                   <Button
                     className="bg-teal hover:bg-teal-light text-white rounded-xl"
                     onClick={handleManageBilling}

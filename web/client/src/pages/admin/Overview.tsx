@@ -159,7 +159,7 @@ export default function AdminOverview() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-charcoal">Stripe Payments</h2>
-              <p className="text-xs text-charcoal-light">Pay-As-You-Go subscription management</p>
+              <p className="text-xs text-charcoal-light">Usage billing and invoice management</p>
             </div>
           </div>
           <div className="grid sm:grid-cols-3 gap-4">
@@ -168,8 +168,8 @@ export default function AdminOverview() {
               <div className="text-sm font-medium text-charcoal">Test Sandbox</div>
             </div>
             <div className="p-4 rounded-xl bg-sand/30">
-              <div className="text-sm text-charcoal-light mb-1">Base Price</div>
-              <div className="text-sm font-medium text-charcoal">&euro;4.99/month</div>
+              <div className="text-sm text-charcoal-light mb-1">Billing model</div>
+              <div className="text-sm font-medium text-charcoal">Resource cost x 2.5; no fixed fee</div>
             </div>
             <div className="p-4 rounded-xl bg-sand/30">
               <div className="text-sm text-charcoal-light mb-1">Webhook</div>

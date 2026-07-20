@@ -3,11 +3,13 @@ import {
   fabLocalRequest,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
+  resetFabControlCenterCacheForTests,
   runFabOperatorCommand,
   uploadFabIntakeFile,
 } from "./fabLocalGateway";
 
 afterEach(() => {
+  resetFabControlCenterCacheForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -82,6 +84,7 @@ describe("FAB local API gateway", () => {
 
     expect(result.connection.connected).toBe(true);
     expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, unreconciled: 5, exceptions: 2 });
+    expect(result.resourceStates.metrics.state).toBe("live");
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
       expect.objectContaining({
@@ -93,6 +96,63 @@ describe("FAB local API gateway", () => {
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
     expect(JSON.stringify(result)).not.toContain("private-token");
+  });
+
+  it("does not turn unavailable resources into reassuring zeroes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("local API offline");
+    }));
+
+    const result = await getFabControlCenter();
+
+    expect(result.connection.connected).toBe(false);
+    expect(result.metrics).toMatchObject({
+      documents: null,
+      pendingReview: null,
+      unreconciled: null,
+      exceptions: null,
+    });
+    expect(result.resourceStates.metrics).toMatchObject({ state: "error", updatedAt: null });
+    expect(result.resourceStates.exceptions.state).toBe("error");
+  });
+
+  it("retains last valid resource data as visibly stale after a partial failure", async () => {
+    let failMetrics = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (failMetrics && ["/api/dashboard", "/api/exceptions"].includes(path)) {
+        return new Response(JSON.stringify({ error: "resource unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const value = path === "/api/dashboard"
+        ? { documents: 7, pending_review: 3, unreconciled_bank_transactions: 2, unreconciled_documents: 1, failed_documents: 0 }
+        : path === "/api/exceptions"
+          ? { summary: { total: 3 }, exceptions: [{ id: "held-exception" }] }
+          : path === "/api/health"
+            ? { status: "ok" }
+            : {};
+      return new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const live = await getFabControlCenter();
+    failMetrics = true;
+    const stale = await getFabControlCenter();
+
+    expect(live.metrics.pendingReview).toBe(3);
+    expect(stale.connection.connected).toBe(true);
+    expect(stale.metrics).toMatchObject({ documents: 7, pendingReview: 3, unreconciled: 3, exceptions: 3 });
+    expect(stale.exceptions).toEqual([{ id: "held-exception" }]);
+    expect(stale.resourceStates.metrics).toMatchObject({ state: "stale", error: "resource unavailable" });
+    expect(stale.resourceStates.exceptions.state).toBe("stale");
+    expect(stale.partialErrors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: "metrics", state: "stale" }),
+      expect.objectContaining({ resource: "exceptions", state: "stale" }),
+    ]));
   });
 
   it("maps dashboard commands only to fixed local API paths", async () => {

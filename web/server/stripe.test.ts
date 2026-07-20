@@ -32,6 +32,7 @@ vi.mock("./stripe/stripe", () => ({
     customer_details: { email: "test@example.com" },
   }),
   getCustomerSubscriptions: vi.fn().mockResolvedValue({ data: [] }),
+  getCustomerPaymentMethods: vi.fn().mockResolvedValue({ data: [] }),
   listCustomerInvoices: vi.fn().mockResolvedValue({ data: [] }),
 }));
 
@@ -83,6 +84,7 @@ import {
   createCheckoutSession,
   retrieveCheckoutSession,
   getCustomerSubscriptions,
+  getCustomerPaymentMethods,
   listCustomerInvoices,
 } from "./stripe/stripe";
 
@@ -143,7 +145,8 @@ describe("stripe.products", () => {
     expect(payg!.name).toBe("FAB Pay-As-You-Go");
     expect(payg!.nameNl).toBe("FAB Betaal per Gebruik");
     expect(payg!.currency).toBe("eur");
-    expect(payg!.priceAmountCents).toBe(499);
+    expect(payg!.priceAmountCents).toBe(0);
+    expect(payg!.usageMultiplier).toBe(2.5);
     expect(payg!.interval).toBe("month");
     expect(payg!.features).toBeInstanceOf(Array);
     expect(payg!.featuresNl).toBeInstanceOf(Array);
@@ -181,9 +184,6 @@ describe("stripe.createCheckout", () => {
         userName: "Test User",
         stripeCustomerId: "cus_test123",
         origin: "https://example.com",
-        priceAmount: 499,
-        currency: "eur",
-        interval: "month",
       })
     );
   });
@@ -213,6 +213,7 @@ describe("stripe.subscriptionStatus", () => {
     const result = await caller.stripe.subscriptionStatus();
 
     expect(result.hasSubscription).toBe(false);
+    expect(result.billingReady).toBe(false);
     expect(result.status).toBe("none");
     expect(result.subscription).toBeNull();
   });
@@ -255,6 +256,20 @@ describe("stripe.subscriptionStatus", () => {
     expect(result.subscription!.id).toBe("sub_test123");
     expect(result.subscription!.cancelAtPeriodEnd).toBe(false);
   });
+
+  it("returns ready when a usage-billing payment method is configured", async () => {
+    const mockMethods = getCustomerPaymentMethods as ReturnType<typeof vi.fn>;
+    mockMethods.mockResolvedValue({ data: [{ id: "pm_test123", type: "card" }] });
+
+    const ctx = createAuthContext({ stripeCustomerId: "cus_existing" });
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.stripe.subscriptionStatus();
+
+    expect(result.billingReady).toBe(true);
+    expect(result.hasSubscription).toBe(false);
+    expect(result.status).toBe("ready");
+    expect(result.subscription).toBeNull();
+  });
 });
 
 describe("stripe.verifySession", () => {
@@ -279,6 +294,22 @@ describe("stripe.verifySession", () => {
     expect(result.success).toBe(true);
     expect(result.status).toBe("paid");
     expect(result.customerEmail).toBe("paid@example.com");
+  });
+
+  it("verifies a completed usage-billing setup session", async () => {
+    const mockRetrieve = retrieveCheckoutSession as ReturnType<typeof vi.fn>;
+    mockRetrieve.mockResolvedValue({
+      mode: "setup",
+      status: "complete",
+      payment_status: "no_payment_required",
+      customer_details: { email: "usage@example.com" },
+    });
+
+    const caller = appRouter.createCaller(createPublicContext());
+    const result = await caller.stripe.verifySession({ sessionId: "cs_test_usage" });
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("complete");
   });
 
   it("returns failure for unpaid session", async () => {
