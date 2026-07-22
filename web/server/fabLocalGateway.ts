@@ -60,6 +60,7 @@ export type FabControlCenter = {
     summary: JsonRecord;
   };
   driveAuthorization: JsonRecord;
+  waveSetup: JsonRecord;
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -97,6 +98,7 @@ const READ_PATHS = {
   driveWaveStatus: "/api/drive-wave/status",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
   driveAuthorization: "/api/connectors/google-drive/authorization",
+  waveSetup: "/api/wave/setup",
   reviewQueue: "/api/review?status=open&limit=100",
 } as const;
 
@@ -215,6 +217,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const exceptionsPayload = resources.exceptions || {};
   const settings = resources.settings || {};
   const sourceReadiness = resources.sourceReadiness || {};
+  const waveSetup = resources.waveSetup || {};
   const registeredSources = arrayValue(resources.sources?.sources);
   const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
@@ -224,13 +227,25 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       const sourceType = stringValue(item.source_type || item.sourceType);
       return sourceType === sourceId || sourceType === sourceId.replace("waveapps_", "waveapps");
     });
-    return {
+    const baseConnection = {
       ...source,
       canSync: Boolean(syncPlan?.canSync),
       enabled: syncPlan ? Boolean(syncPlan.enabled) : Boolean(source.configured),
       nextAction: syncPlan?.nextAction || null,
       lastSyncAt: account?.last_sync_at || account?.updated_at || null,
       accountStatus: account?.status || null,
+    };
+    if (sourceId !== "waveapps_business") return baseConnection;
+    const setupStatus = stringValue(waveSetup.status, stringValue(source.status, "not_configured"));
+    return {
+      ...baseConnection,
+      status: setupStatus,
+      ready: waveSetup.ready === true,
+      configured: waveSetup.accessTokenConfigured === true && Boolean(waveSetup.businessId),
+      details: waveSetup.ready === true
+        ? "Wave business and account mappings were verified from the live chart of accounts."
+        : "Connect Wave, validate the business, and map the posting accounts.",
+      nextAction: waveSetupNextAction(setupStatus),
     };
   });
 
@@ -269,6 +284,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       summary: asRecord(resources.reviewQueue?.summary) || {},
     },
     driveAuthorization: resources.driveAuthorization || {},
+    waveSetup,
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -353,6 +369,34 @@ export async function startFabGoogleDriveAuthorization(actor: string): Promise<J
   });
 }
 
+export async function saveFabWaveSetup(input: {
+  targetSystem?: "waveapps_business" | "waveapps_personal";
+  accessToken?: string;
+  businessId?: string;
+  anchorAccountId?: string;
+  defaultCategoryAccountId?: string;
+  categoryAccountIds?: Record<string, string>;
+  clearAccessToken?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/wave/setup", {
+    method: "PUT",
+    body: JSON.stringify({
+      ...input,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
+}
+
+export async function validateFabWaveSetup(
+  targetSystem: "waveapps_business" | "waveapps_personal" = "waveapps_business",
+): Promise<JsonRecord> {
+  return fabLocalRequest("/api/wave/setup/validate", {
+    method: "POST",
+    body: JSON.stringify({ targetSystem }),
+  }, { timeoutMs: 20_000 });
+}
+
 export async function resolveFabReviewItem(input: {
   reviewItemId: number;
   status: "approved" | "rejected" | "resolved" | "ignored";
@@ -412,6 +456,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     delivery: { status: {}, summary: {}, workOrders: [], count: null },
     reviews: { workItems: [], categoryOptions: [], summary: {} },
     driveAuthorization: {},
+    waveSetup: {},
     exceptions: [],
     exceptionSummary: {},
     connections: [],
@@ -440,6 +485,15 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
+}
+
+function waveSetupNextAction(status: string): string {
+  if (status === "needs_token") return "Add the user-owned Wave access token.";
+  if (status === "needs_business_id") return "Select the Wave business to operate.";
+  if (status === "needs_validation") return "Validate the Wave business and load its chart of accounts.";
+  if (status === "needs_mapping") return "Map the verified bank and default expense accounts.";
+  if (status === "ready") return "Wave is ready for governed bookkeeping operations.";
+  return "Review the Wave connection setup.";
 }
 
 function nullableNumber(value: unknown): number | null {

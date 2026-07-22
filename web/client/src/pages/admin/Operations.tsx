@@ -13,6 +13,7 @@ import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
 import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
+import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
 import { humanize, text } from "@/components/fab/fabView";
 import { useFabLocale } from "@/components/fab/fabLocale";
@@ -35,6 +36,7 @@ export default function AdminOperations() {
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
   const [intakeDrawerOpen, setIntakeDrawerOpen] = useState(false);
   const [driveSetupOpen, setDriveSetupOpen] = useState(false);
+  const [waveSetupOpen, setWaveSetupOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
   const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
   const [lastCommand, setLastCommand] = useState<{ id: FabCommandId; status: string; startedAt: string | null; finishedAt: string } | null>(null);
@@ -70,6 +72,8 @@ export default function AdminOperations() {
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
   const installGoogleDriveCredentials = trpc.fab.installGoogleDriveCredentials.useMutation();
   const startGoogleDriveAuthorization = trpc.fab.startGoogleDriveAuthorization.useMutation();
+  const saveWaveSetup = trpc.fab.saveWaveSetup.useMutation();
+  const validateWaveSetup = trpc.fab.validateWaveSetup.useMutation();
   const resolveReview = trpc.fab.resolveReview.useMutation();
 
   const executeCommand = useCallback((commandId: FabCommandId, payload: FabRecord = {}) => {
@@ -109,6 +113,22 @@ export default function AdminOperations() {
     toast.info(copy("Google authorization opened in your default browser.", "Google-autorisatie is geopend in je standaardbrowser."));
     await controlCenter.refetch();
   }, [controlCenter, copy, startGoogleDriveAuthorization]);
+
+  const saveWaveConnection = useCallback(async (input: FabWaveSetupSaveInput) => {
+    const result = await saveWaveSetup.mutateAsync(input);
+    toast.success(result.ready === true
+      ? copy("Wave is connected and mapped.", "Wave is gekoppeld en toegewezen.")
+      : copy("Wave setup was saved locally.", "Wave-instellingen zijn lokaal opgeslagen."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, saveWaveSetup]);
+
+  const validateWaveConnection = useCallback(async () => {
+    const result = await validateWaveSetup.mutateAsync({ targetSystem: "waveapps_business" });
+    const discovery = result.discovery && typeof result.discovery === "object" ? result.discovery as FabRecord : {};
+    const accounts = Array.isArray(discovery.accounts) ? discovery.accounts.length : 0;
+    toast.success(`${copy("Wave business validated", "Wave-bedrijf gevalideerd")}: ${accounts} ${copy("accounts", "rekeningen")}`);
+    await controlCenter.refetch();
+  }, [controlCenter, copy, validateWaveSetup]);
 
   const resolveReviewItem = useCallback(async (input: FabReviewResolution) => {
     try {
@@ -239,7 +259,10 @@ export default function AdminOperations() {
             resource={data?.resourceStates.settings}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
-            onSetupConnection={(connectionId) => { if (connectionId === "google_drive") setDriveSetupOpen(true); }}
+            onSetupConnection={(connectionId) => {
+              if (connectionId === "google_drive") setDriveSetupOpen(true);
+              if (connectionId === "waveapps_business") setWaveSetupOpen(true);
+            }}
           />
         </>
       )}
@@ -268,6 +291,16 @@ export default function AdminOperations() {
         onClose={() => setDriveSetupOpen(false)}
         onInstallCredentials={installDriveCredentials}
         onStartAuthorization={authorizeDrive}
+        onRefresh={async () => { await controlCenter.refetch(); }}
+      />
+      <FabWaveSetupDrawer
+        open={waveSetupOpen}
+        connected={connected}
+        setup={data?.waveSetup || {}}
+        busy={saveWaveSetup.isPending || validateWaveSetup.isPending}
+        onClose={() => setWaveSetupOpen(false)}
+        onSave={saveWaveConnection}
+        onValidate={validateWaveConnection}
         onRefresh={async () => { await controlCenter.refetch(); }}
       />
     </FabOperatorShell>

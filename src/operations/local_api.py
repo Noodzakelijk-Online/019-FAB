@@ -58,6 +58,7 @@ from src.operations.local_reporting import LocalFinancialReportingService, Local
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.operations.local_wave_setup import LocalWaveSetupService
 from src.operations.local_workflow_recovery import (
     LocalWorkflowRecoveryScheduler,
     LocalWorkflowRecoveryService,
@@ -4910,6 +4911,55 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def wave_overview():
         return jsonify(LocalWaveControlService(config).overview(ledger))
 
+    @app.get("/api/wave/setup")
+    def wave_setup_status():
+        target_system = str(
+            request.args.get("targetSystem")
+            or request.args.get("target_system")
+            or "waveapps_business"
+        )
+        result = LocalWaveSetupService(config).status(ledger, target_system)
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.put("/api/wave/setup")
+    def save_wave_setup():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Wave setup payload must be an object"}), 400
+        allowed = {
+            "targetSystem", "accessToken", "businessId", "anchorAccountId",
+            "defaultCategoryAccountId", "categoryAccountIds", "clearAccessToken", "actor",
+        }
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            return jsonify({"error": f"Unsupported Wave setup field(s): {', '.join(unexpected)}"}), 400
+        target_system = payload.get("targetSystem", "waveapps_business")
+        if target_system not in {"waveapps_business", "waveapps_personal"}:
+            return jsonify({"error": "targetSystem must be waveapps_business or waveapps_personal"}), 400
+        for field in ("accessToken", "businessId", "anchorAccountId", "defaultCategoryAccountId", "actor"):
+            if field in payload and not isinstance(payload[field], str):
+                return jsonify({"error": f"{field} must be a string"}), 400
+        category_mapping = payload.get("categoryAccountIds")
+        if category_mapping is not None and (
+            not isinstance(category_mapping, dict)
+            or len(category_mapping) > 250
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in category_mapping.items())
+        ):
+            return jsonify({"error": "categoryAccountIds must be an object of string account IDs with at most 250 entries"}), 400
+        if payload.get("clearAccessToken") not in (None, True, False):
+            return jsonify({"error": "clearAccessToken must be a boolean"}), 400
+        if payload.get("clearAccessToken") is True and "accessToken" in payload:
+            return jsonify({"error": "accessToken and clearAccessToken cannot be supplied together"}), 400
+        try:
+            result = LocalWaveSetupService(config).save(
+                ledger,
+                payload,
+                actor=str(payload.get("actor") or "local_api_wave_setup"),
+            )
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({"success": False, "status": "blocked", "error": str(exc)}), 400
+        return jsonify(result)
+
     @app.get("/api/wave/actions")
     def wave_actions():
         return jsonify(LocalWaveControlService(config).actions(
@@ -4956,6 +5006,31 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             },
         })
         return result
+
+    @app.post("/api/wave/setup/validate")
+    def validate_wave_setup():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Wave validation payload must be an object"}), 400
+        unexpected = sorted(set(payload) - {"targetSystem"})
+        if unexpected:
+            return jsonify({"error": f"Unsupported Wave validation field(s): {', '.join(unexpected)}"}), 400
+        target_system = str(payload.get("targetSystem") or "waveapps_business")
+        if target_system not in {"waveapps_business", "waveapps_personal"}:
+            return jsonify({"error": "targetSystem must be waveapps_business or waveapps_personal"}), 400
+        discovery = run_wave_account_discovery(target_system)
+        result = {
+            "success": bool(discovery.get("success")),
+            "status": discovery.get("status"),
+            "discovery": discovery,
+            "setup": LocalWaveSetupService(config).status(ledger, target_system),
+        }
+        status_code = 200 if result["success"] else 400
+        if discovery.get("status") in {"rate_limited", "quota_exhausted"}:
+            status_code = 429
+        elif discovery.get("status") == "provider_error":
+            status_code = 502
+        return jsonify(result), status_code
 
     @app.post("/api/wave/accounts/discover")
     def discover_wave_accounts():

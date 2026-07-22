@@ -42,11 +42,21 @@ class WaveappsAccountDiscoveryService:
         self.api_url = str(self.config.get("waveapps_api_url") or WAVE_GRAPHQL_URL)
         self.timeout_seconds = _timeout_seconds(self.config.get("waveapps_request_timeout_seconds"))
 
-    def mapping_status(self, target_system: Optional[str] = None) -> Dict[str, Any]:
+    def mapping_status(
+        self,
+        target_system: Optional[str] = None,
+        accounts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         targets = _targets(self.config, target_system)
         return {
             "externalSubmission": "not_executed",
-            "targets": [self._mapping_status_for_target(target) for target in targets],
+            "targets": [
+                self._mapping_status_for_target(
+                    target,
+                    accounts if target_system and target["id"] == target_system else None,
+                )
+                for target in targets
+            ],
         }
 
     def discover(self, target_system: str) -> Dict[str, Any]:

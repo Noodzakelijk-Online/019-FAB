@@ -235,6 +235,15 @@ desktop client JSON at `credentials/drive_credentials.json`, then double-click
 browser, writes `tokens/drive_token.pickle`, verifies access to the configured
 intake folder, and never prints or stores the token in the ledger.
 
+Configure Wave from the **Connections** section of the operator dashboard.
+Open **Wave - Noodzakelijk Online**, store the user-owned API token and business
+ID, run the read-only business validation, then map the funding and default
+expense accounts returned by Wave. FAB encrypts these local settings and, on
+Windows, protects the encryption key with DPAPI for the current user. The token
+is never returned to the browser, ledger, audit log, or API status response.
+Environment variables remain supported and take precedence over dashboard
+settings.
+
 For manual startup or development:
 
 1. Start the Python ledger API from the repository root:

@@ -267,13 +267,13 @@ graph TD
 
 *   **Purpose**: Enters expense data into Waveapps Business account via Waveapps GraphQL API.
 *   **Dependencies**: `requests`.
-*   **Configuration**: `waveapps_business_access_token`, `waveapps_business_id`, `waveapps_business_category_mapping`.
+*   **Configuration**: Encrypted local dashboard setup or `waveapps_business_access_token`, `waveapps_business_id`, `waveapps_business_category_mapping`. `GET/PUT /api/wave/setup` and `POST /api/wave/setup/validate` expose only non-secret status and verified account options.
 
 ### 2.30. `src/data_entry/waveapps_personal_handler.py` (`WaveappsPersonalHandler`)
 
 *   **Purpose**: Enters expense data into a Waveapps Personal account via Waveapps GraphQL API.
 *   **Dependencies**: `requests`.
-*   **Configuration**: `waveapps_personal_access_token`, `waveapps_personal_id`, `waveapps_personal_category_mapping`, `waveapps_handicap_tag`.
+*   **Configuration**: Encrypted local dashboard setup or `waveapps_personal_access_token`, `waveapps_personal_id`, `waveapps_personal_category_mapping`, `waveapps_handicap_tag`.
 
 ### 2.31. `src/learning/learning_manager.py` (`LearningManager`)
 

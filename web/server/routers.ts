@@ -91,9 +91,11 @@ import {
   getFabControlCenter,
   resolveFabReviewItem,
   runFabOperatorCommand,
+  saveFabWaveSetup,
   startFabGoogleDriveAuthorization,
   uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
+  validateFabWaveSetup,
 } from "./fabLocalGateway";
 import { z } from "zod";
 
@@ -456,6 +458,25 @@ export const appRouter = router({
       .mutation(async ({ ctx }) => startFabGoogleDriveAuthorization(
         ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
       )),
+    saveWaveSetup: fabOperatorProcedure
+      .input(z.object({
+        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
+        accessToken: z.string().trim().min(10).max(16_384).optional(),
+        businessId: z.string().trim().min(1).max(255).optional(),
+        anchorAccountId: z.string().trim().min(1).max(255).optional(),
+        defaultCategoryAccountId: z.string().trim().min(1).max(255).optional(),
+        categoryAccountIds: z.record(z.string().trim().min(1).max(255), z.string().trim().min(1).max(255)).optional(),
+        clearAccessToken: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => saveFabWaveSetup({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    validateWaveSetup: fabOperatorProcedure
+      .input(z.object({
+        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
+      }).strict())
+      .mutation(async ({ input }) => validateFabWaveSetup(input.targetSystem)),
     resolveReview: fabOperatorProcedure
       .input(z.object({
         reviewItemId: z.number().int().positive(),

@@ -6,9 +6,11 @@ import {
   resetFabControlCenterCacheForTests,
   resolveFabReviewItem,
   runFabOperatorCommand,
+  saveFabWaveSetup,
   startFabGoogleDriveAuthorization,
   uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
+  validateFabWaveSetup,
 } from "./fabLocalGateway";
 
 afterEach(() => {
@@ -59,7 +61,10 @@ describe("FAB local API gateway", () => {
         exceptions: [{ id: "exception-1", severity: "high" }],
       },
       "/api/settings": {
-        sources: [{ id: "google_drive", label: "Google Drive", status: "ready", configured: true }],
+        sources: [
+          { id: "google_drive", label: "Google Drive", status: "ready", configured: true },
+          { id: "waveapps_business", label: "Wave - Noodzakelijk Online", status: "attention", configured: false },
+        ],
       },
       "/api/sources/readiness": {
         sources: [{ source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." }],
@@ -85,6 +90,15 @@ describe("FAB local API gateway", () => {
         tokenPresent: false,
         folderConfigured: true,
       },
+      "/api/wave/setup": {
+        status: "needs_mapping",
+        ready: false,
+        targetSystem: "waveapps_business",
+        businessId: "business-1",
+        accessTokenConfigured: true,
+        accounts: [{ id: "account-1", name: "Current Account" }],
+        mapping: { verified: false },
+      },
       "/api/review": {
         summary: { reviewItems: 2, documents: 1, duplicateCandidates: 0 },
         categoryOptions: ["Operations | Office Supplies"],
@@ -108,6 +122,13 @@ describe("FAB local API gateway", () => {
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
       expect.objectContaining({
+        id: "waveapps_business",
+        status: "needs_mapping",
+        configured: true,
+        ready: false,
+        nextAction: "Map the verified bank and default expense accounts.",
+      }),
+      expect.objectContaining({
         id: "hai",
         status: "ready",
         allowedCommandIds: ["run_safe_cycle", "refresh_notifications"],
@@ -129,6 +150,11 @@ describe("FAB local API gateway", () => {
       status: "ready_to_authorize",
       credentialsPresent: true,
       tokenPresent: false,
+    });
+    expect(result.waveSetup).toMatchObject({
+      status: "needs_mapping",
+      accessTokenConfigured: true,
+      businessId: "business-1",
     });
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
@@ -298,6 +324,46 @@ describe("FAB local API gateway", () => {
       path: "/api/connectors/google-drive/authorization/start",
       body: { actor: "fab_dashboard:7" },
     });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores and validates Wave setup only through fixed local API paths", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestBody = JSON.parse(String(init?.body));
+      const publicBody = { ...requestBody };
+      delete publicBody.accessToken;
+      return new Response(JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: publicBody,
+        accessTokenConfigured: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const saved = await saveFabWaveSetup({
+      targetSystem: "waveapps_business",
+      accessToken: "user-owned-wave-token",
+      businessId: "business-1",
+      actor: "fab_dashboard:7",
+    });
+    const validated = await validateFabWaveSetup("waveapps_business");
+
+    expect(saved).toMatchObject({
+      path: "/api/wave/setup",
+      body: {
+        targetSystem: "waveapps_business",
+        businessId: "business-1",
+        actor: "fab_dashboard:7",
+      },
+      accessTokenConfigured: true,
+    });
+    expect(validated).toMatchObject({
+      path: "/api/wave/setup/validate",
+      body: { targetSystem: "waveapps_business" },
+    });
+    expect(JSON.stringify(saved)).not.toContain("user-owned-wave-token");
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("user-owned-wave-token");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -103,7 +103,15 @@ Every route must identify `waveapps_business` or `waveapps_personal`. A generic
 deliberately configured. This prevents a personal expense from silently being
 posted into the business ledger, or vice versa.
 
-Store credentials outside `config.ini`:
+For local Windows operation, use **Connections > Wave - Noodzakelijk Online**
+in the operator dashboard. The setup flow stores the token in FAB's encrypted
+local secret store, validates the business with a read-only chart-of-accounts
+request, and accepts only account IDs returned by that validation. The
+encryption key is protected with Windows DPAPI for the current user. Tokens are
+never returned in setup status or written to the ledger and audit log.
+
+Environment variables are still available for managed deployments and take
+precedence over the local store:
 
 ```powershell
 $env:FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN = "..."
@@ -113,7 +121,9 @@ $env:FAB_WAVEAPPS_PERSONAL_ID = "..."
 ```
 
 Anchor and category account IDs are non-secret routing configuration and must
-still be verified through account discovery. Missing credentials, ambiguous
+still be verified through account discovery. `GET /api/wave/setup`,
+`PUT /api/wave/setup`, and `POST /api/wave/setup/validate` back the loopback
+dashboard workflow without returning the access token. Missing credentials, ambiguous
 targets, missing account mappings, and unsupported actions create review work;
 they never count as external submission.
 
@@ -138,7 +148,7 @@ those are absent and sends the item to review instead. The configuration
 template shows the required fields under `[waveapps_business]` and
 `[waveapps_personal]`; keep OAuth tokens out of `config.ini`.
 
-Use the dashboard's **Refresh accounts** action or `POST /api/wave/accounts/discover`
+Use the dashboard's **Validate Wave** action or `POST /api/wave/accounts/discover`
 to read the current chart of accounts. FAB records the read as an audited Wave
 operation snapshot and shows whether each configured anchor/category ID still
 exists before an approved export is dispatched.

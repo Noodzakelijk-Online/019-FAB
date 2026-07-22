@@ -3,6 +3,11 @@ import json
 import os
 from typing import Any, Dict
 
+from src.security.local_secret_store import (
+    apply_local_wave_settings,
+    configure_local_secret_paths,
+)
+
 class ConfigLoader:
     """Loads sectioned config while preserving legacy flat config keys."""
 
@@ -25,6 +30,9 @@ class ConfigLoader:
                     # sections still receive collision-safe section aliases
                     # such as waveapps_api_url and operations_api_url.
                     config_data.setdefault(key, parsed_value)
+
+        configure_local_secret_paths(config_data, self.config_file)
+        apply_local_wave_settings(config_data, mutate=True)
         
         # Override with environment variables (e.g., for sensitive data)
         for key, value in os.environ.items():

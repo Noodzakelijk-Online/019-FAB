@@ -14,6 +14,7 @@ from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
 from src.operations.local_runtime import build_local_operations_ledger
 from src.operations.local_workflow_recovery import LocalWorkflowRecoveryScheduler
+from src.security.local_secret_store import apply_local_wave_settings
 from src.storage.database import Database
 from src.workflow.controller import WorkflowController
 
@@ -80,6 +81,7 @@ class FabWorker:
         self.install_signal_handlers()
         self._record_audit("started", {"intervalSeconds": self.interval_seconds}, "Worker started")
         while not self._stop_requested:
+            apply_local_wave_settings(self.config, mutate=True)
             started_at = self._now()
             self._recovery_held_connector_sources = set()
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")

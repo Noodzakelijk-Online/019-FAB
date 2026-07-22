@@ -86,8 +86,8 @@ export function FabConnections({ connections, search, commandPending, resource, 
               <span className={`fab-status-chip tone-${statusTone(status)}`}>{localizedStatus(status)}</span>
               {canSync ? (
                 <button className="fab-icon-button" onClick={() => onCommand("sync_sources", { sources: [id] })} disabled={commandPending} aria-label={`Sync ${text(connection.label, id)}`} title={`Sync ${text(connection.label, id)}`}><RefreshCw aria-hidden="true" /></button>
-              ) : id === "google_drive" ? (
-                <button className="fab-icon-button" type="button" onClick={() => onSetupConnection(id)} disabled={commandPending} aria-label={copy("Set up Google Drive", "Google Drive instellen")} title={copy("Set up Google Drive", "Google Drive instellen")}><Settings2 aria-hidden="true" /></button>
+              ) : ["google_drive", "waveapps_business"].includes(id) ? (
+                <button className="fab-icon-button" type="button" onClick={() => onSetupConnection(id)} disabled={commandPending} aria-label={copy(`Set up ${text(connection.label, compactHumanize(id))}`, `${text(connection.label, compactHumanize(id))} instellen`)} title={copy(`Set up ${text(connection.label, compactHumanize(id))}`, `${text(connection.label, compactHumanize(id))} instellen`)}><Settings2 aria-hidden="true" /></button>
               ) : ready && ["local_folder", "tesseract_ocr"].includes(id) ? (
                 <span className="fab-connection-static tone-good" title="This local capability is ready"><CheckCircle2 aria-hidden="true" /></span>
               ) : (
