@@ -595,6 +595,29 @@ html.fab-operator-active body {
 .fab-intake-row > div { display: grid; min-width: 0; }
 .fab-intake-row strong { overflow: hidden; color: var(--fab-ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .fab-intake-row span { color: var(--fab-muted); font-size: 12px; overflow-wrap: anywhere; }
+.fab-drive-setup-drawer { width: min(600px, 100vw); }
+.fab-drive-setup-progress { display: grid; border: 1px solid var(--fab-line); border-radius: 6px; overflow: hidden; }
+.fab-drive-setup-step { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 62px; padding: 9px 11px; border-top: 1px solid var(--fab-line); }
+.fab-drive-setup-step:first-child { border-top: 0; }
+.fab-drive-setup-step > span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 6px; background: #f2f6f5; color: var(--fab-muted); }
+.fab-drive-setup-step.tone-good > span { background: var(--fab-green-soft); color: var(--fab-green); }
+.fab-drive-setup-step.tone-info > span { background: var(--fab-blue-soft); color: var(--fab-blue); }
+.fab-drive-setup-step > div { display: grid; min-width: 0; }
+.fab-drive-setup-step strong { font-size: 13px; }
+.fab-drive-setup-step small { overflow: hidden; color: var(--fab-muted); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.fab-drive-credential-panel { display: grid; gap: 11px; padding-top: 16px; border-top: 1px solid var(--fab-line); }
+.fab-drive-credential-panel > p { color: var(--fab-muted); font-size: 13px; }
+.fab-drive-credential-panel > .fab-secondary-button { width: max-content; }
+.fab-drive-file-picker { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; min-height: 64px; padding: 10px 12px; border: 1px dashed #91aaa3; border-radius: 6px; background: #f7faf9; color: var(--fab-ink); text-align: left; }
+.fab-drive-file-picker:hover { border-color: var(--fab-teal); background: var(--fab-green-soft); }
+.fab-drive-file-picker > svg { width: 28px; height: 28px; color: var(--fab-teal); }
+.fab-drive-file-picker > span { display: grid; min-width: 0; }
+.fab-drive-file-picker strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.fab-drive-file-picker small { color: var(--fab-muted); font-size: 11px; }
+.fab-drive-safety-note { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid #c7e3d4; border-left: 3px solid var(--fab-green); border-radius: 6px; background: var(--fab-green-soft); color: #285a45; }
+.fab-drive-safety-note > div { display: grid; gap: 3px; }
+.fab-drive-safety-note strong { font-size: 13px; }
+.fab-drive-safety-note span { font-size: 12px; line-height: 1.45; }
 
 .fab-command-offline,
 .fab-command-progress { display: flex; align-items: flex-start; gap: 10px; margin: 0 14px 14px; padding: 12px; border: 1px solid #d7a3a0; border-radius: 6px; background: var(--fab-red-soft); color: var(--fab-red); }
@@ -720,6 +743,8 @@ html.fab-operator-active body {
   .fab-duplicate-comparison > svg { transform: rotate(90deg); }
   .fab-review-form > .fab-primary-button,
   .fab-duplicate-decision .fab-detail-actions > button { width: 100%; }
+  .fab-drive-credential-panel > .fab-primary-button,
+  .fab-drive-credential-panel .fab-detail-actions > button { width: 100%; }
 }
 
 @media (max-width: 390px) {

@@ -91,6 +91,8 @@ import {
   getFabControlCenter,
   resolveFabReviewItem,
   runFabOperatorCommand,
+  startFabGoogleDriveAuthorization,
+  uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
 } from "./fabLocalGateway";
 import { z } from "zod";
@@ -440,6 +442,20 @@ export const appRouter = router({
         contentBase64: z.string().min(4).max(8_500_000),
       }).strict())
       .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    installGoogleDriveCredentials: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
+        contentBase64: z.string().min(4).max(90_000),
+        replace: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => uploadFabGoogleDriveCredentials({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    startGoogleDriveAuthorization: fabOperatorProcedure
+      .mutation(async ({ ctx }) => startFabGoogleDriveAuthorization(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
     resolveReview: fabOperatorProcedure
       .input(z.object({
         reviewItemId: z.number().int().positive(),

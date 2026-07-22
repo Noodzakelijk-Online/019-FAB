@@ -8,6 +8,7 @@ import { FabControlOverview } from "@/components/fab/FabControlOverview";
 import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
 import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
 import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
+import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupDrawer";
 import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
@@ -33,6 +34,7 @@ export default function AdminOperations() {
   const [search, setSearch] = useState("");
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
   const [intakeDrawerOpen, setIntakeDrawerOpen] = useState(false);
+  const [driveSetupOpen, setDriveSetupOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
   const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
   const [lastCommand, setLastCommand] = useState<{ id: FabCommandId; status: string; startedAt: string | null; finishedAt: string } | null>(null);
@@ -66,6 +68,8 @@ export default function AdminOperations() {
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
+  const installGoogleDriveCredentials = trpc.fab.installGoogleDriveCredentials.useMutation();
+  const startGoogleDriveAuthorization = trpc.fab.startGoogleDriveAuthorization.useMutation();
   const resolveReview = trpc.fab.resolveReview.useMutation();
 
   const executeCommand = useCallback((commandId: FabCommandId, payload: FabRecord = {}) => {
@@ -89,6 +93,22 @@ export default function AdminOperations() {
     await controlCenter.refetch();
     executeCommand("process_imported");
   }, [controlCenter, executeCommand]);
+
+  const installDriveCredentials = useCallback(async (file: File, replace: boolean) => {
+    await installGoogleDriveCredentials.mutateAsync({
+      filename: file.name,
+      contentBase64: await readFileBase64(file),
+      replace,
+    });
+    toast.success(copy("Google OAuth client installed locally.", "Google OAuth-client lokaal geïnstalleerd."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, installGoogleDriveCredentials]);
+
+  const authorizeDrive = useCallback(async () => {
+    await startGoogleDriveAuthorization.mutateAsync();
+    toast.info(copy("Google authorization opened in your default browser.", "Google-autorisatie is geopend in je standaardbrowser."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, startGoogleDriveAuthorization]);
 
   const resolveReviewItem = useCallback(async (input: FabReviewResolution) => {
     try {
@@ -219,6 +239,7 @@ export default function AdminOperations() {
             resource={data?.resourceStates.settings}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
+            onSetupConnection={(connectionId) => { if (connectionId === "google_drive") setDriveSetupOpen(true); }}
           />
         </>
       )}
@@ -238,6 +259,16 @@ export default function AdminOperations() {
         onUploadFile={uploadDocument}
         onFinished={finishIntake}
         onBusyChange={setUploading}
+      />
+      <FabGoogleDriveSetupDrawer
+        open={driveSetupOpen}
+        connected={connected}
+        authorization={data?.driveAuthorization || {}}
+        busy={installGoogleDriveCredentials.isPending || startGoogleDriveAuthorization.isPending}
+        onClose={() => setDriveSetupOpen(false)}
+        onInstallCredentials={installDriveCredentials}
+        onStartAuthorization={authorizeDrive}
+        onRefresh={async () => { await controlCenter.refetch(); }}
       />
     </FabOperatorShell>
   );

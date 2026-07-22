@@ -564,6 +564,9 @@ def _drive_source(
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     source = _oauth_source("google_drive", "Google Drive", credentials, token)
+    reauthorization_required = bool(
+        token.get("path") and os.path.isfile(f"{token['path']}.reauthorize")
+    )
     folder_id = str(
         _config_value(
             config,
@@ -574,7 +577,11 @@ def _drive_source(
         )
         or ""
     ).strip()
-    if source["ready"] and not folder_id:
+    if reauthorization_required:
+        source["ready"] = False
+        source["status"] = "needs_authorization"
+        source["details"] = "OAuth client credentials changed; complete fresh Google consent before Drive sync resumes."
+    elif source["ready"] and not folder_id:
         source["ready"] = False
         source["status"] = "needs_attention"
         source["details"] = (

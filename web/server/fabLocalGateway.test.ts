@@ -6,6 +6,8 @@ import {
   resetFabControlCenterCacheForTests,
   resolveFabReviewItem,
   runFabOperatorCommand,
+  startFabGoogleDriveAuthorization,
+  uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
 } from "./fabLocalGateway";
 
@@ -77,6 +79,12 @@ describe("FAB local API gateway", () => {
         summary: { needsAttachmentVerification: 1, readyToArchive: 0 },
         workOrders: [{ workOrderId: "drive-wave-7-abcd", documentId: 7, stage: "upload_and_verify_attachment" }],
       },
+      "/api/connectors/google-drive/authorization": {
+        status: "ready_to_authorize",
+        credentialsPresent: true,
+        tokenPresent: false,
+        folderConfigured: true,
+      },
       "/api/review": {
         summary: { reviewItems: 2, documents: 1, duplicateCandidates: 0 },
         categoryOptions: ["Operations | Office Supplies"],
@@ -116,6 +124,11 @@ describe("FAB local API gateway", () => {
       summary: { reviewItems: 2, documents: 1 },
       categoryOptions: ["Operations | Office Supplies"],
       workItems: [expect.objectContaining({ documentId: 7 })],
+    });
+    expect(result.driveAuthorization).toMatchObject({
+      status: "ready_to_authorize",
+      credentialsPresent: true,
+      tokenPresent: false,
     });
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
@@ -252,5 +265,39 @@ describe("FAB local API gateway", () => {
       },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("installs Drive credentials and starts only the fixed authorization workflow", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 202, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const installed = await uploadFabGoogleDriveCredentials({
+      filename: "drive-client.json",
+      contentBase64: "e30=",
+      replace: false,
+      actor: "fab_dashboard:7",
+    });
+    const started = await startFabGoogleDriveAuthorization("fab_dashboard:7");
+
+    expect(installed).toMatchObject({
+      path: "/api/connectors/google-drive/credentials",
+      body: {
+        filename: "drive-client.json",
+        replace: false,
+        actor: "fab_dashboard:7",
+      },
+    });
+    expect(started).toMatchObject({
+      path: "/api/connectors/google-drive/authorization/start",
+      body: { actor: "fab_dashboard:7" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

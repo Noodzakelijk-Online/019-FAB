@@ -124,6 +124,22 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         evidence.update(updates)
         return evidence
 
+    def test_drive_credential_rotation_blocks_archive_until_fresh_consent(self):
+        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        for path in (token_path, f"{token_path}.reauthorize"):
+            with open(path, "wb") as handle:
+                handle.write(b"configured")
+        config = {**self.config, "google_drive_token_file": token_path}
+        service = DriveWaveDeliveryService(self.ledger, config)
+
+        status = service.status()
+        plan = service.plan_archive(self.document_id)
+
+        self.assertEqual(status["status"], "needs_authorization")
+        self.assertTrue(status["driveReauthorizationRequired"])
+        self.assertFalse(plan["canArchive"])
+        self.assertIn("drive_reauthorization_required", plan["reasons"])
+
     def test_transaction_presence_without_attachment_proof_never_archives(self):
         archiver = FakeDriveArchiver(self.source_hash, self.source_size)
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)

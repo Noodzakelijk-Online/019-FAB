@@ -246,7 +246,40 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(drive["status"], "needs_configuration")
             self.assertEqual(result["status"], "attention_required")
             self.assertIn("folder_id", drive["nextAction"])
-            self.assertIn("Authorize-FAB-GoogleDrive.cmd", drive["nextAction"])
+            self.assertIn("operator dashboard", drive["nextAction"])
+
+    def test_drive_sync_stays_blocked_while_rotated_credentials_need_fresh_consent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "drive-credentials.json")
+            token_path = os.path.join(temp_dir, "drive-token.pickle")
+            for path in (credentials_path, token_path, f"{token_path}.reauthorize"):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalConnectorIntakeService(
+                ledger,
+                {
+                    "google_drive_enabled": True,
+                    "google_drive_credentials_file": credentials_path,
+                    "google_drive_token_file": token_path,
+                    "google_drive_folder_id": "approved-source-folder",
+                    "google_drive_download_dir": temp_dir,
+                },
+                fetcher_factories={
+                    "google_drive": lambda _config: self.fail(
+                        "Drive fetcher was invoked before fresh OAuth consent"
+                    )
+                },
+            )
+
+            drive = next(item for item in service.plan()["sources"] if item["source"] == "google_drive")
+            result = service.sync(["google_drive"], actor="test")
+
+            self.assertTrue(drive["configured"])
+            self.assertFalse(drive["canSync"])
+            self.assertEqual(drive["status"], "needs_authorization")
+            self.assertEqual(result["status"], "attention_required")
+            self.assertEqual(result["results"][0]["status"], "needs_authorization")
 
     def test_google_photos_requires_supervised_picker_instead_of_background_scan(self):
         with tempfile.TemporaryDirectory() as temp_dir:

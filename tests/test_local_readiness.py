@@ -79,6 +79,25 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(summary["localAccess"]["ngrokSafety"], "blocked_without_token")
             self.assertIn("remote_api_without_token", {issue["type"] for issue in summary["issues"]})
 
+    def test_drive_readiness_blocks_sync_during_oauth_client_rotation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "drive.json")
+            token_path = os.path.join(temp_dir, "drive.pickle")
+            for path in (credentials_path, token_path, f"{token_path}.reauthorize"):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+
+            summary = LocalReadinessService({
+                "google_drive_credentials_file": credentials_path,
+                "google_drive_token_file": token_path,
+                "google_drive_folder_id": "approved-source-folder",
+            }).summarize()
+            drive = next(item for item in summary["sources"] if item["id"] == "google_drive")
+
+            self.assertFalse(drive["ready"])
+            self.assertEqual(drive["status"], "needs_authorization")
+            self.assertIn("fresh Google consent", drive["details"])
+
     def test_base_url_overrides_displayed_local_access_without_exposing_token(self):
         summary = LocalReadinessService(
             {"fab_local_api_base_url": "https://fab-local.example.ngrok-free.app", "fab_local_api_token": "secret-token"},

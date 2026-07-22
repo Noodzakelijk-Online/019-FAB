@@ -1,6 +1,8 @@
 import base64
+import json
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +10,7 @@ from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
+from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
 from src.operations.local_ledger import LocalOperationsLedger
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 
@@ -348,6 +351,122 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertNotIn("should-not-be-used-here", client.get("/api/sources").data.decode("utf-8"))
             self.assertEqual(sources[0]["metadata"]["token"], "<redacted>")
             self.assertEqual(client.get("/api/audit").get_json()["auditEvents"][0]["action"], "local_api.source.upsert")
+
+    def test_api_installs_and_launches_google_drive_authorization_without_exposing_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            credentials_path = os.path.join(temp_dir, "credentials", "drive.json")
+            token_path = os.path.join(temp_dir, "tokens", "drive.pickle")
+            config = {
+                "fab_local_ledger_path": ledger_path,
+                "google_drive_credentials_file": credentials_path,
+                "google_drive_token_file": token_path,
+                "google_drive_folder_id": "approved-source-folder",
+            }
+            app = create_app(config)
+            client = app.test_client()
+            credentials = json.dumps({
+                "installed": {
+                    "client_id": "fab-api-test.apps.googleusercontent.com",
+                    "client_secret": "api-test-client-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }).encode("utf-8")
+
+            self.assertEqual(
+                client.get("/api/connectors/google-drive/authorization").get_json()["status"],
+                "credentials_required",
+            )
+            invalid = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={"filename": "drive.json", "contentBase64": "not-base64"},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            invalid_replace = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "replace": "false",
+                },
+            )
+            self.assertEqual(invalid_replace.status_code, 400)
+            installed = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "actor": "api_test",
+                },
+            )
+            self.assertEqual(installed.status_code, 201)
+            self.assertEqual(installed.get_json()["status"], "ready_to_authorize")
+            repeated = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                },
+            )
+            self.assertEqual(repeated.status_code, 409)
+
+            ledger = LocalOperationsLedger(ledger_path)
+
+            def authorize(settings):
+                os.makedirs(os.path.dirname(settings["google_drive_token_file"]), exist_ok=True)
+                with open(settings["google_drive_token_file"], "wb") as handle:
+                    handle.write(b"test-token")
+                return {"success": True, "status": "authorized", "folderVerified": True}
+
+            app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(
+                ledger,
+                config,
+                authorize=authorize,
+            )
+            started = client.post(
+                "/api/connectors/google-drive/authorization/start",
+                json={"actor": "api_test"},
+            )
+            self.assertEqual(started.status_code, 202)
+            for _ in range(100):
+                status = client.get("/api/connectors/google-drive/authorization").get_json()
+                if not status["authorizationInProgress"]:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status["status"], "authorized")
+            self.assertTrue(status["tokenPresent"])
+            response_text = client.get("/api/audit").data.decode("utf-8")
+            self.assertNotIn("api-test-client-secret", response_text)
+
+    def test_google_drive_desktop_oauth_mutations_are_loopback_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_host": "0.0.0.0",
+                "fab_local_api_token": "remote-test-token",
+                "google_drive_credentials_file": os.path.join(temp_dir, "drive.json"),
+                "google_drive_token_file": os.path.join(temp_dir, "drive.pickle"),
+                "google_drive_folder_id": "approved-source-folder",
+            })
+            client = app.test_client()
+            headers = {"Authorization": "Bearer remote-test-token"}
+
+            install = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={"filename": "drive.json", "contentBase64": "e30="},
+                headers=headers,
+            )
+            start = client.post(
+                "/api/connectors/google-drive/authorization/start",
+                json={},
+                headers=headers,
+            )
+
+            self.assertEqual(install.status_code, 403)
+            self.assertEqual(start.status_code, 403)
 
     def test_dashboard_renders_ledger_review_and_resolves_from_form(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -59,6 +59,7 @@ export type FabControlCenter = {
     categoryOptions: string[];
     summary: JsonRecord;
   };
+  driveAuthorization: JsonRecord;
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -95,6 +96,7 @@ const READ_PATHS = {
   haiManifest: "/api/hai/manifest",
   driveWaveStatus: "/api/drive-wave/status",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
+  driveAuthorization: "/api/connectors/google-drive/authorization",
   reviewQueue: "/api/review?status=open&limit=100",
 } as const;
 
@@ -266,6 +268,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
       summary: asRecord(resources.reviewQueue?.summary) || {},
     },
+    driveAuthorization: resources.driveAuthorization || {},
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -322,6 +325,32 @@ export async function uploadFabIntakeFile(input: {
     method: "POST",
     body: JSON.stringify(input),
   }, { timeoutMs: 20_000 });
+}
+
+export async function uploadFabGoogleDriveCredentials(input: {
+  filename: string;
+  contentBase64: string;
+  replace?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/google-drive/credentials", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: input.filename,
+      contentBase64: input.contentBase64,
+      replace: input.replace ?? false,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  }, { timeoutMs: 20_000 });
+}
+
+export async function startFabGoogleDriveAuthorization(actor: string): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/google-drive/authorization/start", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
 }
 
 export async function resolveFabReviewItem(input: {
@@ -382,6 +411,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     closeReadiness: {},
     delivery: { status: {}, summary: {}, workOrders: [], count: null },
     reviews: { workItems: [], categoryOptions: [], summary: {} },
+    driveAuthorization: {},
     exceptions: [],
     exceptionSummary: {},
     connections: [],

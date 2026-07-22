@@ -91,7 +91,11 @@ class DriveArchiveClient:
             or "credentials/drive_credentials.json"
         )
         credentials = None
-        if os.path.exists(token_path):
+        force_reauthorization = _as_bool(
+            self.config.get("google_drive_force_reauthorization"),
+            False,
+        )
+        if os.path.exists(token_path) and not force_reauthorization:
             with open(token_path, "rb") as handle:
                 credentials = pickle.load(handle)
 

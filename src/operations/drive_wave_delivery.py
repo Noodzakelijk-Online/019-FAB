@@ -61,15 +61,19 @@ class DriveWaveDeliveryService:
             or "credentials/drive_credentials.json"
         )
         token_present = os.path.isfile(os.path.abspath(os.path.expanduser(token_path)))
+        reauthorization_required = os.path.isfile(
+            f"{os.path.abspath(os.path.expanduser(token_path))}.reauthorize"
+        )
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
         configured = enabled and bool(source_folder_id) and bool(archive_folder_id) and bool(business_id)
         return {
-            "status": "ready" if configured and token_present else "needs_authorization" if configured else "needs_configuration",
+            "status": "ready" if configured and token_present and not reauthorization_required else "needs_authorization" if configured else "needs_configuration",
             "archiveEnabled": enabled,
             "sourceFolderConfigured": bool(source_folder_id),
             "archiveFolderConfigured": bool(archive_folder_id),
             "waveBusinessConfigured": bool(business_id),
             "driveTokenPresent": token_present,
+            "driveReauthorizationRequired": reauthorization_required,
             "driveCredentialsPresent": credentials_present,
             "relayIntakeReady": bool(source_folder_id),
             "relayIntakePath": "/api/connectors/google-drive/relay",
@@ -610,6 +614,8 @@ class DriveWaveDeliveryService:
             reasons.append("archive_folder_not_configured")
         if not self._business_id():
             reasons.append("wave_business_not_configured")
+        if self._drive_reauthorization_required():
+            reasons.append("drive_reauthorization_required")
         if not self._is_configured_source(document):
             reasons.append("document_outside_configured_source_folder")
         if document.get("duplicate_of_document_id"):
@@ -757,6 +763,15 @@ class DriveWaveDeliveryService:
 
     def _business_id(self) -> str:
         return str(_first(self.config, "waveapps_business_id", "wave_business_id") or "").strip()
+
+    def _drive_reauthorization_required(self) -> bool:
+        token_path = str(
+            _first(self.config, "google_drive_token_file", "drive_token_path")
+            or "tokens/drive_token.pickle"
+        )
+        return os.path.isfile(
+            f"{os.path.abspath(os.path.expanduser(token_path))}.reauthorize"
+        )
 
     def _evidence_max_age_seconds(self) -> int:
         value = _first(

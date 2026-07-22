@@ -220,7 +220,12 @@ class LocalConnectorIntakeService:
         failures = [item for item in results if item["status"] in {"failed", "partial"}]
         attention = [
             item for item in results
-            if item["status"] in {"needs_configuration", "disabled", "supervision_required"}
+            if item["status"] in {
+                "needs_authorization",
+                "needs_configuration",
+                "disabled",
+                "supervision_required",
+            }
         ]
         if failures:
             status = "failed" if len(failures) == len(results) else "completed_with_errors"
@@ -507,6 +512,8 @@ class LocalConnectorIntakeService:
             }
         if not enabled:
             status = "disabled"
+        elif source == "google_drive" and self._drive_reauthorization_required():
+            status = "needs_authorization"
         elif not configured:
             status = "needs_configuration"
         else:
@@ -557,6 +564,14 @@ class LocalConnectorIntakeService:
             "google_photos_credentials_file",
             "photos_credentials_path",
         ) and bool(token_path and token_path.lower().endswith(".json") and os.path.isfile(token_path))
+
+    def _drive_reauthorization_required(self) -> bool:
+        token_path = _config_path(
+            self.config,
+            "google_drive_token_file",
+            "drive_token_path",
+        )
+        return bool(token_path and os.path.isfile(f"{token_path}.reauthorize"))
 
     def _source_identifier(self, source: str) -> str:
         if source == "gmail":
@@ -691,8 +706,8 @@ def _next_action(source: str, status: str) -> Optional[str]:
         return f"Enable {source} after its read-only credentials and approved source scope are configured."
     if source == "google_drive":
         return (
-            "Install the OAuth desktop credentials, confirm folder_id, then run "
-            "Authorize-FAB-GoogleDrive.cmd."
+            "Open Google Drive setup in the FAB operator dashboard, complete the desktop "
+            "OAuth consent flow, and confirm the approved folder_id."
         )
     return f"Configure the read-only credentials and token required for {source}."
 
