@@ -206,7 +206,7 @@ class LocalFolderIntake:
         source_id = source_document_id(identity_document)
         existing = self.ledger.get_document_by_source(self.source, source_id) if source_id else None
         if existing:
-            existing_hash = str(existing.get("duplicate_fingerprint") or "")
+            existing_hash = _document_content_hash(existing)
             if existing_hash and existing_hash != content_hash:
                 revision_source_id = source_document_id({
                     "id": f"{source_id}:revision:{content_hash[:16]}",
@@ -244,7 +244,7 @@ class LocalFolderIntake:
                 },
             }
 
-        duplicate = self.ledger.find_document_by_fingerprint(
+        duplicate = self.ledger.find_document_by_content_hash(
             content_hash,
             exclude_source_document_id=source_id,
         )
@@ -264,6 +264,7 @@ class LocalFolderIntake:
             "documentType": _document_type(path, mime_type),
             "processingStatus": processing_status,
             "duplicateFingerprint": content_hash,
+            "contentSha256": content_hash,
             "duplicateOfDocumentId": duplicate_of_document_id,
             "metadata": {
                 "contentSha256": content_hash,
@@ -401,6 +402,23 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _document_content_hash(document: Dict[str, Any]) -> str:
+    direct = str(document.get("content_sha256") or "").strip().lower()
+    if direct:
+        return direct
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    recorded = str(metadata.get("contentSha256") or "").strip().lower()
+    if recorded:
+        return recorded
+    storage_path = str(document.get("storage_path") or "").strip()
+    if storage_path and os.path.isfile(storage_path):
+        try:
+            return _sha256_file(storage_path)
+        except OSError:
+            return ""
+    return ""
 
 
 def _document_type(path: str, mime_type: str) -> str:

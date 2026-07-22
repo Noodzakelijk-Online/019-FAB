@@ -81,6 +81,35 @@ class TestLocalFolderIntake(unittest.TestCase):
             self.assertEqual(summary["skipped"][0]["reason"], "folder_missing")
             self.assertEqual(ledger.list_source_accounts()[0]["status"], "missing")
 
+    def test_content_identity_survives_semantic_fingerprint_updates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            original_path = os.path.join(intake_dir, "receipt.pdf")
+            with open(original_path, "wb") as handle:
+                handle.write(b"stable receipt bytes")
+
+            intake = LocalFolderIntake(ledger)
+            intake.rescan([intake_dir])
+            original = ledger.list_documents()[0]
+            ledger.update_document(original["id"], {"duplicateFingerprint": "semantic-fingerprint"})
+
+            unchanged = intake.rescan([intake_dir])
+            copy_path = os.path.join(intake_dir, "receipt-copy.pdf")
+            with open(copy_path, "wb") as handle:
+                handle.write(b"stable receipt bytes")
+            with_copy = intake.rescan([intake_dir])
+
+            self.assertEqual(unchanged["alreadyRegistered"], 1)
+            self.assertEqual(unchanged["registered"], 0)
+            self.assertEqual(with_copy["duplicates"], 1)
+            documents = sorted(ledger.list_documents(), key=lambda item: item["id"])
+            self.assertEqual(len(documents), 2)
+            self.assertEqual(documents[0]["duplicate_fingerprint"], "semantic-fingerprint")
+            self.assertEqual(documents[0]["content_sha256"], documents[1]["content_sha256"])
+            self.assertEqual(documents[1]["duplicate_of_document_id"], documents[0]["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

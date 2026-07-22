@@ -964,7 +964,7 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertEqual(matches[0]["id"], match_id)
             self.assertEqual(ledger.get_reconciliation_match(match_id)["status"], "approved")
 
-    def test_existing_ledger_gets_reconciliation_status_column(self):
+    def test_existing_ledger_gets_reconciliation_and_content_hash_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
             connection = sqlite3.connect(ledger_path)
@@ -997,6 +997,24 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     )
                     """
                 )
+                connection.execute(
+                    """
+                    INSERT INTO bookkeeping_documents
+                      (source, source_document_id, original_filename, processing_status,
+                       duplicate_fingerprint, metadata_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "scanner",
+                        "legacy-content-hash",
+                        "legacy-content.pdf",
+                        "processed",
+                        "semantic-fingerprint",
+                        '{"contentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+                        "2026-07-22T00:00:00Z",
+                        "2026-07-22T00:00:00Z",
+                    ),
+                )
                 connection.commit()
             finally:
                 connection.close()
@@ -1010,6 +1028,55 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             self.assertEqual(ledger.get_document(document_id)["reconciliation_status"], "not_started")
+            migrated = ledger.get_document_by_source("scanner", "legacy-content-hash")
+            self.assertEqual(
+                migrated["content_sha256"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+
+    def test_false_source_revision_repair_requires_identical_unprocessed_bytes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            content_hash = "b" * 64
+            parent_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "drive-file-1",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "processed",
+                "duplicateFingerprint": "semantic-fingerprint",
+                "contentSha256": content_hash,
+                "metadata": {"contentSha256": content_hash},
+            })
+            child_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": f"drive-file-1:revision:{content_hash[:16]}",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "needs_review",
+                "duplicateFingerprint": content_hash,
+                "contentSha256": content_hash,
+                "metadata": {
+                    "contentSha256": content_hash,
+                    "sourceRevision": {
+                        "revisionOfDocumentId": parent_id,
+                        "baseSourceDocumentId": "drive-file-1",
+                    },
+                },
+            })
+            ledger.create_review_item({
+                "documentId": child_id,
+                "reason": "source_revision_detected",
+                "details": "False revision caused by legacy fingerprint reuse.",
+            })
+
+            result = ledger.repair_false_source_revisions(actor="test")
+
+            self.assertEqual(result["repaired"], 1)
+            self.assertIsNotNone(ledger.get_document(parent_id))
+            self.assertIsNone(ledger.get_document(child_id))
+            self.assertEqual(ledger.list_review_items(document_id=child_id), [])
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["action"], "local_ledger.false_source_revision_repaired")
+            self.assertFalse(event["details"]["localEvidenceDeleted"])
 
     def test_audit_event_details_redact_nested_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:

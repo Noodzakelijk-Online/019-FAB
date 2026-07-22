@@ -109,6 +109,7 @@ class LocalOperationsLedger:
                     document_type TEXT NOT NULL DEFAULT 'unknown',
                     processing_status TEXT NOT NULL DEFAULT 'imported',
                     duplicate_fingerprint TEXT,
+                    content_sha256 TEXT,
                     duplicate_of_document_id INTEGER,
                     vendor_name TEXT,
                     category TEXT,
@@ -842,6 +843,19 @@ class LocalOperationsLedger:
                 "reconciliation_status",
                 "TEXT NOT NULL DEFAULT 'not_started'",
             )
+            self._ensure_column(
+                connection,
+                "bookkeeping_documents",
+                "content_sha256",
+                "TEXT",
+            )
+            self._backfill_document_content_hashes(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_docs_content_sha256
+                    ON bookkeeping_documents(content_sha256)
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_local_docs_reconciliation
@@ -1181,6 +1195,7 @@ class LocalOperationsLedger:
             "document_type": payload.get("documentType", "unknown"),
             "processing_status": payload.get("processingStatus", "imported"),
             "duplicate_fingerprint": payload.get("duplicateFingerprint"),
+            "content_sha256": payload.get("contentSha256"),
             "duplicate_of_document_id": payload.get("duplicateOfDocumentId"),
             "vendor_name": payload.get("vendorName"),
             "category": payload.get("category"),
@@ -1216,6 +1231,7 @@ class LocalOperationsLedger:
             "document_type": payload.get("documentType"),
             "processing_status": payload.get("processingStatus"),
             "duplicate_fingerprint": payload.get("duplicateFingerprint"),
+            "content_sha256": payload.get("contentSha256"),
             "duplicate_of_document_id": payload.get("duplicateOfDocumentId"),
             "vendor_name": payload.get("vendorName"),
             "category": payload.get("category"),
@@ -4397,6 +4413,98 @@ class LocalOperationsLedger:
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def find_document_by_content_hash(
+        self,
+        content_sha256: str,
+        exclude_source_document_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not content_sha256:
+            return None
+        query = """
+            SELECT * FROM bookkeeping_documents
+            WHERE content_sha256 = ?
+        """
+        params = [content_sha256]
+        if exclude_source_document_id:
+            query = f"{query} AND COALESCE(source_document_id, '') != ?"
+            params.append(exclude_source_document_id)
+        query = f"{query} ORDER BY id ASC LIMIT 1"
+        with self._connection() as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def repair_false_source_revisions(self, actor: str = "local_operator") -> Dict[str, Any]:
+        """Remove unprocessed revision rows whose bytes equal their source parent."""
+
+        repaired = []
+        skipped = []
+        with self._connection() as connection:
+            revisions = connection.execute(
+                """
+                SELECT * FROM bookkeeping_documents
+                WHERE source_document_id LIKE '%:revision:%'
+                ORDER BY id ASC
+                """
+            ).fetchall()
+            for row in revisions:
+                child = self._row_to_dict(row)
+                metadata = child.get("metadata") if isinstance(child.get("metadata"), dict) else {}
+                source_revision = (
+                    metadata.get("sourceRevision")
+                    if isinstance(metadata.get("sourceRevision"), dict)
+                    else {}
+                )
+                parent_id = source_revision.get("revisionOfDocumentId")
+                parent = connection.execute(
+                    "SELECT * FROM bookkeeping_documents WHERE id = ? LIMIT 1",
+                    (parent_id,),
+                ).fetchone() if parent_id else None
+                reason = self._false_revision_repair_reason(connection, child, parent)
+                if reason:
+                    skipped.append({"documentId": child["id"], "reason": reason})
+                    continue
+
+                review_rows = connection.execute(
+                    "SELECT id FROM review_items WHERE document_id = ?",
+                    (child["id"],),
+                ).fetchall()
+                connection.execute("DELETE FROM review_items WHERE document_id = ?", (child["id"],))
+                connection.execute("DELETE FROM bookkeeping_documents WHERE id = ?", (child["id"],))
+                details = {
+                    "actor": str(actor or "local_operator")[:200],
+                    "removedDocumentId": child["id"],
+                    "retainedDocumentId": int(parent["id"]),
+                    "source": child.get("source"),
+                    "sourceDocumentId": child.get("source_document_id"),
+                    "contentSha256": child.get("content_sha256"),
+                    "removedReviewItemIds": [int(item["id"]) for item in review_rows],
+                    "localEvidenceDeleted": False,
+                    "externalSubmission": "not_executed",
+                }
+                connection.execute(
+                    """
+                    INSERT INTO audit_events
+                      (action, entity_type, entity_id, details_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "local_ledger.false_source_revision_repaired",
+                        "bookkeeping_document",
+                        str(child["id"]),
+                        self._json(self._redact_sensitive(details)),
+                        self._now(),
+                    ),
+                )
+                repaired.append(details)
+        return {
+            "success": True,
+            "candidates": len(repaired) + len(skipped),
+            "repaired": len(repaired),
+            "skipped": skipped,
+            "repairs": repaired,
+            "externalSubmission": "not_executed",
+        }
+
     def _insert(self, table: str, values: Dict[str, Any]) -> int:
         with self._connection() as connection:
             return self._insert_with_connection(connection, table, values)
@@ -4515,6 +4623,81 @@ class LocalOperationsLedger:
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @classmethod
+    def _backfill_document_content_hashes(cls, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, metadata_json
+            FROM bookkeeping_documents
+            WHERE content_sha256 IS NULL OR content_sha256 = ''
+            """
+        ).fetchall()
+        for row in rows:
+            metadata = cls._json_load(row["metadata_json"])
+            content_hash = metadata.get("contentSha256") if isinstance(metadata, dict) else None
+            if isinstance(content_hash, str) and re.fullmatch(r"[0-9a-fA-F]{64}", content_hash):
+                connection.execute(
+                    "UPDATE bookkeeping_documents SET content_sha256 = ? WHERE id = ?",
+                    (content_hash.lower(), int(row["id"])),
+                )
+
+    @classmethod
+    def _false_revision_repair_reason(
+        cls,
+        connection: sqlite3.Connection,
+        child: Dict[str, Any],
+        parent_row: Optional[sqlite3.Row],
+    ) -> Optional[str]:
+        if parent_row is None:
+            return "parent_missing"
+        parent = cls._row_to_dict(parent_row)
+        child_hash = str(child.get("content_sha256") or "").lower()
+        parent_hash = str(parent.get("content_sha256") or "").lower()
+        expected_id = f"{parent.get('source_document_id')}:revision:{child_hash[:16]}"
+        if not child_hash or child_hash != parent_hash:
+            return "content_differs"
+        if child.get("source") != parent.get("source") or child.get("source_document_id") != expected_id:
+            return "source_identity_mismatch"
+        if child.get("processing_status") != "needs_review" or child.get("ocr_text"):
+            return "document_already_processed"
+        if child.get("extracted_data"):
+            return "document_already_processed"
+        if child.get("duplicate_of_document_id") is not None:
+            return "duplicate_relationship_present"
+
+        reviews = connection.execute(
+            "SELECT reason, status FROM review_items WHERE document_id = ?",
+            (child["id"],),
+        ).fetchall()
+        if not reviews or any(
+            review["reason"] != "source_revision_detected"
+            or review["status"] not in {"pending", "in_review"}
+            for review in reviews
+        ):
+            return "review_state_not_repairable"
+
+        reference_checks = (
+            ("bookkeeping_records", "document_id"),
+            ("compliance_findings", "document_id"),
+            ("document_group_members", "document_id"),
+            ("duplicate_candidates", "document_id"),
+            ("duplicate_candidates", "candidate_document_id"),
+            ("export_attempts", "document_id"),
+            ("extracted_fields", "document_id"),
+            ("reconciliation_matches", "document_id"),
+            ("retention_records", "document_id"),
+            ("review_corrections", "document_id"),
+            ("routing_attempts", "document_id"),
+            ("bookkeeping_documents", "duplicate_of_document_id"),
+        )
+        for table, column in reference_checks:
+            if connection.execute(
+                f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+                (child["id"],),
+            ).fetchone():
+                return f"referenced_by_{table}"
+        return None
 
     def _ensure_review_item_schema(self, connection: sqlite3.Connection) -> None:
         duplicate_groups = connection.execute(

@@ -142,6 +142,10 @@ class TestLocalConnectorIntake(unittest.TestCase):
             reviews = ledger.list_review_items(status="pending", limit=10)
             self.assertEqual(reviews[0]["reason"], "source_revision_detected")
             self.assertEqual(reviews[0]["document_id"], records[1]["id"])
+            repair = ledger.repair_false_source_revisions(actor="test")
+            self.assertEqual(repair["repaired"], 0)
+            self.assertEqual(repair["skipped"][0]["reason"], "content_differs")
+            self.assertEqual(len(ledger.list_documents()), 2)
 
     def test_partial_provider_failure_keeps_downloaded_evidence_and_redacts_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
