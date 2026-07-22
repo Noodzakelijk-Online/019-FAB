@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from src.operations.drive_wave_delivery import DriveWaveDeliveryService
 from src.operations.local_api import create_app
@@ -16,30 +17,41 @@ BUSINESS_ID = "wave-business"
 
 
 class FakeDriveArchiver:
-    def __init__(self, source_sha256: str, size: int = 17):
+    def __init__(self, source_sha256: str, size: int = 17, post_move_sha256: str = None):
         self.source_sha256 = source_sha256
+        self.post_move_sha256 = post_move_sha256 or source_sha256
         self.size = size
         self.moves = []
+        self.restores = []
+        self.archived = False
 
     def inspect_file(self, file_id):
         return {
             "id": file_id,
-            "parents": [SOURCE_FOLDER],
+            "name": "invoice.pdf",
+            "mimeType": "application/pdf",
+            "parents": [ARCHIVE_FOLDER if self.archived else SOURCE_FOLDER],
             "size": str(self.size),
             "md5Checksum": "provider-md5",
             "trashed": False,
         }
 
     def download_sha256(self, file_id):
-        return self.source_sha256
+        return self.post_move_sha256 if self.archived else self.source_sha256
 
     def move_file(self, file_id, source_folder_id, archive_folder_id):
         self.moves.append((file_id, source_folder_id, archive_folder_id))
+        self.archived = True
         return {
             "status": "archived",
             "before": {"parents": [source_folder_id]},
             "after": {"parents": [archive_folder_id]},
         }
+
+    def restore_file(self, file_id, source_folder_id, archive_folder_id):
+        self.restores.append((file_id, source_folder_id, archive_folder_id))
+        self.archived = False
+        return {"status": "restored"}
 
 
 class TestDriveWaveDeliveryService(unittest.TestCase):
@@ -83,6 +95,23 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "google_drive_wave_archive_folder_id": ARCHIVE_FOLDER,
             "waveapps_business_id": BUSINESS_ID,
         }
+        self.record_id = self.ledger.upsert_bookkeeping_record({
+            "documentId": self.document_id,
+            "sourceType": "document",
+            "recordType": "expense",
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "targetAccount": "Office expenses",
+            "vendorName": "Example Vendor",
+            "category": "Office Supplies",
+            "recordDate": "2026-07-22",
+            "amount": 121.0,
+            "vatAmount": 21.0,
+            "currency": "EUR",
+            "description": "invoice.pdf",
+            "reviewRequired": False,
+            "exportStatus": "executed",
+        })
 
     def tearDown(self):
         self.temp_dir.cleanup()
@@ -99,7 +128,15 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "attachmentSizeBytes": self.source_size,
             "attachmentPresent": True,
             "attachmentOpened": True,
+            "attachmentDownloaded": True,
+            "attachmentTransactionId": "wave-transaction-1",
+            "transactionExists": True,
+            "transactionStatus": "reviewed",
+            "transactionMatchCount": 1,
+            "matchingTransactionIds": ["wave-transaction-1"],
+            "transactionPageUrl": f"https://next.waveapps.com/{BUSINESS_ID}/transactions",
             "transactionReviewed": True,
+            "waveObservedAt": datetime.now(timezone.utc).isoformat(),
             "observedFields": {
                 "vendor": "Example Vendor",
                 "date": "2026-07-22",
@@ -154,6 +191,21 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         document = self.ledger.get_document(self.document_id)
         self.assertEqual(document["review_items"][0]["reason"], "drive_wave_archive_blocked")
 
+    def test_archive_folder_must_not_equal_intake_folder(self):
+        config = {
+            **self.config,
+            "google_drive_wave_archive_folder_id": SOURCE_FOLDER,
+        }
+        service = DriveWaveDeliveryService(self.ledger, config)
+
+        status = service.status()
+        plan = service.plan_archive(self.document_id)
+
+        self.assertEqual(status["status"], "needs_configuration")
+        self.assertFalse(status["foldersDistinct"])
+        self.assertFalse(plan["canArchive"])
+        self.assertIn("archive_folder_matches_source_folder", plan["reasons"])
+
     def test_work_order_binds_source_wave_fields_and_evidence_contract(self):
         record_id = self.ledger.upsert_bookkeeping_record({
             "documentId": self.document_id,
@@ -195,7 +247,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         result = service.list_work_orders(limit=10)
         order = result["workOrders"][0]
 
-        self.assertEqual(result["workOrderVersion"], "fab-drive-wave-work-order-v1")
+        self.assertEqual(result["workOrderVersion"], "fab-drive-wave-work-order-v2")
         self.assertEqual(result["summary"]["needsAttachmentVerification"], 1)
         self.assertEqual(order["stage"], "upload_and_verify_attachment")
         self.assertEqual(order["source"]["fileId"], "drive-file-1")
@@ -212,6 +264,9 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertFalse(order["evidence"]["template"]["attachmentPresent"])
         self.assertIn("observedFields", order["evidence"]["template"])
         self.assertTrue(result["evidencePolicy"]["serverComputedFieldMatches"])
+        self.assertTrue(result["evidencePolicy"]["uniqueWaveTransactionRequired"])
+        self.assertTrue(result["evidencePolicy"]["attachmentTransactionBindingRequired"])
+        self.assertTrue(result["evidencePolicy"]["postMoveHashVerificationRequired"])
         self.assertTrue(order["browserExecution"]["requiredReadback"]["serverComputedSha256MustMatchSource"])
         self.assertEqual(
             order["evidence"]["binaryReadbackSubmission"]["path"],
@@ -271,6 +326,8 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertEqual(verification["verificationMethod"], "hash_round_trip")
         self.assertTrue(archived["success"])
         self.assertEqual(archived["deletion"], "not_performed")
+        self.assertTrue(archived["postMoveVerified"])
+        self.assertEqual(archived["postMoveSha256"], self.source_hash)
         self.assertEqual(archiver.moves, [("drive-file-1", SOURCE_FOLDER, ARCHIVE_FOLDER)])
         document = self.ledger.get_document(self.document_id)
         lifecycle = document["metadata"]["driveWaveLifecycle"]
@@ -450,7 +507,10 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             mime_type="application/pdf",
             evidence=self._evidence(),
         )
-        self.ledger.update_document(self.document_id, {"category": "Computer equipment"})
+        self.ledger.update_bookkeeping_record(
+            self.record_id,
+            {"category": "Computer equipment"},
+        )
 
         plan = service.plan_archive(self.document_id)
 
@@ -458,6 +518,99 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertFalse(plan["canArchive"])
         self.assertIn("wave_expected_fields_changed_or_unbound", plan["reasons"])
         self.assertIn("wave_field_mismatch:category", plan["reasons"])
+
+    def test_wave_entry_must_be_unique_finished_and_bound_to_attachment(self):
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+        cases = (
+            ({"transactionExists": False}, "wave_transaction_missing"),
+            ({"transactionMatchCount": 2, "matchingTransactionIds": ["wave-transaction-1", "wave-transaction-2"]}, "wave_transaction_match_not_unique"),
+            ({"transactionStatus": "pending"}, "wave_transaction_not_finished"),
+            ({"attachmentTransactionId": "wave-transaction-2"}, "wave_attachment_transaction_mismatch"),
+            ({"waveObservedAt": "2000-01-01T00:00:00Z"}, "wave_observation_stale_or_missing"),
+            ({"uploadSourceSha256": "0" * 64}, "wave_upload_source_hash_mismatch"),
+        )
+
+        for updates, expected_reason in cases:
+            with self.subTest(expected_reason=expected_reason):
+                result = service.record_attachment_readback(
+                    self.document_id,
+                    self.source_bytes,
+                    filename="invoice.pdf",
+                    mime_type="application/pdf",
+                    evidence=self._evidence(**updates),
+                )
+                self.assertFalse(result["success"])
+                self.assertIn(expected_reason, result["reasons"])
+
+    def test_incomplete_source_identity_never_authorizes_archive(self):
+        document = self.ledger.get_document(self.document_id)
+        metadata = dict(document["metadata"])
+        metadata.pop("sizeBytes", None)
+        metadata["providerMetadata"] = {
+            "folder_id": SOURCE_FOLDER,
+            "md5_checksum": "provider-md5",
+        }
+        self.ledger.update_document(self.document_id, {"metadata": metadata})
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        verification = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+        plan = service.plan_archive(self.document_id)
+
+        self.assertTrue(verification["success"])
+        self.assertFalse(plan["canArchive"])
+        self.assertIn("source_size_missing", plan["reasons"])
+
+    def test_post_move_hash_failure_restores_source_and_never_marks_archived(self):
+        archiver = FakeDriveArchiver(
+            self.source_hash,
+            self.source_size,
+            post_move_sha256="f" * 64,
+        )
+        service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
+        service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+
+        result = service.archive_document(self.document_id)
+
+        self.assertFalse(result["success"])
+        self.assertIn("content hash verification failed", result["reasons"][0])
+        self.assertEqual(archiver.restores, [("drive-file-1", SOURCE_FOLDER, ARCHIVE_FOLDER)])
+        self.assertFalse(archiver.archived)
+        lifecycle = self.ledger.get_document(self.document_id)["metadata"]["driveWaveLifecycle"]
+        self.assertEqual(lifecycle["status"], "attachment_verified")
+
+    def test_archive_lease_prevents_concurrent_moves(self):
+        archiver = FakeDriveArchiver(self.source_hash, self.source_size)
+        service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
+        service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+        lease_name = f"drive-wave-archive:{self.document_id}"
+        self.ledger.acquire_runtime_lease(lease_name, "other-worker", ttl_seconds=60)
+
+        try:
+            result = service.archive_document(self.document_id)
+        finally:
+            self.ledger.release_runtime_lease(lease_name, "other-worker")
+
+        self.assertFalse(result["success"])
+        self.assertIn("archive_operation_already_in_progress", result["reasons"])
+        self.assertEqual(archiver.moves, [])
 
     def test_review_in_progress_blocks_archive(self):
         review_id = self.ledger.create_review_item({

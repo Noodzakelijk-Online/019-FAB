@@ -237,7 +237,7 @@ class LocalHaiConnector:
                 {
                     "resourceId": "wave_attachment_binary_readback",
                     "label": "Wave attachment binary readback",
-                    "description": "Submit the receipt downloaded back from Wave so FAB computes and verifies its hash, size, filename, and bookkeeping evidence.",
+                    "description": "Submit the receipt downloaded from one uniquely matched, reviewed Wave transaction so FAB verifies its entry binding, hash, size, filename, and bookkeeping evidence.",
                     "method": "POST",
                     "pathTemplate": "/api/drive-wave/documents/{documentId}/attachment-readback",
                     "contentType": "multipart/form-data",
@@ -511,7 +511,9 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
             "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
             "attachmentSha256", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
             "attachmentSizeBytes",
-            "attachmentPresent", "attachmentOpened", "transactionReviewed", "fieldMatches",
+            "attachmentPresent", "attachmentOpened", "attachmentDownloaded", "attachmentTransactionId",
+            "transactionExists", "transactionStatus", "transactionMatchCount", "matchingTransactionIds",
+            "transactionPageUrl", "transactionReviewed", "waveObservedAt", "fieldMatches",
             "observedFields", "expectedFieldsDigest",
             "verifiedAt", "verifier",
         }
@@ -520,6 +522,8 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
             raise ValueError(f"Unsupported evidence field(s): {', '.join(unexpected_evidence)}")
         if "observedFields" in evidence and not isinstance(evidence["observedFields"], dict):
             raise ValueError("evidence.observedFields must be an object.")
+        if "matchingTransactionIds" in evidence and not isinstance(evidence["matchingTransactionIds"], list):
+            raise ValueError("evidence.matchingTransactionIds must be a list.")
         normalized["evidence"] = dict(evidence)
     if "sources" in payload:
         sources = payload["sources"]

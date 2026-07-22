@@ -4,9 +4,11 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 from src.document_fetchers.drive_archiver import DriveArchiveClient
 from src.operations.local_ledger import LocalOperationsLedger
@@ -17,7 +19,12 @@ ARCHIVE_ACTION = "drive_wave.source_archived"
 REQUIRED_FIELD_MATCHES = ("vendor", "date", "amount", "currency", "category", "description")
 TERMINAL_EXPORT_STATUSES = {"executed", "submitted"}
 OPEN_REVIEW_STATUSES = {"pending", "open", "needs_review", "in_progress", "in_review"}
-WORK_ORDER_VERSION = "fab-drive-wave-work-order-v1"
+WORK_ORDER_VERSION = "fab-drive-wave-work-order-v2"
+FINISHED_WAVE_TRANSACTION_STATUSES = {"completed", "posted", "reviewed"}
+ARCHIVABLE_BOOKKEEPING_RECORD_STATUSES = {
+    "approved", "export_draft_prepared", "ready_to_route", "reconciled",
+    "reviewed", "routed", "validated",
+}
 WAVE_RECEIPT_MAX_BYTES = 6 * 1024 * 1024
 WAVE_RECEIPT_ALLOWED_EXTENSIONS = {
     ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".pdf", ".png", ".tif", ".tiff",
@@ -65,12 +72,14 @@ class DriveWaveDeliveryService:
             f"{os.path.abspath(os.path.expanduser(token_path))}.reauthorize"
         )
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
-        configured = enabled and bool(source_folder_id) and bool(archive_folder_id) and bool(business_id)
+        folders_distinct = bool(source_folder_id) and bool(archive_folder_id) and source_folder_id != archive_folder_id
+        configured = enabled and folders_distinct and bool(business_id)
         return {
             "status": "ready" if configured and token_present and not reauthorization_required else "needs_authorization" if configured else "needs_configuration",
             "archiveEnabled": enabled,
             "sourceFolderConfigured": bool(source_folder_id),
             "archiveFolderConfigured": bool(archive_folder_id),
+            "foldersDistinct": folders_distinct,
             "waveBusinessConfigured": bool(business_id),
             "driveTokenPresent": token_present,
             "driveReauthorizationRequired": reauthorization_required,
@@ -78,7 +87,7 @@ class DriveWaveDeliveryService:
             "relayIntakeReady": bool(source_folder_id),
             "relayIntakePath": "/api/connectors/google-drive/relay",
             "driveScopeVerification": "checked_on_archive",
-            "verificationPolicy": "server_computed_attachment_sha256_round_trip",
+            "verificationPolicy": "unique_reviewed_wave_transaction_and_attachment_hash_round_trip_v2",
             "deletionPolicy": "never_delete_move_only",
             "externalSubmission": "policy_gated",
         }
@@ -139,9 +148,14 @@ class DriveWaveDeliveryService:
                 "attachmentReadbackRequired": True,
                 "attachmentRoundTripHashRequired": True,
                 "attachmentOpenRequired": True,
+                "attachmentTransactionBindingRequired": True,
+                "uniqueWaveTransactionRequired": True,
+                "finishedWaveTransactionRequired": True,
+                "freshWaveObservationRequired": True,
                 "transactionReviewRequired": True,
                 "serverComputedFieldMatches": True,
                 "expectedFieldsDigestRequired": True,
+                "postMoveHashVerificationRequired": True,
                 "archiveMode": "move_only_never_delete",
             },
             "externalSubmission": "not_executed",
@@ -236,7 +250,15 @@ class DriveWaveDeliveryService:
             "attachmentFilename": document.get("original_filename"),
             "attachmentPresent": False,
             "attachmentOpened": False,
+            "attachmentDownloaded": False,
+            "attachmentTransactionId": "",
+            "transactionExists": False,
+            "transactionStatus": "",
+            "transactionMatchCount": None,
+            "matchingTransactionIds": [],
+            "transactionPageUrl": "",
             "transactionReviewed": False,
+            "waveObservedAt": "",
             "observedFields": {field: None for field in required_field_matches},
             "fieldMatches": {field: False for field in required_field_matches},
             "expectedFieldsDigest": _expected_fields_digest(
@@ -348,6 +370,7 @@ class DriveWaveDeliveryService:
             "attachmentMimeType": str(mime_type or "application/octet-stream").lower().strip(),
             "attachmentPresent": True,
             "attachmentOpened": True,
+            "attachmentDownloaded": True,
         })
         return self.record_attachment_evidence(
             document_id,
@@ -431,6 +454,9 @@ class DriveWaveDeliveryService:
             "evidenceDigest": evidence_digest,
             "externalTransactionId": normalized["externalTransactionId"],
             "attachmentObjectId": normalized["attachmentObjectId"],
+            "attachmentTransactionId": normalized["attachmentTransactionId"],
+            "transactionStatus": normalized["transactionStatus"],
+            "waveObservedAt": normalized["waveObservedAt"],
         })
         metadata["driveWaveLifecycle"] = lifecycle
         self.ledger.update_document(int(document_id), {"metadata": metadata})
@@ -478,12 +504,19 @@ class DriveWaveDeliveryService:
             exports = self.ledger.list_export_attempts(document_id=int(document_id), limit=5)
             terminal_exports = [item for item in exports if str(item.get("status") or "").lower() in TERMINAL_EXPORT_STATUSES]
             if terminal_exports:
-                external_id = str(terminal_exports[0].get("external_id") or "")
-                if external_id and external_id != str(evidence.get("externalTransactionId") or ""):
-                    reasons.append("wave_transaction_id_mismatch")
-                target = str(terminal_exports[0].get("target_system") or "")
-                if target and target != "waveapps_business":
+                business_exports = [
+                    item for item in terminal_exports
+                    if str(item.get("target_system") or "") == "waveapps_business"
+                ]
+                business_external_ids = {
+                    str(item.get("external_id") or "").strip()
+                    for item in business_exports
+                    if str(item.get("external_id") or "").strip()
+                }
+                if not business_exports:
                     reasons.append("wave_target_is_not_business")
+                elif business_external_ids and str(evidence.get("externalTransactionId") or "") not in business_external_ids:
+                    reasons.append("wave_transaction_id_mismatch")
 
         reasons = sorted(set(reasons))
         return {
@@ -494,42 +527,108 @@ class DriveWaveDeliveryService:
             "archiveFolderId": self._archive_folder_id(),
             "externalTransactionId": evidence.get("externalTransactionId"),
             "attachmentObjectId": evidence.get("attachmentObjectId"),
+            "evidenceDigest": evidence.get("evidenceDigest"),
+            "verifiedAt": (evidence_event or {}).get("created_at"),
             "verificationMethod": evidence.get("verificationMethod"),
             "moveOnly": True,
             "deleteSource": False,
         }
 
     def archive_document(self, document_id: int, actor: str = "local_worker") -> Dict[str, Any]:
-        plan = self.plan_archive(int(document_id))
+        document_id = int(document_id)
+        plan = self.plan_archive(document_id)
         if plan.get("status") == "already_archived":
             return {"success": True, **plan, "externalSubmission": "already_executed"}
         if not plan.get("canArchive"):
-            self._ensure_review_item(int(document_id), plan.get("reasons") or [])
+            self._ensure_review_item(document_id, plan.get("reasons") or [])
             return {"success": False, **plan, "externalSubmission": "not_executed"}
 
-        document = self.ledger.get_document(int(document_id)) or {}
+        lease_name = f"drive-wave-archive:{document_id}"
+        owner_token = uuid.uuid4().hex
+        lease = self.ledger.acquire_runtime_lease(
+            lease_name,
+            owner_token,
+            ttl_seconds=300,
+            metadata={"documentId": document_id, "actor": str(actor or "local_worker")[:200]},
+        )
+        if not lease.get("acquired"):
+            return {
+                "success": False,
+                "status": "blocked",
+                "documentId": document_id,
+                "reasons": ["archive_operation_already_in_progress"],
+                "externalSubmission": "not_executed",
+            }
+        try:
+            return self._archive_document_with_lease(document_id, actor)
+        finally:
+            self.ledger.release_runtime_lease(lease_name, owner_token)
+
+    def _archive_document_with_lease(self, document_id: int, actor: str) -> Dict[str, Any]:
+        plan = self.plan_archive(document_id)
+        if plan.get("status") == "already_archived":
+            return {"success": True, **plan, "externalSubmission": "already_executed"}
+        if not plan.get("canArchive"):
+            self._ensure_review_item(document_id, plan.get("reasons") or [])
+            return {"success": False, **plan, "externalSubmission": "not_executed"}
+
+        document = self.ledger.get_document(document_id) or {}
         provider_id = str(document.get("source_document_id") or "")
         source_sha256 = _source_sha256(document)
         archiver = self.drive_archiver or DriveArchiveClient(self.config)
+        move_result = None
         try:
             current = archiver.inspect_file(provider_id)
             current_sha256 = archiver.download_sha256(provider_id)
             if current_sha256 != source_sha256:
                 raise RuntimeError("Drive source content changed after FAB intake.")
             self._assert_provider_identity(document, current)
+
+            final_plan = self.plan_archive(document_id)
+            if not final_plan.get("canArchive"):
+                reasons = final_plan.get("reasons") or ["archive_policy_changed_before_move"]
+                self._ensure_review_item(document_id, reasons)
+                return {"success": False, **final_plan, "externalSubmission": "not_executed"}
+            plan = final_plan
             move_result = archiver.move_file(
                 provider_id,
                 str(plan["sourceFolderId"]),
                 str(plan["archiveFolderId"]),
             )
+            archived_file = archiver.inspect_file(provider_id)
+            archived_sha256 = archiver.download_sha256(provider_id)
+            self._assert_provider_identity(document, archived_file)
+            self._assert_archive_postcondition(
+                archived_file,
+                archived_sha256,
+                source_sha256,
+                str(plan["sourceFolderId"]),
+                str(plan["archiveFolderId"]),
+            )
         except Exception as exc:
             reason = _safe_reason(exc)
-            self._ensure_review_item(int(document_id), [reason])
+            rollback = None
+            if move_result is not None and hasattr(archiver, "restore_file"):
+                try:
+                    rollback = archiver.restore_file(
+                        provider_id,
+                        str(plan["sourceFolderId"]),
+                        str(plan["archiveFolderId"]),
+                    )
+                except Exception as rollback_exc:
+                    rollback = {"status": "failed", "reason": _safe_reason(rollback_exc)}
+            self._ensure_review_item(document_id, [reason])
             audit_event_id = self.ledger.record_audit_event({
                 "action": "drive_wave.archive_failed",
                 "entityType": "bookkeeping_document",
                 "entityId": str(document_id),
-                "details": {"actor": actor, "reason": reason, "externalSubmission": "not_executed"},
+                "details": {
+                    "actor": actor,
+                    "reason": reason,
+                    "moveStarted": move_result is not None,
+                    "rollback": rollback,
+                    "externalSubmission": "not_executed",
+                },
             })
             return {
                 "success": False,
@@ -553,11 +652,18 @@ class DriveWaveDeliveryService:
             "sourceSha256": source_sha256,
             "externalTransactionId": evidence.get("externalTransactionId"),
             "attachmentObjectId": evidence.get("attachmentObjectId"),
+            "attachmentTransactionId": evidence.get("attachmentTransactionId"),
+            "transactionStatus": evidence.get("transactionStatus"),
+            "waveObservedAt": evidence.get("waveObservedAt"),
+            "evidenceDigest": evidence.get("evidenceDigest"),
             "verificationMethod": evidence.get("verificationMethod"),
             "providerMoveStatus": move_result.get("status"),
+            "postMoveSha256": source_sha256,
+            "postMoveVerifiedAt": _now(),
+            "postMoveVerified": True,
         })
         metadata["driveWaveLifecycle"] = lifecycle
-        self.ledger.update_document(int(document_id), {"metadata": metadata})
+        self.ledger.update_document(document_id, {"metadata": metadata})
         audit_event_id = self.ledger.record_audit_event({
             "action": ARCHIVE_ACTION,
             "entityType": "bookkeeping_document",
@@ -574,10 +680,28 @@ class DriveWaveDeliveryService:
             "status": move_result.get("status") or "archived",
             "documentId": int(document_id),
             "archiveFolderId": plan["archiveFolderId"],
+            "postMoveVerified": True,
+            "postMoveSha256": source_sha256,
             "auditEventId": audit_event_id,
             "externalSubmission": "executed",
             "deletion": "not_performed",
         }
+
+    @staticmethod
+    def _assert_archive_postcondition(
+        archived_file: Dict[str, Any],
+        archived_sha256: str,
+        expected_sha256: str,
+        source_folder_id: str,
+        archive_folder_id: str,
+    ) -> None:
+        parents = {str(item) for item in archived_file.get("parents") or []}
+        if archive_folder_id not in parents or source_folder_id in parents:
+            raise RuntimeError("Drive archive destination verification failed after move.")
+        if archived_file.get("trashed"):
+            raise RuntimeError("Drive source entered trash during archive move.")
+        if archived_sha256 != expected_sha256:
+            raise RuntimeError("Drive archive content hash verification failed after move.")
 
     def archive_ready(self, limit: int = 25, actor: str = "local_worker", dry_run: bool = False) -> Dict[str, Any]:
         candidates = self.list_candidates(limit=limit)["candidates"]
@@ -612,12 +736,22 @@ class DriveWaveDeliveryService:
             reasons.append("source_folder_not_configured")
         if not self._archive_folder_id():
             reasons.append("archive_folder_not_configured")
+        if self._source_folder_id() and self._source_folder_id() == self._archive_folder_id():
+            reasons.append("archive_folder_matches_source_folder")
         if not self._business_id():
             reasons.append("wave_business_not_configured")
         if self._drive_reauthorization_required():
             reasons.append("drive_reauthorization_required")
         if not self._is_configured_source(document):
             reasons.append("document_outside_configured_source_folder")
+        if not str(document.get("source_document_id") or "").strip():
+            reasons.append("drive_provider_file_id_missing")
+        if not str(document.get("original_filename") or "").strip():
+            reasons.append("source_filename_missing")
+        if not str(document.get("mime_type") or "").strip():
+            reasons.append("source_mime_type_missing")
+        if _source_size(document) is None:
+            reasons.append("source_size_missing")
         if document.get("duplicate_of_document_id"):
             reasons.append("duplicate_review_unresolved")
         for review in document.get("review_items") or []:
@@ -626,6 +760,18 @@ class DriveWaveDeliveryService:
                 break
         if not re.fullmatch(r"[0-9a-f]{64}", _source_sha256(document)):
             reasons.append("source_sha256_missing")
+        reasons.extend(_wave_upload_reasons(document))
+
+        record = self.ledger.get_bookkeeping_record_by_document(int(document["id"]))
+        if not record:
+            reasons.append("bookkeeping_record_missing")
+        else:
+            if bool(record.get("review_required")):
+                reasons.append("bookkeeping_record_review_required")
+            if str(record.get("target_system") or "").strip() != "waveapps_business":
+                reasons.append("bookkeeping_record_not_wave_business")
+            if str(record.get("status") or "").lower() not in ARCHIVABLE_BOOKKEEPING_RECORD_STATUSES:
+                reasons.append("bookkeeping_record_not_ready")
         return reasons
 
     def _evidence_reasons(self, document: Dict[str, Any], evidence: Dict[str, Any]) -> list[str]:
@@ -633,8 +779,10 @@ class DriveWaveDeliveryService:
         source_hash = _source_sha256(document)
         if str(evidence.get("sourceSha256") or "").lower() != source_hash:
             reasons.append("evidence_source_hash_mismatch")
+        if str(evidence.get("uploadSourceSha256") or "").lower() != source_hash:
+            reasons.append("wave_upload_source_hash_mismatch")
         attachment_hash = str(evidence.get("attachmentSha256") or "").lower()
-        if not evidence.get("attachmentReadbackVerified"):
+        if evidence.get("attachmentReadbackVerified") is not True:
             reasons.append("wave_attachment_readback_bytes_missing")
         if attachment_hash != source_hash:
             reasons.append("wave_attachment_hash_mismatch")
@@ -650,19 +798,46 @@ class DriveWaveDeliveryService:
             reasons.append("wave_attachment_filename_missing")
         elif source_filename and attachment_filename != source_filename:
             reasons.append("wave_attachment_filename_mismatch")
-        if not evidence.get("attachmentPresent"):
+        if evidence.get("attachmentPresent") is not True:
             reasons.append("wave_attachment_missing")
-        if not evidence.get("attachmentOpened"):
+        if evidence.get("attachmentOpened") is not True:
             reasons.append("wave_attachment_not_opened")
+        if evidence.get("attachmentDownloaded") is not True:
+            reasons.append("wave_attachment_not_downloaded")
         if not str(evidence.get("attachmentObjectId") or "").strip():
             reasons.append("wave_attachment_object_id_missing")
-        if not str(evidence.get("externalTransactionId") or "").strip():
+        external_transaction_id = str(evidence.get("externalTransactionId") or "").strip()
+        if not external_transaction_id:
             reasons.append("wave_transaction_id_missing")
-        if not evidence.get("transactionReviewed"):
+        if evidence.get("transactionExists") is not True:
+            reasons.append("wave_transaction_missing")
+        transaction_match_count = _optional_int(evidence.get("transactionMatchCount"))
+        if transaction_match_count != 1:
+            reasons.append("wave_transaction_match_not_unique")
+        matching_transaction_ids = evidence.get("matchingTransactionIds")
+        if (
+            not isinstance(matching_transaction_ids, list)
+            or len(matching_transaction_ids) != 1
+            or str(matching_transaction_ids[0] or "").strip() != external_transaction_id
+        ):
+            reasons.append("wave_transaction_match_ids_invalid")
+        transaction_status = str(evidence.get("transactionStatus") or "").strip().lower()
+        if transaction_status not in FINISHED_WAVE_TRANSACTION_STATUSES:
+            reasons.append("wave_transaction_not_finished")
+        if evidence.get("transactionReviewed") is not True:
             reasons.append("wave_transaction_not_reviewed")
         business_id = self._business_id()
         if business_id and str(evidence.get("businessId") or "") != business_id:
             reasons.append("wave_business_mismatch")
+        if not _valid_wave_transaction_url(evidence.get("transactionPageUrl"), business_id):
+            reasons.append("wave_transaction_page_invalid")
+        if not _timestamp_is_fresh(
+            evidence.get("waveObservedAt"),
+            self._evidence_max_age_seconds(),
+        ):
+            reasons.append("wave_observation_stale_or_missing")
+        if str(evidence.get("attachmentTransactionId") or "").strip() != external_transaction_id:
+            reasons.append("wave_attachment_transaction_mismatch")
         mime_type = str(evidence.get("attachmentMimeType") or "").lower()
         document_mime = str(document.get("mime_type") or "").lower()
         if document_mime and mime_type != document_mime:
@@ -685,6 +860,22 @@ class DriveWaveDeliveryService:
     def _assert_provider_identity(self, document: Dict[str, Any], current: Dict[str, Any]) -> None:
         metadata = document.get("metadata") or {}
         provider = metadata.get("providerMetadata") if isinstance(metadata.get("providerMetadata"), dict) else {}
+        expected_id = str(document.get("source_document_id") or "").strip()
+        if str(current.get("id") or "").strip() != expected_id:
+            raise RuntimeError("Drive provider file identity changed after FAB intake.")
+        expected_name = os.path.basename(str(document.get("original_filename") or "")).casefold()
+        current_name = os.path.basename(str(current.get("name") or "")).casefold()
+        if not current_name or current_name != expected_name:
+            raise RuntimeError("Drive provider filename changed after FAB intake.")
+        expected_mime = str(
+            provider.get("provider_mime_type")
+            or provider.get("mime_type")
+            or document.get("mime_type")
+            or ""
+        ).lower().strip()
+        current_mime = str(current.get("mimeType") or "").lower().strip()
+        if not current_mime or current_mime != expected_mime:
+            raise RuntimeError("Drive provider MIME type changed after FAB intake.")
         expected_md5 = str(provider.get("md5_checksum") or provider.get("md5Checksum") or "")
         current_md5 = str(current.get("md5Checksum") or "")
         if expected_md5 and current_md5 and expected_md5 != current_md5:
@@ -793,7 +984,9 @@ def _normalize_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     allowed = {
         "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
         "attachmentSha256", "attachmentSizeBytes", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
-        "attachmentPresent", "attachmentOpened", "transactionReviewed", "fieldMatches",
+        "attachmentPresent", "attachmentOpened", "attachmentDownloaded", "attachmentTransactionId",
+        "transactionExists", "transactionStatus", "transactionMatchCount", "matchingTransactionIds",
+        "transactionPageUrl", "transactionReviewed", "waveObservedAt", "fieldMatches",
         "observedFields", "expectedFieldsDigest",
         "verifiedAt", "verifier", "verificationMethod", "evidenceDigest", "actor",
         "attachmentReadbackVerified", "readbackOrigin",
@@ -807,7 +1000,7 @@ def _normalize_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
 
 def _source_sha256(document: Dict[str, Any]) -> str:
     metadata = document.get("metadata") or {}
-    return str(metadata.get("contentSha256") or document.get("duplicate_fingerprint") or "").lower().strip()
+    return str(metadata.get("contentSha256") or "").lower().strip()
 
 
 def _source_size(document: Dict[str, Any]) -> Optional[int]:
@@ -1018,11 +1211,17 @@ def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]
             "fileMustComeFromWorkOrderLocalPath": True,
         },
         "requiredReadback": {
+            "transactionMustExist": True,
+            "transactionMustBeFinishedAndReviewed": True,
+            "matchingTransactionCountMustEqual": 1,
+            "attachmentMustBeBoundToTransaction": True,
+            "waveObservationMustBeFresh": True,
             "downloadStoredReceipt": True,
             "submitDownloadedBytesTo": f"/api/drive-wave/documents/{document_id}/attachment-readback",
             "serverComputedSha256MustMatchSource": True,
             "serverComputedSizeMustMatchSource": True,
             "filenameMustMatchSource": True,
+            "submitTransactionPageUrl": True,
             "submitObservedTransactionFields": list(REQUIRED_FIELD_MATCHES),
             "serverComputesFieldMatches": True,
         },
@@ -1031,10 +1230,27 @@ def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]
 
 
 def _optional_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
     try:
+        if isinstance(value, float) and not value.is_integer():
+            return None
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _valid_wave_transaction_url(value: Any, business_id: str) -> bool:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+    except ValueError:
+        return False
+    if parsed.scheme != "https" or parsed.hostname not in {
+        "accounting.waveapps.com", "next.waveapps.com",
+    }:
+        return False
+    normalized_path = f"/{parsed.path.strip('/')}".casefold()
+    return bool(business_id) and f"/{business_id.casefold()}/" in f"{normalized_path}/"
 
 
 def _digest(payload: Dict[str, Any]) -> str:

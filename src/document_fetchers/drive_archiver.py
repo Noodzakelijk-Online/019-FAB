@@ -22,7 +22,7 @@ class DriveArchiveClient:
     """Move a verified Drive source while preserving its provider file ID."""
 
     SCOPES = ["https://www.googleapis.com/auth/drive"]
-    FILE_FIELDS = "id,name,mimeType,parents,size,md5Checksum,trashed,webViewLink"
+    FILE_FIELDS = "id,name,mimeType,parents,size,md5Checksum,modifiedTime,trashed,webViewLink"
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, service: Any = None):
         self.config = config or {}
@@ -47,6 +47,8 @@ class DriveArchiveClient:
         return hashlib.sha256(stream.getvalue()).hexdigest()
 
     def move_file(self, file_id: str, source_folder_id: str, archive_folder_id: str) -> Dict[str, Any]:
+        if str(source_folder_id) == str(archive_folder_id):
+            raise RuntimeError("Drive intake and archive folders must be different.")
         before = self.inspect_file(file_id)
         parents = set(before.get("parents") or [])
         if archive_folder_id in parents and source_folder_id not in parents:
@@ -76,6 +78,30 @@ class DriveArchiveClient:
                 pass
             raise RuntimeError("Drive archive postcondition failed; rollback was attempted.")
         return {"status": "archived", "before": before, "after": after}
+
+    def restore_file(self, file_id: str, source_folder_id: str, archive_folder_id: str) -> Dict[str, Any]:
+        """Restore a failed archive move to intake without deleting or replacing the file."""
+        if str(source_folder_id) == str(archive_folder_id):
+            raise RuntimeError("Drive intake and archive folders must be different.")
+        before = self.inspect_file(file_id)
+        parents = set(before.get("parents") or [])
+        if source_folder_id in parents and archive_folder_id not in parents:
+            return {"status": "already_restored", "before": before, "after": before}
+        if archive_folder_id not in parents:
+            raise RuntimeError("Drive archive rollback cannot find the file in the archive folder.")
+
+        self.service.files().update(
+            fileId=str(file_id),
+            addParents=str(source_folder_id),
+            removeParents=str(archive_folder_id),
+            fields=self.FILE_FIELDS,
+            supportsAllDrives=True,
+        ).execute()
+        after = self.inspect_file(file_id)
+        after_parents = set(after.get("parents") or [])
+        if source_folder_id not in after_parents or archive_folder_id in after_parents:
+            raise RuntimeError("Drive archive rollback postcondition failed.")
+        return {"status": "restored", "before": before, "after": after}
 
     def _authenticate(self) -> Any:
         if build is None or Request is None or InstalledAppFlow is None:
