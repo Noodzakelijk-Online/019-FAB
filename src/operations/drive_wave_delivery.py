@@ -5,6 +5,7 @@ import json
 import os
 import re
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Optional
 
 from src.document_fetchers.drive_archiver import DriveArchiveClient
@@ -15,8 +16,22 @@ EVIDENCE_ACTION = "drive_wave.attachment_verified"
 ARCHIVE_ACTION = "drive_wave.source_archived"
 REQUIRED_FIELD_MATCHES = ("vendor", "date", "amount", "currency", "category", "description")
 TERMINAL_EXPORT_STATUSES = {"executed", "submitted"}
-OPEN_REVIEW_STATUSES = {"pending", "open", "needs_review", "in_progress"}
+OPEN_REVIEW_STATUSES = {"pending", "open", "needs_review", "in_progress", "in_review"}
 WORK_ORDER_VERSION = "fab-drive-wave-work-order-v1"
+WAVE_RECEIPT_MAX_BYTES = 6 * 1024 * 1024
+WAVE_RECEIPT_ALLOWED_EXTENSIONS = {
+    ".bmp", ".gif", ".heic", ".jpeg", ".jpg", ".pdf", ".png", ".tif", ".tiff",
+}
+WAVE_RECEIPT_ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "image/bmp",
+    "image/gif",
+    "image/heic",
+    "image/heif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+}
 
 
 class DriveWaveDeliveryService:
@@ -56,8 +71,10 @@ class DriveWaveDeliveryService:
             "waveBusinessConfigured": bool(business_id),
             "driveTokenPresent": token_present,
             "driveCredentialsPresent": credentials_present,
+            "relayIntakeReady": bool(source_folder_id),
+            "relayIntakePath": "/api/connectors/google-drive/relay",
             "driveScopeVerification": "checked_on_archive",
-            "verificationPolicy": "source_hash_and_provider_readback",
+            "verificationPolicy": "server_computed_attachment_sha256_round_trip",
             "deletionPolicy": "never_delete_move_only",
             "externalSubmission": "policy_gated",
         }
@@ -95,6 +112,7 @@ class DriveWaveDeliveryService:
         ]
         summary = {
             "sourceUnavailable": _count_stage(work_orders, "source_file_unavailable"),
+            "sourceIncompatible": _count_stage(work_orders, "source_incompatible"),
             "needsProcessing": _count_stage(work_orders, "needs_processing"),
             "blockedByReview": _count_stage(work_orders, "blocked_by_review"),
             "needsWaveTransaction": _count_stage(work_orders, "locate_or_create_transaction"),
@@ -115,8 +133,11 @@ class DriveWaveDeliveryService:
                 "requiredFieldMatches": list(REQUIRED_FIELD_MATCHES),
                 "sourceHashRequired": True,
                 "attachmentReadbackRequired": True,
+                "attachmentRoundTripHashRequired": True,
                 "attachmentOpenRequired": True,
                 "transactionReviewRequired": True,
+                "serverComputedFieldMatches": True,
+                "expectedFieldsDigestRequired": True,
                 "archiveMode": "move_only_never_delete",
             },
             "externalSubmission": "not_executed",
@@ -180,6 +201,7 @@ class DriveWaveDeliveryService:
         unrelated_reviews = [
             item for item in open_reviews if item.get("reason") != "drive_wave_archive_blocked"
         ]
+        upload_reasons = _wave_upload_reasons(document)
         stage = _work_order_stage(
             document=document,
             record=record,
@@ -190,6 +212,7 @@ class DriveWaveDeliveryService:
             unrelated_reviews=unrelated_reviews,
             evidence_max_age_seconds=self._evidence_max_age_seconds(),
             missing_expected_fields=missing_expected_fields,
+            upload_reasons=upload_reasons,
         )
         source_sha256 = _source_sha256(document)
         external_transaction_id = str(
@@ -203,13 +226,19 @@ class DriveWaveDeliveryService:
             "sourceSha256": source_sha256,
             "uploadSourceSha256": source_sha256,
             "attachmentSha256": "",
+            "attachmentSizeBytes": None,
             "attachmentObjectId": "",
             "attachmentMimeType": document.get("mime_type"),
             "attachmentFilename": document.get("original_filename"),
             "attachmentPresent": False,
             "attachmentOpened": False,
             "transactionReviewed": False,
+            "observedFields": {field: None for field in required_field_matches},
             "fieldMatches": {field: False for field in required_field_matches},
+            "expectedFieldsDigest": _expected_fields_digest(
+                expected_fields,
+                required_field_matches,
+            ),
             "verifier": "hai-wave-executor",
         }
         return {
@@ -230,6 +259,12 @@ class DriveWaveDeliveryService:
                 "localAvailable": bool(document.get("storage_path") and os.path.isfile(str(document.get("storage_path")))),
                 "sha256": source_sha256,
                 "sizeBytes": _source_size(document),
+                "waveUpload": {
+                    "compatible": not upload_reasons,
+                    "reasons": upload_reasons,
+                    "maxBytes": WAVE_RECEIPT_MAX_BYTES,
+                    "allowedExtensions": sorted(WAVE_RECEIPT_ALLOWED_EXTENSIONS),
+                },
             },
             "wave": {
                 "businessId": self._business_id(),
@@ -254,23 +289,99 @@ class DriveWaveDeliveryService:
                     "path": f"/api/drive-wave/documents/{document_id}/attachment-evidence",
                     "haiCommandId": "record_wave_attachment_verification",
                 },
+                "binaryReadbackSubmission": {
+                    "method": "POST",
+                    "path": f"/api/drive-wave/documents/{document_id}/attachment-readback",
+                    "contentType": "multipart/form-data",
+                    "fileField": "attachment",
+                    "metadataField": "evidence",
+                    "requiredForArchive": True,
+                },
                 "requiredFieldMatches": required_field_matches,
                 "template": evidence_template,
             },
+            "browserExecution": _wave_browser_contract(
+                self._business_id(),
+                int(document_id),
+            ),
             "archivePlan": plan,
             "externalSubmission": "not_executed",
         }
+
+    def record_attachment_readback(
+        self,
+        document_id: int,
+        content: bytes,
+        *,
+        filename: Any,
+        mime_type: Any,
+        evidence: Dict[str, Any],
+        actor: str = "hai-wave-browser",
+    ) -> Dict[str, Any]:
+        document = self.ledger.get_document(int(document_id))
+        if not document:
+            return {"success": False, "status": "not_found", "reasons": ["document_not_found"]}
+        if not isinstance(content, bytes) or not content:
+            return self.record_attachment_evidence(
+                document_id,
+                evidence,
+                actor=actor,
+                readback_bytes_verified=False,
+            )
+        if len(content) > WAVE_RECEIPT_MAX_BYTES:
+            return {
+                "success": False,
+                "status": "blocked",
+                "reasons": ["wave_attachment_readback_exceeds_limit"],
+                "maxBytes": WAVE_RECEIPT_MAX_BYTES,
+                "externalSubmission": "not_executed",
+            }
+        server_evidence = dict(evidence or {})
+        server_evidence.update({
+            "attachmentSha256": hashlib.sha256(content).hexdigest(),
+            "attachmentSizeBytes": len(content),
+            "attachmentFilename": os.path.basename(str(filename or "")),
+            "attachmentMimeType": str(mime_type or "application/octet-stream").lower().strip(),
+            "attachmentPresent": True,
+            "attachmentOpened": True,
+        })
+        return self.record_attachment_evidence(
+            document_id,
+            server_evidence,
+            actor=actor,
+            readback_bytes_verified=True,
+        )
 
     def record_attachment_evidence(
         self,
         document_id: int,
         evidence: Dict[str, Any],
         actor: str = "hai",
+        readback_bytes_verified: bool = False,
     ) -> Dict[str, Any]:
         document = self.ledger.get_document(int(document_id))
         if not document:
             return {"success": False, "status": "not_found", "reasons": ["document_not_found"]}
         normalized = _normalize_evidence(evidence)
+        normalized["attachmentReadbackVerified"] = bool(readback_bytes_verified)
+        normalized["readbackOrigin"] = (
+            "wave_browser_download" if readback_bytes_verified else "metadata_attestation"
+        )
+        required_fields = _required_wave_fields(document)
+        expected_fields = _expected_wave_fields(
+            document,
+            self.ledger.get_bookkeeping_record_by_document(int(document_id)),
+        )
+        observed_fields = _normalize_observed_fields(normalized.get("observedFields"))
+        normalized["observedFields"] = observed_fields
+        normalized["fieldMatches"] = {
+            field: _wave_field_matches(field, expected_fields.get(field), observed_fields.get(field))
+            for field in required_fields
+        }
+        normalized["expectedFieldsDigest"] = _expected_fields_digest(
+            expected_fields,
+            required_fields,
+        )
         reasons = self._evidence_reasons(document, normalized)
         evidence_digest = _digest(normalized)
         if reasons:
@@ -294,11 +405,7 @@ class DriveWaveDeliveryService:
                 "externalSubmission": "not_executed",
             }
 
-        verification_method = (
-            "hash_round_trip"
-            if normalized.get("attachmentSha256")
-            else "source_hash_and_provider_readback"
-        )
+        verification_method = "hash_round_trip"
         normalized.update({
             "actor": str(actor or "hai")[:200],
             "evidenceDigest": evidence_digest,
@@ -521,12 +628,22 @@ class DriveWaveDeliveryService:
         if str(evidence.get("sourceSha256") or "").lower() != source_hash:
             reasons.append("evidence_source_hash_mismatch")
         attachment_hash = str(evidence.get("attachmentSha256") or "").lower()
-        upload_hash = str(evidence.get("uploadSourceSha256") or "").lower()
-        if attachment_hash:
-            if attachment_hash != source_hash:
-                reasons.append("wave_attachment_hash_mismatch")
-        elif upload_hash != source_hash:
-            reasons.append("wave_upload_chain_missing")
+        if not evidence.get("attachmentReadbackVerified"):
+            reasons.append("wave_attachment_readback_bytes_missing")
+        if attachment_hash != source_hash:
+            reasons.append("wave_attachment_hash_mismatch")
+        attachment_size = _optional_int(evidence.get("attachmentSizeBytes"))
+        source_size = _source_size(document)
+        if attachment_size is None:
+            reasons.append("wave_attachment_size_missing")
+        elif source_size is not None and attachment_size != source_size:
+            reasons.append("wave_attachment_size_mismatch")
+        attachment_filename = os.path.basename(str(evidence.get("attachmentFilename") or "")).casefold()
+        source_filename = os.path.basename(str(document.get("original_filename") or "")).casefold()
+        if not attachment_filename:
+            reasons.append("wave_attachment_filename_missing")
+        elif source_filename and attachment_filename != source_filename:
+            reasons.append("wave_attachment_filename_mismatch")
         if not evidence.get("attachmentPresent"):
             reasons.append("wave_attachment_missing")
         if not evidence.get("attachmentOpened"):
@@ -545,15 +662,17 @@ class DriveWaveDeliveryService:
         if document_mime and mime_type != document_mime:
             reasons.append("wave_attachment_mime_mismatch")
 
-        field_matches = evidence.get("fieldMatches") if isinstance(evidence.get("fieldMatches"), dict) else {}
-        required_fields = list(REQUIRED_FIELD_MATCHES)
-        extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
-        if any(extracted.get(key) not in (None, "") for key in ("invoice_number", "invoiceNumber", "document_number")):
-            required_fields.append("invoiceNumber")
-        if document.get("vat_amount") is not None:
-            required_fields.append("taxAmount")
+        required_fields = _required_wave_fields(document)
+        expected_fields = _expected_wave_fields(
+            document,
+            self.ledger.get_bookkeeping_record_by_document(int(document["id"])),
+        )
+        expected_digest = _expected_fields_digest(expected_fields, required_fields)
+        if str(evidence.get("expectedFieldsDigest") or "") != expected_digest:
+            reasons.append("wave_expected_fields_changed_or_unbound")
+        observed_fields = _normalize_observed_fields(evidence.get("observedFields"))
         for field in required_fields:
-            if field_matches.get(field) is not True:
+            if not _wave_field_matches(field, expected_fields.get(field), observed_fields.get(field)):
                 reasons.append(f"wave_field_mismatch:{field}")
         return reasons
 
@@ -658,9 +777,11 @@ def _normalize_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     allowed = {
         "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
-        "attachmentSha256", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
+        "attachmentSha256", "attachmentSizeBytes", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
         "attachmentPresent", "attachmentOpened", "transactionReviewed", "fieldMatches",
+        "observedFields", "expectedFieldsDigest",
         "verifiedAt", "verifier", "verificationMethod", "evidenceDigest", "actor",
+        "attachmentReadbackVerified", "readbackOrigin",
     }
     normalized = {key: value for key, value in evidence.items() if key in allowed}
     for key in ("sourceSha256", "uploadSourceSha256", "attachmentSha256"):
@@ -707,6 +828,74 @@ def _expected_wave_fields(
     }
 
 
+def _required_wave_fields(document: Dict[str, Any]) -> list[str]:
+    required_fields = list(REQUIRED_FIELD_MATCHES)
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    if any(
+        extracted.get(key) not in (None, "")
+        for key in ("invoice_number", "invoiceNumber", "document_number")
+    ):
+        required_fields.append("invoiceNumber")
+    if document.get("vat_amount") is not None:
+        required_fields.append("taxAmount")
+    return required_fields
+
+
+def _normalize_observed_fields(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = set(REQUIRED_FIELD_MATCHES) | {"invoiceNumber", "taxAmount"}
+    return {key: value.get(key) for key in allowed if key in value}
+
+
+def _expected_fields_digest(expected_fields: Dict[str, Any], required_fields: list[str]) -> str:
+    return _digest({
+        field: _canonical_wave_field(field, expected_fields.get(field))
+        for field in required_fields
+    })
+
+
+def _wave_field_matches(field: str, expected: Any, observed: Any) -> bool:
+    if expected in (None, "") or observed in (None, ""):
+        return False
+    return _canonical_wave_field(field, expected) == _canonical_wave_field(field, observed)
+
+
+def _canonical_wave_field(field: str, value: Any) -> Any:
+    if field in {"amount", "taxAmount"}:
+        try:
+            return str(Decimal(str(value)).quantize(Decimal("0.01")))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+    if field == "date":
+        return _canonical_date(value)
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if field == "currency":
+        return text.upper()
+    return text.casefold()
+
+
+def _canonical_date(value: Any) -> Optional[str]:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return None
+    for date_format in (
+        "%Y-%m-%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%m/%d/%Y",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ):
+        try:
+            return datetime.strptime(text, date_format).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def _export_reference(export: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not export:
         return None
@@ -732,6 +921,7 @@ def _work_order_stage(
     unrelated_reviews: list[Dict[str, Any]],
     evidence_max_age_seconds: int,
     missing_expected_fields: list[str],
+    upload_reasons: list[str],
 ) -> str:
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
     lifecycle = metadata.get("driveWaveLifecycle") if isinstance(metadata.get("driveWaveLifecycle"), dict) else {}
@@ -739,6 +929,8 @@ def _work_order_stage(
         return "completed"
     if not document.get("storage_path") or not os.path.isfile(str(document.get("storage_path"))):
         return "source_file_unavailable"
+    if upload_reasons:
+        return "source_incompatible"
     if unrelated_reviews or (record and bool(record.get("review_required"))):
         return "blocked_by_review"
     if not record or missing_expected_fields or str(document.get("processing_status") or "").lower() in {
@@ -759,6 +951,7 @@ def _work_order_stage(
 def _stage_action(stage: str) -> str:
     return {
         "source_file_unavailable": "Restore or re-download the exact Drive source before Wave upload.",
+        "source_incompatible": "Convert or split the source into a Wave-supported receipt file without changing the retained original.",
         "needs_processing": "Finish OCR, validation, categorization, and review in FAB.",
         "blocked_by_review": "Resolve the blocking FAB review before downstream execution.",
         "locate_or_create_transaction": "Find an exact Wave transaction or create the approved Wave draft, then upload the source file.",
@@ -771,6 +964,62 @@ def _stage_action(stage: str) -> str:
 
 def _count_stage(work_orders: list[Dict[str, Any]], stage: str) -> int:
     return sum(1 for item in work_orders if item.get("stage") == stage)
+
+
+def _wave_upload_reasons(document: Dict[str, Any]) -> list[str]:
+    reasons = []
+    size = _source_size(document)
+    if size is not None and size > WAVE_RECEIPT_MAX_BYTES:
+        reasons.append("wave_receipt_file_too_large")
+    filename = str(document.get("original_filename") or "")
+    extension = os.path.splitext(filename)[1].lower()
+    mime_type = str(document.get("mime_type") or "").lower()
+    if extension not in WAVE_RECEIPT_ALLOWED_EXTENSIONS:
+        reasons.append("wave_receipt_file_extension_unsupported")
+    if mime_type and mime_type not in WAVE_RECEIPT_ALLOWED_MIME_TYPES:
+        reasons.append("wave_receipt_mime_type_unsupported")
+    return sorted(set(reasons))
+
+
+def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]:
+    return {
+        "version": "wave-transactions-browser-v1",
+        "transactionListUrl": (
+            f"https://next.waveapps.com/{business_id}/transactions" if business_id else None
+        ),
+        "surface": "Accounting > Transactions",
+        "observedControls": {
+            "searchPlaceholder": "Search transactions",
+            "addTransactionButton": "Add transaction",
+            "addWithdrawalMenuItem": "Add withdrawal",
+            "receiptUploadButton": "select a file",
+            "viewReceiptButton": "View original receipt",
+            "markReviewedButton": "Mark as reviewed",
+            "saveButton": "Save transaction",
+        },
+        "upload": {
+            "maxBytes": WAVE_RECEIPT_MAX_BYTES,
+            "allowedExtensions": sorted(WAVE_RECEIPT_ALLOWED_EXTENSIONS),
+            "fileMustComeFromWorkOrderLocalPath": True,
+        },
+        "requiredReadback": {
+            "downloadStoredReceipt": True,
+            "submitDownloadedBytesTo": f"/api/drive-wave/documents/{document_id}/attachment-readback",
+            "serverComputedSha256MustMatchSource": True,
+            "serverComputedSizeMustMatchSource": True,
+            "filenameMustMatchSource": True,
+            "submitObservedTransactionFields": list(REQUIRED_FIELD_MATCHES),
+            "serverComputesFieldMatches": True,
+        },
+        "externalSubmission": "policy_gated_browser_execution",
+    }
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _digest(payload: Dict[str, Any]) -> str:

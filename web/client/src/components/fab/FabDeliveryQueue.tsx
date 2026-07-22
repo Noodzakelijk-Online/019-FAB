@@ -36,10 +36,11 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
   const { copy, status: localizedStatus } = useFabLocale();
   const visibleOrders = delivery.workOrders.filter((item) => matchesSearch(item, search));
   const connectorStatus = text(delivery.status.status, "unavailable");
+  const relayReady = delivery.status.relayIntakeReady === true;
   const resourceAvailable = resource?.state === "live" || resource?.state === "stale";
   const readyToArchive = resourceAvailable ? count(delivery.summary.readyToArchive) : null;
   const needsVerification = resourceAvailable ? count(delivery.summary.needsAttachmentVerification) + count(delivery.summary.needsFreshReadback) : null;
-  const blocked = resourceAvailable ? count(delivery.summary.sourceUnavailable) + count(delivery.summary.needsProcessing) + count(delivery.summary.blockedByReview) + count(delivery.summary.needsWaveTransaction) : null;
+  const blocked = resourceAvailable ? count(delivery.summary.sourceUnavailable) + count(delivery.summary.sourceIncompatible) + count(delivery.summary.needsProcessing) + count(delivery.summary.blockedByReview) + count(delivery.summary.needsWaveTransaction) : null;
   const state = panelState(resource, delivery.workOrders.length);
 
   return (
@@ -69,8 +70,8 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
         <div className="fab-delivery-gate tone-warn">
           <ShieldCheck aria-hidden="true" />
           <div>
-            <strong>{copy("Drive authorization required", "Drive-autorisatie vereist")}</strong>
-            <span>{copy("Install the Google OAuth desktop credentials, then run Authorize-FAB-GoogleDrive.cmd. Source files remain in the intake folder until Wave attachment proof passes.", "Installeer de Google OAuth-desktopgegevens en voer daarna Authorize-FAB-GoogleDrive.cmd uit. Bronbestanden blijven in de inname-map totdat het Wave-bijlagebewijs slaagt.")}</span>
+            <strong>{relayReady ? copy("Relay intake ready; archive authorization required", "Relayinname gereed; archiefautorisatie vereist") : copy("Drive authorization required", "Drive-autorisatie vereist")}</strong>
+            <span>{relayReady ? copy("HAI can hand exact Drive bytes into FAB now. Install the Google OAuth desktop credentials and run Authorize-FAB-GoogleDrive.cmd before FAB can move a fully verified source into the archive folder.", "HAI kan nu exacte Drive-bytes aan FAB leveren. Installeer de Google OAuth-desktopgegevens en voer Authorize-FAB-GoogleDrive.cmd uit voordat FAB een volledig geverifieerde bron naar de archiefmap kan verplaatsen.") : copy("Install the Google OAuth desktop credentials, then run Authorize-FAB-GoogleDrive.cmd. Source files remain in the intake folder until Wave attachment proof passes.", "Installeer de Google OAuth-desktopgegevens en voer daarna Authorize-FAB-GoogleDrive.cmd uit. Bronbestanden blijven in de inname-map totdat het Wave-bijlagebewijs slaagt.")}</span>
           </div>
         </div>
       )}
@@ -92,13 +93,16 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                 const source = asRecord(order.source);
                 const wave = asRecord(order.wave);
                 const archivePlan = asRecord(order.archivePlan);
+                const blockerCount = Array.isArray(archivePlan.reasons)
+                  ? archivePlan.reasons.length
+                  : count(asRecord(order.reviews).blocking);
                 const stage = text(order.stage, "needs_processing");
                 const documentId = text(order.documentId, "");
                 return (
                   <tr key={text(order.workOrderId, documentId)}>
                     <td data-label={copy("Source file", "Bronbestand")}>
                       <strong>{text(source.filename, copy("Unnamed document", "Naamloos document"))}</strong>
-                      <span>{text(source.mimeType, "-")} · {text(source.sha256, "-").slice(0, 12)}</span>
+                      <span>{text(source.mimeType, "-")} | {text(source.sha256, "-").slice(0, 12)}</span>
                     </td>
                     <td data-label={copy("Required action", "Vereiste actie")}>
                       <span className={`fab-status-chip tone-${statusTone(stage)}`}>{humanize(stage)}</span>
@@ -110,7 +114,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                     </td>
                     <td data-label={copy("Archive gate", "Archiefcontrole")}>
                       <strong>{archivePlan.canArchive === true ? copy("All checks passed", "Alle controles geslaagd") : copy("Source retained", "Bron behouden")}</strong>
-                      <span>{archivePlan.canArchive === true ? copy("Move-only worker may proceed", "Verplaatsingsworker mag doorgaan") : `${count(archivePlan.reasons)} ${copy("blocking checks", "blokkerende controles")}`}</span>
+                      <span>{archivePlan.canArchive === true ? copy("Move-only worker may proceed", "Verplaatsingsworker mag doorgaan") : `${blockerCount} ${copy("blocking checks", "blokkerende controles")}`}</span>
                     </td>
                     <td>
                       <a className="fab-icon-button" href={`${localApiEndpoint}/api/drive-wave/documents/${documentId}/work-order`} target="_blank" rel="noreferrer" aria-label={`${copy("Inspect work order", "Bekijk opdracht")} ${documentId}`} title={copy("Inspect work order", "Bekijk opdracht")}>
@@ -131,7 +135,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
         <div className="fab-empty-state compact">
           <FileCheck2 aria-hidden="true" />
           <strong>{delivery.workOrders.length ? copy("No matching delivery work orders", "Geen overeenkomende leveringsopdrachten") : copy("No Drive documents queued", "Geen Drive-documenten in de wachtrij")}</strong>
-          <span>{delivery.workOrders.length ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : copy("Authorized Drive intake will create one evidence-bound work order per source file.", "Geautoriseerde Drive-inname maakt per bronbestand een bewijsgebonden opdracht.")}</span>
+          <span>{delivery.workOrders.length ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : relayReady ? copy("The Drive relay will create one evidence-bound work order per accepted source file.", "De Drive-relay maakt per geaccepteerd bronbestand een bewijsgebonden opdracht.") : copy("Authorized Drive intake will create one evidence-bound work order per source file.", "Geautoriseerde Drive-inname maakt per bronbestand een bewijsgebonden opdracht.")}</span>
         </div>
       )}
     </section>

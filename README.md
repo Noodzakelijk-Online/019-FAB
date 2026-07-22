@@ -275,10 +275,16 @@ restore, change access controls, or submit downstream bookkeeping changes.
 
 Drive-to-Wave executor handoff is available at
 `GET /api/drive-wave/work-orders` and is advertised by the HAI manifest as the
-read-only resource `wave_attachment_work_orders`. Each work order binds one Drive provider
+read-only resource `wave_attachment_work_orders`. Authenticated connectors can
+submit exact configured-folder bytes through `google_drive_binary_relay`; after
+Wave upload they must submit the attachment downloaded back from Wave through
+`wave_attachment_binary_readback`. Each work order binds one Drive provider
 file ID and SHA-256 to FAB's expected Wave fields, line items, transaction
-reference, required attachment readback evidence, and the current move-only
-archive gate. The dashboard exposes the same state in **Drive to Wave delivery**.
+reference, server-computed attachment readback evidence, and the current
+move-only archive gate. Metadata attestation or a visible receipt icon cannot
+unlock archival. FAB also compares the observed Wave transaction values itself;
+executor-supplied match booleans are ignored, and later field changes invalidate
+older evidence. The dashboard exposes the same state in **Drive to Wave delivery**.
 
 ### Running the Workflow Locally
 To run the main automated bookkeeping workflow:

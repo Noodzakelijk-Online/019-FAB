@@ -24,6 +24,14 @@ SENSITIVE_REVIEW_TERMS = (
     "wmo",
     "zorgtoeslag",
 )
+PROCESSING_REVIEW_REASONS = {
+    "duplicate_candidate",
+    "empty_ocr_text",
+    "low_confidence_categorization",
+    "manual_review_category",
+    "sensitive_government_document",
+    "validation_failed",
+}
 
 
 class LocalDocumentProcessor:
@@ -288,6 +296,10 @@ class LocalDocumentProcessor:
                 applied_rule=processed_data.get("applied_vendor_category_rule"),
             ),
         )
+        resolved_review_item_ids = self._resolve_inactive_processing_reviews(
+            document_id,
+            review_reasons,
+        )
 
         for reason in review_reasons:
             corrected_data = None
@@ -319,6 +331,7 @@ class LocalDocumentProcessor:
                 "duplicateOfDocumentId": duplicate_of_document_id,
                 "bookkeepingRecordId": record_result.get("recordId"),
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+                "resolvedReviewItemIds": resolved_review_item_ids,
             },
         })
         return {
@@ -330,6 +343,7 @@ class LocalDocumentProcessor:
             "validation": validation,
             "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
             "bookkeepingRecordId": record_result.get("recordId"),
+            "resolvedReviewItemIds": resolved_review_item_ids,
         }
 
     def _duplicate_match(
@@ -496,6 +510,41 @@ class LocalDocumentProcessor:
             },
         })
         return retry_count
+
+    def _resolve_inactive_processing_reviews(
+        self,
+        document_id: int,
+        active_reasons: list,
+        actor: str = "fab_local_processing",
+    ) -> list:
+        active = set(active_reasons)
+        resolved_ids = []
+        for item in self.ledger.list_review_items(document_id=document_id, limit=100):
+            reason = str(item.get("reason") or "")
+            if reason not in PROCESSING_REVIEW_REASONS or reason in active:
+                continue
+            if item.get("status") not in {"pending", "in_review"}:
+                continue
+            review_item_id = int(item["id"])
+            self.ledger.resolve_review_item(
+                review_item_id,
+                status="resolved",
+                resolution="Automatically cleared because reprocessing no longer reports this condition.",
+                corrected_data={"actor": actor, "reason": reason},
+            )
+            resolved_ids.append(review_item_id)
+        if resolved_ids:
+            self.ledger.record_audit_event({
+                "action": "local_processing.stale_reviews_resolved",
+                "entityType": "bookkeeping_document",
+                "entityId": str(document_id),
+                "details": {
+                    "actor": actor,
+                    "activeReasons": sorted(active),
+                    "resolvedReviewItemIds": resolved_ids,
+                },
+            })
+        return resolved_ids
 
     def _resolve_processing_failed_reviews(self, document_id: int, actor: str) -> None:
         document = self.ledger.get_document(document_id)

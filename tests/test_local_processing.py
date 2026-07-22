@@ -126,6 +126,49 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["bookkeeping_record"]["status"], "needs_review")
             self.assertEqual(document["bookkeeping_record"]["review_required"], 1)
 
+    def test_reprocessing_resolves_machine_review_reasons_that_are_no_longer_active(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "receipt.txt")
+            with open(receipt_path, "w", encoding="utf-8") as handle:
+                handle.write("Vendor: Test Vendor\nDate: 2026-06-28\nTotal: EUR 42.50\n")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "local_folder",
+                "sourceDocumentId": "reprocess-1",
+                "originalFilename": "receipt.txt",
+                "mimeType": "text/plain",
+                "storagePath": receipt_path,
+                "documentType": "text",
+                "processingStatus": "imported",
+            })
+
+            first = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(category="Manual Review", confidence_score=0.1),
+                validator=StaticValidator(valid=False, reason="Missing required field"),
+            ).process_document(document_id)
+            second = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            self.assertEqual(first["status"], "needs_review")
+            self.assertEqual(second["status"], "processed")
+            self.assertEqual(len(second["resolvedReviewItemIds"]), 3)
+            self.assertEqual(
+                ledger.list_review_items(status=("pending", "in_review"), document_id=document_id),
+                [],
+            )
+            resolved_reasons = {
+                item["reason"]
+                for item in ledger.list_review_items(status="resolved", document_id=document_id)
+            }
+            self.assertEqual(
+                resolved_reasons,
+                {"validation_failed", "low_confidence_categorization", "manual_review_category"},
+            )
+
     def test_approved_vendor_rule_overrides_low_confidence_category(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             receipt_path = os.path.join(temp_dir, "receipt.txt")

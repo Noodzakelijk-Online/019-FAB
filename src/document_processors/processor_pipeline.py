@@ -7,6 +7,7 @@ from src.document_processors.tesseract_processor import TesseractProcessor
 from src.document_processors.template_matching_processor import TemplateMatchingProcessor
 from src.document_processors.line_item_extractor import LineItemExtractor
 from src.document_processors.processor_factory import ProcessorFactory
+from src.document_processors.financial_field_extractor import FinancialFieldExtractor
 
 
 class ProcessorPipeline(BaseProcessor):
@@ -15,6 +16,7 @@ class ProcessorPipeline(BaseProcessor):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.pipeline_steps = []
+        self.field_extractor = FinancialFieldExtractor()
         self._initialize_pipeline()
 
     def _initialize_pipeline(self):
@@ -70,6 +72,10 @@ class ProcessorPipeline(BaseProcessor):
                     raise RuntimeError(f"OCR failed: {result['error']}")
                 processed_data["ocr_text"] = result.get("ocr_text", "")
                 self._merge_extracted_data(processed_data, result)
+                self._merge_extracted_data(
+                    processed_data,
+                    self.field_extractor.extract(processed_data["ocr_text"]),
+                )
                 processed_data["language"] = result.get("language", "")
                 processed_data["ocr_confidence"] = result.get("ocr_confidence", 0.0)
                 continue

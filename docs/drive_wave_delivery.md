@@ -7,15 +7,22 @@ not enough to archive a source document.
 ## Lifecycle
 
 1. The Google Drive connector downloads direct children of the configured
-   intake folder and records the provider file ID, provider checksum, size, and
-   a local SHA-256 digest in the operations ledger.
+   intake folder, either through native OAuth or the authenticated binary relay
+   at `POST /api/connectors/google-drive/relay`. FAB requires the configured
+   folder ID and records the provider file ID, size, and a locally computed
+   SHA-256 digest in the operations ledger. Repeating the same provider ID and
+   bytes is idempotent; changed bytes create a revision and never overwrite the
+   earlier local copy.
 2. FAB processes and validates the document, resolves duplicates and review
    items, and prepares or finds the matching Wave transaction.
 3. A browser or HAI executor uploads the exact local source file to Wave and
-   reads the transaction and stored attachment back.
-4. The executor records evidence through
-   `POST /api/drive-wave/documents/<id>/attachment-evidence` or the HAI command
-   `record_wave_attachment_verification`.
+   then downloads the stored Wave attachment back.
+4. The executor submits that downloaded file plus transaction evidence as
+   multipart data to
+   `POST /api/drive-wave/documents/<id>/attachment-readback`. FAB computes the
+   readback hash and size itself. Metadata attestation through
+   `attachment-evidence` or `record_wave_attachment_verification` can record
+   progress but can never unlock archival.
 5. The worker runs a move-only archive pass. It downloads the current Drive
    source again, requires recent Wave readback evidence, verifies its SHA-256
    and provider metadata, moves the same provider file ID, and verifies the
@@ -27,14 +34,20 @@ item. FAB never deletes a Drive source in this workflow.
 ## Required Wave evidence
 
 - configured Wave business ID and external transaction ID;
-- source SHA-256 and either an attachment SHA-256 or the exact upload-source
-  SHA-256;
+- server-computed attachment SHA-256 exactly equal to the source SHA-256;
+- exact attachment size, filename, and MIME type equality;
 - a provider attachment object ID, attachment-present readback, and successful
   opening of the stored attachment;
 - reviewed transaction state;
-- positive readback matches for vendor, date, amount, currency, category, and
-  description;
+- observed Wave values for vendor, date, amount, currency, category, and
+  description. FAB computes these matches server-side and binds them to a
+  digest of the current expected fields; a later bookkeeping edit invalidates
+  the evidence;
 - invoice-number and VAT matches when those fields exist on the source.
+
+The Wave receipt surface currently accepts PDF, JPG/JPEG, PNG, GIF, TIFF/TIF,
+BMP, and HEIC files up to 6 MB. FAB marks incompatible work orders before an
+executor attempts an upload.
 
 ## Configuration
 
@@ -44,6 +57,7 @@ Set the following values in the local ignored `config/config.ini` file:
 [google_drive]
 enabled = true
 folder_id = <intake-folder-id>
+relay_max_bytes = 26214400
 archive_verified_files = true
 wave_archive_folder_id = <archive-folder-id>
 wave_attachment_evidence_max_age_seconds = 900
@@ -62,12 +76,18 @@ folder, and leaves unattended interactive authorization disabled.
 
 ## HAI contract
 
-The HAI manifest advertises one read-only resource and two bounded commands:
+The HAI manifest advertises three bounded resources and two related commands:
 
+- `google_drive_binary_relay` accepts exact Drive bytes and provider metadata
+  from an authenticated connector without requiring the local process to own a
+  Drive OAuth token.
 - `wave_attachment_work_orders` returns the exact local source path,
   provider file ID, source hash, expected Wave fields and line items, evidence
   template, and current archive blockers without changing either system.
-- `record_wave_attachment_verification` records readback evidence only.
+- `wave_attachment_binary_readback` accepts the file downloaded back from Wave
+  and computes the archival evidence inside FAB.
+- `record_wave_attachment_verification` records metadata attestation only and
+  does not satisfy the binary-readback gate.
 - `archive_verified_drive_sources` defaults to a dry run and can move only
   documents that already satisfy every policy gate.
 

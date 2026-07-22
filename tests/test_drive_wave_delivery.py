@@ -1,4 +1,6 @@
 import hashlib
+import io
+import json
 import os
 import tempfile
 import unittest
@@ -93,9 +95,21 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "uploadSourceSha256": self.source_hash,
             "attachmentObjectId": "wave-attachment-1",
             "attachmentMimeType": "application/pdf",
+            "attachmentFilename": "invoice.pdf",
+            "attachmentSizeBytes": self.source_size,
             "attachmentPresent": True,
             "attachmentOpened": True,
             "transactionReviewed": True,
+            "observedFields": {
+                "vendor": "Example Vendor",
+                "date": "2026-07-22",
+                "amount": 121.0,
+                "currency": "EUR",
+                "category": "Office Supplies",
+                "description": "invoice.pdf",
+                "invoiceNumber": "INV-1",
+                "taxAmount": 21.0,
+            },
             "fieldMatches": {
                 "vendor": True,
                 "date": True,
@@ -180,6 +194,13 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         )
         self.assertEqual(order["evidence"]["template"]["sourceSha256"], self.source_hash)
         self.assertFalse(order["evidence"]["template"]["attachmentPresent"])
+        self.assertIn("observedFields", order["evidence"]["template"])
+        self.assertTrue(result["evidencePolicy"]["serverComputedFieldMatches"])
+        self.assertTrue(order["browserExecution"]["requiredReadback"]["serverComputedSha256MustMatchSource"])
+        self.assertEqual(
+            order["evidence"]["binaryReadbackSubmission"]["path"],
+            f"/api/drive-wave/documents/{self.document_id}/attachment-readback",
+        )
         self.assertNotIn("ocr_text", str(order))
 
     def test_work_order_never_queues_a_missing_local_source_for_upload(self):
@@ -207,6 +228,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertIn("wave_attachment_hash_mismatch", result["reasons"])
+        self.assertIn("wave_attachment_readback_bytes_missing", result["reasons"])
         self.assertIsNone(
             self.ledger.find_audit_event(
                 "drive_wave.attachment_verified",
@@ -219,15 +241,18 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         archiver = FakeDriveArchiver(self.source_hash, self.source_size)
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
 
-        verification = service.record_attachment_evidence(
+        verification = service.record_attachment_readback(
             self.document_id,
-            self._evidence(),
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
             actor="hai-browser",
         )
         archived = service.archive_document(self.document_id, actor="local-worker")
 
         self.assertTrue(verification["success"])
-        self.assertEqual(verification["verificationMethod"], "source_hash_and_provider_readback")
+        self.assertEqual(verification["verificationMethod"], "hash_round_trip")
         self.assertTrue(archived["success"])
         self.assertEqual(archived["deletion"], "not_performed")
         self.assertEqual(archiver.moves, [("drive-file-1", SOURCE_FOLDER, ARCHIVE_FOLDER)])
@@ -239,7 +264,13 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
     def test_current_drive_bytes_must_still_match_intake_hash(self):
         archiver = FakeDriveArchiver("f" * 64, self.source_size)
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
-        service.record_attachment_evidence(self.document_id, self._evidence())
+        service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
 
         archived = service.archive_document(self.document_id)
 
@@ -252,7 +283,13 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
         service.archive_document(self.document_id)
 
-        recorded = service.record_attachment_evidence(self.document_id, self._evidence())
+        recorded = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
         reviews = self.ledger.list_review_items(document_id=self.document_id)
 
         self.assertTrue(recorded["success"])
@@ -263,7 +300,13 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
     def test_stale_wave_readback_never_authorizes_a_drive_move(self):
         archiver = FakeDriveArchiver(self.source_hash, self.source_size)
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
-        service.record_attachment_evidence(self.document_id, self._evidence())
+        service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
         with self.ledger._connection() as connection:
             connection.execute(
                 "UPDATE audit_events SET created_at = ? WHERE action = ? AND entity_id = ?",
@@ -278,7 +321,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertFalse(archived["success"])
         self.assertEqual(archiver.moves, [])
 
-    def test_hai_can_record_evidence_but_archive_remains_policy_gated(self):
+    def test_metadata_attestation_cannot_replace_binary_readback(self):
         config = {
             **self.config,
             "fab_local_ledger_path": self.ledger.path,
@@ -304,10 +347,122 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         })
 
         self.assertEqual(recorded.status_code, 200)
-        self.assertEqual(recorded.get_json()["result"]["status"], "verified")
+        self.assertEqual(recorded.get_json()["result"]["status"], "blocked")
+        self.assertIn(
+            "wave_attachment_readback_bytes_missing",
+            recorded.get_json()["result"]["reasons"],
+        )
         self.assertEqual(planned.status_code, 200)
         self.assertEqual(planned.get_json()["result"]["status"], "planned")
-        self.assertEqual(planned.get_json()["result"]["ready"], 1)
+        self.assertEqual(planned.get_json()["result"]["ready"], 0)
+
+    def test_multipart_readback_computes_hash_inside_fab(self):
+        client = create_app({**self.config, "fab_local_ledger_path": self.ledger.path}).test_client()
+        response = client.post(
+            f"/api/drive-wave/documents/{self.document_id}/attachment-readback",
+            data={
+                "evidence": json.dumps(self._evidence(attachmentSha256="0" * 64)),
+                "actor": "hai-wave-browser",
+                "attachment": (io.BytesIO(self.source_bytes), "invoice.pdf"),
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        self.assertTrue(result["success"])
+        self.assertEqual(result["verificationMethod"], "hash_round_trip")
+        event = self.ledger.find_audit_event(
+            "drive_wave.attachment_verified",
+            "bookkeeping_document",
+            str(self.document_id),
+        )
+        self.assertTrue(event["details"]["attachmentReadbackVerified"])
+        self.assertEqual(event["details"]["attachmentSha256"], self.source_hash)
+
+    def test_readback_filename_and_size_must_match_source(self):
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        wrong_name = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="another.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+        wrong_bytes = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes + b"changed",
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+
+        self.assertIn("wave_attachment_filename_mismatch", wrong_name["reasons"])
+        self.assertIn("wave_attachment_hash_mismatch", wrong_bytes["reasons"])
+        self.assertIn("wave_attachment_size_mismatch", wrong_bytes["reasons"])
+
+    def test_readback_computes_field_matches_from_observed_values(self):
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+        evidence = self._evidence()
+        evidence["observedFields"]["amount"] = 120.0
+        evidence["fieldMatches"] = {
+            field: True
+            for field in (
+                "vendor", "date", "amount", "currency", "category",
+                "description", "invoiceNumber", "taxAmount",
+            )
+        }
+
+        result = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=evidence,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIn("wave_field_mismatch:amount", result["reasons"])
+
+    def test_bookkeeping_field_change_invalidates_prior_readback(self):
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+        recorded = service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+        self.ledger.update_document(self.document_id, {"category": "Computer equipment"})
+
+        plan = service.plan_archive(self.document_id)
+
+        self.assertTrue(recorded["success"])
+        self.assertFalse(plan["canArchive"])
+        self.assertIn("wave_expected_fields_changed_or_unbound", plan["reasons"])
+        self.assertIn("wave_field_mismatch:category", plan["reasons"])
+
+    def test_review_in_progress_blocks_archive(self):
+        review_id = self.ledger.create_review_item({
+            "documentId": self.document_id,
+            "reason": "operator_check",
+            "details": "Operator is actively reviewing this record.",
+        })
+        self.ledger.resolve_review_item(review_id, status="in_review")
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+        service.record_attachment_readback(
+            self.document_id,
+            self.source_bytes,
+            filename="invoice.pdf",
+            mime_type="application/pdf",
+            evidence=self._evidence(),
+        )
+
+        plan = service.plan_archive(self.document_id)
+
+        self.assertFalse(plan["canArchive"])
+        self.assertIn("open_review_item", plan["reasons"])
 
     def test_api_and_hai_manifest_expose_read_only_attachment_work_orders(self):
         self.ledger.upsert_bookkeeping_record({
@@ -334,10 +489,17 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertEqual(document_order.status_code, 200)
         self.assertEqual(document_order.get_json()["documentId"], self.document_id)
         self.assertEqual(manifest.status_code, 200)
-        resource = manifest.get_json()["resources"][0]
+        resources = {
+            item["resourceId"]: item for item in manifest.get_json()["resources"]
+        }
+        resource = resources["wave_attachment_work_orders"]
         self.assertEqual(resource["resourceId"], "wave_attachment_work_orders")
         self.assertEqual(resource["path"], "/api/drive-wave/work-orders")
         self.assertEqual(resource["externalSubmission"], "not_executed")
+        self.assertEqual(
+            resources["wave_attachment_binary_readback"]["pathTemplate"],
+            "/api/drive-wave/documents/{documentId}/attachment-readback",
+        )
 
 
 if __name__ == "__main__":

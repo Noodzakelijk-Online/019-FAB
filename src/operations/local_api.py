@@ -25,7 +25,11 @@ from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
-from src.operations.drive_wave_delivery import DriveWaveDeliveryService
+from src.operations.drive_relay_intake import DriveRelayIntakeService
+from src.operations.drive_wave_delivery import (
+    DriveWaveDeliveryService,
+    WAVE_RECEIPT_MAX_BYTES,
+)
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -4326,6 +4330,37 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         )
         return jsonify(result), 200 if result.get("success") else 400
 
+    @app.post("/api/drive-wave/documents/<int:document_id>/attachment-readback")
+    def drive_wave_attachment_readback_api(document_id: int):
+        attachment = request.files.get("attachment")
+        if attachment is None:
+            return jsonify({"error": "Multipart file field 'attachment' is required"}), 400
+        evidence_text = request.form.get("evidence") or "{}"
+        try:
+            evidence = json.loads(evidence_text)
+        except (TypeError, ValueError):
+            return jsonify({"error": "evidence must be a valid JSON object"}), 400
+        if not isinstance(evidence, dict):
+            return jsonify({"error": "evidence must be a valid JSON object"}), 400
+        content = attachment.stream.read(WAVE_RECEIPT_MAX_BYTES + 1)
+        if len(content) > WAVE_RECEIPT_MAX_BYTES:
+            return jsonify({
+                "success": False,
+                "status": "blocked",
+                "reasons": ["wave_attachment_readback_exceeds_limit"],
+                "maxBytes": WAVE_RECEIPT_MAX_BYTES,
+                "externalSubmission": "not_executed",
+            }), 413
+        result = DriveWaveDeliveryService(ledger, config).record_attachment_readback(
+            document_id,
+            content,
+            filename=attachment.filename,
+            mime_type=attachment.mimetype,
+            evidence=evidence,
+            actor=str(request.form.get("actor") or "local_api_wave_browser"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
     @app.post("/api/drive-wave/documents/<int:document_id>/archive")
     def drive_wave_archive_document_api(document_id: int):
         payload = request.get_json(silent=True) or {}
@@ -6534,6 +6569,50 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "document": document,
             "externalSubmission": "not_executed",
         }), 201
+
+    @app.get("/api/connectors/google-drive/relay")
+    def google_drive_relay_status_api():
+        return jsonify(DriveRelayIntakeService(ledger, config).status())
+
+    @app.post("/api/connectors/google-drive/relay")
+    def google_drive_relay_intake_api():
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"error": "Multipart file field 'file' is required"}), 400
+        metadata_text = request.form.get("metadata") or "{}"
+        try:
+            metadata = json.loads(metadata_text)
+        except (TypeError, ValueError):
+            return jsonify({"error": "metadata must be a valid JSON object"}), 400
+        if not isinstance(metadata, dict):
+            return jsonify({"error": "metadata must be a valid JSON object"}), 400
+
+        service = DriveRelayIntakeService(ledger, config)
+        max_bytes = int(service.status()["maxBytes"])
+        content = upload.stream.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            return jsonify({
+                "success": False,
+                "status": "rejected",
+                "reasons": ["drive_file_exceeds_relay_limit"],
+                "maxBytes": max_bytes,
+                "externalSubmission": "not_executed",
+            }), 413
+        result = service.ingest(
+            content,
+            provider_file_id=metadata.get("providerFileId"),
+            source_folder_id=metadata.get("sourceFolderId"),
+            filename=metadata.get("filename") or upload.filename,
+            mime_type=metadata.get("mimeType") or upload.mimetype,
+            provider_size=metadata.get("sizeBytes"),
+            expected_sha256=metadata.get("sha256"),
+            created_time=metadata.get("createdTime"),
+            modified_time=metadata.get("modifiedTime"),
+            md5_checksum=metadata.get("md5Checksum"),
+            web_view_link=metadata.get("webViewLink"),
+            actor=metadata.get("actor") or "local_api_drive_relay",
+        )
+        return jsonify(result), 201 if result.get("success") else 400
 
     @app.post("/intake/rescan")
     def rescan_intake_form():

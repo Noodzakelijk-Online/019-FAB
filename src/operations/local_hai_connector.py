@@ -145,8 +145,8 @@ HAI_COMMANDS = (
     ),
     HaiCommand(
         "record_wave_attachment_verification",
-        "Record Wave attachment verification",
-        "Record transaction and attachment readback evidence for one configured Drive source.",
+        "Record Wave attachment attestation",
+        "Record transaction metadata for one configured Drive source; binary readback is still required before archival.",
         {
             "type": "object",
             "additionalProperties": False,
@@ -216,6 +216,16 @@ class LocalHaiConnector:
             ],
             "resources": [
                 {
+                    "resourceId": "google_drive_binary_relay",
+                    "label": "Google Drive binary relay",
+                    "description": "Idempotently hand exact configured-folder Drive bytes into FAB with provider identity and hash checks.",
+                    "method": "POST",
+                    "path": "/api/connectors/google-drive/relay",
+                    "contentType": "multipart/form-data",
+                    "mode": "authenticated_source_intake",
+                    "externalSubmission": "not_executed",
+                },
+                {
                     "resourceId": "wave_attachment_work_orders",
                     "label": "Wave attachment work orders",
                     "description": "Evidence-bound Drive source, Wave field, attachment readback, and archive-gate handoff.",
@@ -223,6 +233,16 @@ class LocalHaiConnector:
                     "path": "/api/drive-wave/work-orders",
                     "mode": "read_only_executor_handoff",
                     "externalSubmission": "not_executed",
+                },
+                {
+                    "resourceId": "wave_attachment_binary_readback",
+                    "label": "Wave attachment binary readback",
+                    "description": "Submit the receipt downloaded back from Wave so FAB computes and verifies its hash, size, filename, and bookkeeping evidence.",
+                    "method": "POST",
+                    "pathTemplate": "/api/drive-wave/documents/{documentId}/attachment-readback",
+                    "contentType": "multipart/form-data",
+                    "mode": "governed_binary_evidence",
+                    "externalSubmission": "verified_readback",
                 }
             ],
             "excludedCapabilities": [
@@ -490,12 +510,16 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         allowed_evidence = {
             "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
             "attachmentSha256", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
+            "attachmentSizeBytes",
             "attachmentPresent", "attachmentOpened", "transactionReviewed", "fieldMatches",
+            "observedFields", "expectedFieldsDigest",
             "verifiedAt", "verifier",
         }
         unexpected_evidence = sorted(set(evidence) - allowed_evidence)
         if unexpected_evidence:
             raise ValueError(f"Unsupported evidence field(s): {', '.join(unexpected_evidence)}")
+        if "observedFields" in evidence and not isinstance(evidence["observedFields"], dict):
+            raise ValueError("evidence.observedFields must be an object.")
         normalized["evidence"] = dict(evidence)
     if "sources" in payload:
         sources = payload["sources"]
