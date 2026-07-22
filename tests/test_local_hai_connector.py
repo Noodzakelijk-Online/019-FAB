@@ -97,7 +97,7 @@ class TestLocalHaiConnector(unittest.TestCase):
             })
 
             self.assertEqual(manifest.status_code, 200)
-            self.assertEqual(len(manifest.get_json()["commands"]), 9)
+            self.assertEqual(len(manifest.get_json()["commands"]), 11)
             self.assertEqual(plan.status_code, 200)
             self.assertEqual(plan.get_json()["status"], "ready")
             self.assertEqual(executed.status_code, 200)

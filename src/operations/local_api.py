@@ -25,6 +25,7 @@ from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
+from src.operations.drive_wave_delivery import DriveWaveDeliveryService
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -4202,6 +4203,20 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             ).transactions_for_reconciliation(limit=limit)
             return LocalReconciliationService(ledger, config).run(transactions, limit=limit)
 
+        def record_wave_attachment_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return DriveWaveDeliveryService(ledger, config).record_attachment_evidence(
+                int(payload["documentId"]),
+                payload.get("evidence") or {},
+                actor=actor,
+            )
+
+        def archive_verified_drive_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return DriveWaveDeliveryService(ledger, config).archive_ready(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+                dry_run=bool(payload.get("dryRun", True)),
+            )
+
         return LocalHaiConnector(
             ledger,
             config,
@@ -4229,6 +4244,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     target_system=payload.get("targetSystem"),
                     actor=actor,
                 ),
+                "record_wave_attachment_verification": record_wave_attachment_command,
+                "archive_verified_drive_sources": archive_verified_drive_sources_command,
             },
         )
 
@@ -4271,6 +4288,41 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         else:
             status_code = 400
         return jsonify(result), status_code
+
+    @app.get("/api/drive-wave/status")
+    def drive_wave_status_api():
+        return jsonify(DriveWaveDeliveryService(ledger, config).status())
+
+    @app.get("/api/drive-wave/candidates")
+    def drive_wave_candidates_api():
+        return jsonify(
+            DriveWaveDeliveryService(ledger, config).list_candidates(limit=_limit_arg())
+        )
+
+    @app.get("/api/drive-wave/documents/<int:document_id>/archive-plan")
+    def drive_wave_archive_plan_api(document_id: int):
+        return jsonify(DriveWaveDeliveryService(ledger, config).plan_archive(document_id))
+
+    @app.post("/api/drive-wave/documents/<int:document_id>/attachment-evidence")
+    def drive_wave_attachment_evidence_api(document_id: int):
+        payload = request.get_json(silent=True) or {}
+        result = DriveWaveDeliveryService(ledger, config).record_attachment_evidence(
+            document_id,
+            payload.get("evidence") or payload,
+            actor=str(payload.get("actor") or "local_api"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.post("/api/drive-wave/documents/<int:document_id>/archive")
+    def drive_wave_archive_document_api(document_id: int):
+        payload = request.get_json(silent=True) or {}
+        if bool(payload.get("dryRun", False)):
+            return jsonify(DriveWaveDeliveryService(ledger, config).plan_archive(document_id))
+        result = DriveWaveDeliveryService(ledger, config).archive_document(
+            document_id,
+            actor=str(payload.get("actor") or "local_api"),
+        )
+        return jsonify(result), 200 if result.get("success") else 409
 
     @app.get("/api/workflows")
     def workflow_runs_api():

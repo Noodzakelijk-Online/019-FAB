@@ -15,6 +15,8 @@ DEFAULT_HAI_COMMAND_IDS = (
     "refresh_notifications",
     "run_due_reports",
     "assess_compliance",
+    "record_wave_attachment_verification",
+    "archive_verified_drive_sources",
 )
 
 
@@ -24,18 +26,22 @@ class HaiCommand:
     label: str
     description: str
     input_schema: Dict[str, Any]
+    mode: str = "safe_local_operation"
+    risk: str = "low"
+    requires_human_approval: bool = False
+    external_submission: str = "not_executed"
 
     def as_dict(self, allowed: bool) -> Dict[str, Any]:
         return {
             "commandId": self.command_id,
             "label": self.label,
             "description": self.description,
-            "mode": "safe_local_operation",
-            "risk": "low",
-            "requiresHumanApproval": False,
+            "mode": self.mode,
+            "risk": self.risk,
+            "requiresHumanApproval": self.requires_human_approval,
             "allowed": allowed,
             "inputSchema": self.input_schema,
-            "externalSubmission": "not_executed",
+            "externalSubmission": self.external_submission,
         }
 
 
@@ -137,6 +143,38 @@ HAI_COMMANDS = (
             },
         },
     ),
+    HaiCommand(
+        "record_wave_attachment_verification",
+        "Record Wave attachment verification",
+        "Record transaction and attachment readback evidence for one configured Drive source.",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["documentId", "evidence"],
+            "properties": {
+                "documentId": {"type": "integer", "minimum": 1},
+                "evidence": {"type": "object"},
+            },
+        },
+        mode="governed_evidence_recording",
+        risk="medium",
+    ),
+    HaiCommand(
+        "archive_verified_drive_sources",
+        "Archive verified Drive sources",
+        "Move only sources whose Wave transaction and exact attachment evidence pass every configured gate.",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                "dryRun": {"type": "boolean", "default": True},
+            },
+        },
+        mode="preauthorized_policy_gated_move",
+        risk="medium",
+        external_submission="policy_gated",
+    ),
 )
 
 
@@ -177,6 +215,7 @@ class LocalHaiConnector:
                 "submit_to_mijngeldzaken",
                 "restore_backups",
                 "change_access_control",
+                "delete_drive_sources",
             ],
             "externalSubmission": "not_executed",
         }
@@ -397,6 +436,8 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         "refresh_notifications": set(),
         "run_due_reports": set(),
         "assess_compliance": {"fromDate", "toDate", "targetSystem"},
+        "record_wave_attachment_verification": {"documentId", "evidence"},
+        "archive_verified_drive_sources": {"limit", "dryRun"},
     }[command_id]
     unexpected = sorted(set(payload) - allowed_fields)
     if unexpected:
@@ -416,6 +457,28 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         if not isinstance(payload["dryRun"], bool):
             raise ValueError("dryRun must be a boolean.")
         normalized["dryRun"] = payload["dryRun"]
+    if "documentId" in payload:
+        try:
+            document_id = int(payload["documentId"])
+        except (TypeError, ValueError):
+            raise ValueError("documentId must be a positive integer.")
+        if document_id < 1:
+            raise ValueError("documentId must be a positive integer.")
+        normalized["documentId"] = document_id
+    if "evidence" in payload:
+        evidence = payload["evidence"]
+        if not isinstance(evidence, dict):
+            raise ValueError("evidence must be an object.")
+        allowed_evidence = {
+            "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
+            "attachmentSha256", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
+            "attachmentPresent", "attachmentOpened", "transactionReviewed", "fieldMatches",
+            "verifiedAt", "verifier",
+        }
+        unexpected_evidence = sorted(set(evidence) - allowed_evidence)
+        if unexpected_evidence:
+            raise ValueError(f"Unsupported evidence field(s): {', '.join(unexpected_evidence)}")
+        normalized["evidence"] = dict(evidence)
     if "sources" in payload:
         sources = payload["sources"]
         if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):

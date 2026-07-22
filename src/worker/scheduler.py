@@ -8,6 +8,7 @@ from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_compliance import LocalComplianceService
 from src.operations.local_connector_intake import LocalConnectorIntakeService
+from src.operations.drive_wave_delivery import DriveWaveDeliveryService
 from src.operations.local_exports import LocalExportAttemptService
 from src.operations.local_notifications import LocalNotificationService
 from src.operations.local_reporting import LocalScheduledReportService
@@ -58,6 +59,9 @@ class FabWorker:
         self.assess_compliance = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_assess_compliance", True)
         )
+        self.archive_verified_drive_sources = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_archive_verified_drive_sources", True)
+        )
         self.process_legacy_postings = _as_bool(
             self.config.get("worker_process_legacy_postings", self.operations_ledger is None)
         )
@@ -89,6 +93,7 @@ class FabWorker:
                 ("compliance", self._assess_compliance),
                 ("notifications", self._refresh_notifications),
                 ("operations_exports", self._process_operations_exports),
+                ("drive_wave_archive", self._archive_verified_drive_sources),
                 ("legacy_queue", self._process_legacy_queue),
             )
             for stage, action in stages:
@@ -274,6 +279,19 @@ class FabWorker:
         )
         if not result.get("success"):
             raise RuntimeError(result.get("error") or "Scheduled report generation failed")
+
+    def _archive_verified_drive_sources(self) -> None:
+        if not self.archive_verified_drive_sources or not self.operations_ledger:
+            return
+        result = DriveWaveDeliveryService(self.operations_ledger, self.config).archive_ready(
+            limit=25,
+            actor="local_worker",
+        )
+        self._record_audit(
+            "drive_wave_archive_cycle",
+            result,
+            f"Verified Drive archive cycle ended as {result.get('status')}",
+        )
 
     def _refresh_notifications(self) -> None:
         if not self.refresh_notifications or not self.operations_ledger:
