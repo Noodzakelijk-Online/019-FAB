@@ -282,9 +282,16 @@ if (-not $webPid) {
     $webIdentityUrl = "http://127.0.0.1:$webPort/api/fab/runtime"
     $previousWebPort = $env:PORT
     $previousLocalApiUrl = $env:FAB_LOCAL_API_URL
+    $previousLocalApiToken = $env:FAB_LOCAL_API_TOKEN
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
+        if ($apiToken) {
+            $env:FAB_LOCAL_API_TOKEN = $apiToken
+        }
+        else {
+            Remove-Item Env:FAB_LOCAL_API_TOKEN -ErrorAction SilentlyContinue
+        }
         $webProcess = Start-Process -FilePath $pnpm.Source -ArgumentList @("--dir", $webRoot, "dev") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "web.out.log") -RedirectStandardError (Join-Path $logsRoot "web.err.log") -PassThru
         $webPid = $webProcess.Id
     }
@@ -300,6 +307,12 @@ if (-not $webPid) {
         }
         else {
             $env:FAB_LOCAL_API_URL = $previousLocalApiUrl
+        }
+        if ($null -eq $previousLocalApiToken) {
+            Remove-Item Env:FAB_LOCAL_API_TOKEN -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_LOCAL_API_TOKEN = $previousLocalApiToken
         }
     }
 }

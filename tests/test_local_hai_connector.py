@@ -18,6 +18,8 @@ class TestLocalHaiConnector(unittest.TestCase):
 
             self.assertEqual(manifest["status"], "prepared_disabled")
             self.assertEqual(manifest["sourceOfTruth"], "fab_local_ledger")
+            self.assertEqual(manifest["transport"], "loopback_local_http")
+            self.assertEqual(manifest["authentication"], "loopback_origin_controls")
             self.assertIn("submit_to_wave", manifest["excludedCapabilities"])
             self.assertFalse(result["success"])
             self.assertEqual(result["status"], "connector_disabled")
@@ -56,6 +58,17 @@ class TestLocalHaiConnector(unittest.TestCase):
                 )["details"]["commandId"],
                 "refresh_notifications",
             )
+
+    def test_manifest_reports_bearer_transport_when_api_token_is_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            connector = LocalHaiConnector(ledger, {"fab_local_api_token": "configured-secret"})
+
+            manifest = connector.manifest()
+
+            self.assertEqual(manifest["transport"], "authenticated_local_http")
+            self.assertEqual(manifest["authentication"], "bearer_token")
+            self.assertNotIn("configured-secret", str(manifest))
 
     def test_payload_validation_rejects_unknown_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -98,6 +111,7 @@ class TestLocalHaiConnector(unittest.TestCase):
 
             self.assertEqual(manifest.status_code, 200)
             self.assertEqual(len(manifest.get_json()["commands"]), 11)
+            self.assertEqual(manifest.get_json()["resources"][0]["resourceId"], "wave_attachment_work_orders")
             self.assertEqual(plan.status_code, 200)
             self.assertEqual(plan.get_json()["status"], "ready")
             self.assertEqual(executed.status_code, 200)

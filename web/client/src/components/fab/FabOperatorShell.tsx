@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   Menu,
   PlugZap,
+  SendToBack,
   RefreshCw,
   RotateCcw,
   Search,
@@ -23,6 +24,7 @@ const navigation = [
   { id: "automation", label: "Automation", labelNl: "Automatisering", icon: FileWarning },
   { id: "audit", label: "Activity", labelNl: "Activiteit", icon: History },
   { id: "recovery", label: "Recovery", labelNl: "Herstel", icon: RotateCcw },
+  { id: "delivery", label: "Delivery", labelNl: "Levering", icon: SendToBack },
   { id: "connections", label: "Connections", labelNl: "Koppelingen", icon: PlugZap },
 ];
 

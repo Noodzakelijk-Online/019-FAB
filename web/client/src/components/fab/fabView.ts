@@ -101,10 +101,10 @@ export function panelState(value: unknown, itemCount?: number): FabPanelState {
 
 export function statusTone(value: unknown): "good" | "warn" | "bad" | "neutral" | "info" {
   const status = text(value, "").toLowerCase();
-  if (["ready", "ok", "healthy", "completed", "connected", "reconciled", "idle"].includes(status)) return "good";
-  if (["blocked", "failed", "error", "disconnected", "high", "unavailable"].includes(status)) return "bad";
-  if (["attention", "needs_attention", "needs_auth", "needs_review", "medium", "due", "deferred", "prepared_disabled", "not_configured", "supervision_required"].includes(status)) return "warn";
-  if (["running", "syncing", "candidate", "pending"].includes(status)) return "info";
+  if (["ready", "ready_to_archive", "ok", "healthy", "completed", "connected", "reconciled", "idle"].includes(status)) return "good";
+  if (["blocked", "blocked_by_review", "source_file_unavailable", "failed", "error", "disconnected", "high", "unavailable"].includes(status)) return "bad";
+  if (["attention", "needs_attention", "needs_auth", "needs_authorization", "needs_processing", "needs_review", "refresh_wave_readback", "medium", "due", "deferred", "prepared_disabled", "not_configured", "supervision_required"].includes(status)) return "warn";
+  if (["running", "syncing", "candidate", "pending", "locate_or_create_transaction", "upload_and_verify_attachment"].includes(status)) return "info";
   return "neutral";
 }
 

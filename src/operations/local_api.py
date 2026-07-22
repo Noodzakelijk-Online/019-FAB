@@ -4301,6 +4301,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             DriveWaveDeliveryService(ledger, config).list_candidates(limit=_limit_arg())
         )
 
+    @app.get("/api/drive-wave/work-orders")
+    def drive_wave_work_orders_api():
+        return jsonify(
+            DriveWaveDeliveryService(ledger, config).list_work_orders(limit=_limit_arg())
+        )
+
+    @app.get("/api/drive-wave/documents/<int:document_id>/work-order")
+    def drive_wave_document_work_order_api(document_id: int):
+        result = DriveWaveDeliveryService(ledger, config).work_order(document_id)
+        return jsonify(result), 200 if result.get("success") else 404
+
     @app.get("/api/drive-wave/documents/<int:document_id>/archive-plan")
     def drive_wave_archive_plan_api(document_id: int):
         return jsonify(DriveWaveDeliveryService(ledger, config).plan_archive(document_id))

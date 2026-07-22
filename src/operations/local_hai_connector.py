@@ -191,6 +191,11 @@ class LocalHaiConnector:
         self.config = config or {}
         self.executors = executors or {}
         self.enabled = _bool_config(self.config.get("fab_hai_connector_enabled"), default=False)
+        self.api_token_configured = bool(
+            self.config.get("fab_local_api_token")
+            or self.config.get("fab_operations_api_token")
+            or self.config.get("operations_api_token")
+        )
         self.allowed_command_ids = _allowed_commands(self.config.get("fab_hai_allowed_commands"))
         self._commands = {command.command_id: command for command in HAI_COMMANDS}
 
@@ -200,13 +205,25 @@ class LocalHaiConnector:
             "version": HAI_CONNECTOR_VERSION,
             "enabled": self.enabled,
             "status": "ready" if self.enabled else "prepared_disabled",
-            "transport": "authenticated_local_http",
+            "transport": "authenticated_local_http" if self.api_token_configured else "loopback_local_http",
+            "authentication": "bearer_token" if self.api_token_configured else "loopback_origin_controls",
             "sourceOfTruth": "fab_local_ledger",
             "idempotencyField": "requestId",
             "executionPolicy": "explicit_allowlist",
             "commands": [
                 command.as_dict(command.command_id in self.allowed_command_ids)
                 for command in HAI_COMMANDS
+            ],
+            "resources": [
+                {
+                    "resourceId": "wave_attachment_work_orders",
+                    "label": "Wave attachment work orders",
+                    "description": "Evidence-bound Drive source, Wave field, attachment readback, and archive-gate handoff.",
+                    "method": "GET",
+                    "path": "/api/drive-wave/work-orders",
+                    "mode": "read_only_executor_handoff",
+                    "externalSubmission": "not_executed",
+                }
             ],
             "excludedCapabilities": [
                 "approve_review_items",
@@ -230,6 +247,7 @@ class LocalHaiConnector:
             "allowedCommandIds": sorted(self.allowed_command_ids),
             "availableExecutors": sorted(self.executors),
             "commandCount": len(manifest["commands"]),
+            "resourceCount": len(manifest["resources"]),
             "externalSubmission": "not_executed",
         }
 

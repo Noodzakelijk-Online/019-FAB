@@ -70,6 +70,12 @@ describe("FAB local API gateway", () => {
       "/api/close-readiness": { status: "blocked", canClose: false, blockingCount: 2 },
       "/api/hai/status": { status: "ready", enabled: true, allowedCommandIds: ["run_safe_cycle", "refresh_notifications"] },
       "/api/hai/manifest": { version: "fab-hai-connector-v1", commands: [] },
+      "/api/drive-wave/status": { status: "ready", archiveEnabled: true, driveTokenPresent: true },
+      "/api/drive-wave/work-orders": {
+        count: 1,
+        summary: { needsAttachmentVerification: 1, readyToArchive: 0 },
+        workOrders: [{ workOrderId: "drive-wave-7-abcd", documentId: 7, stage: "upload_and_verify_attachment" }],
+      },
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -91,10 +97,15 @@ describe("FAB local API gateway", () => {
         id: "hai",
         status: "ready",
         allowedCommandIds: ["run_safe_cycle", "refresh_notifications"],
-        details: "Governed machine control is enabled for 2 local-safe commands.",
+        details: "Governed machine control is enabled for 2 allowlisted commands.",
       }),
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
+    expect(result.delivery).toMatchObject({
+      count: 1,
+      summary: { needsAttachmentVerification: 1 },
+      workOrders: [expect.objectContaining({ documentId: 7 })],
+    });
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
 

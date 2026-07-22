@@ -124,6 +124,80 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         document = self.ledger.get_document(self.document_id)
         self.assertEqual(document["review_items"][0]["reason"], "drive_wave_archive_blocked")
 
+    def test_work_order_binds_source_wave_fields_and_evidence_contract(self):
+        record_id = self.ledger.upsert_bookkeeping_record({
+            "documentId": self.document_id,
+            "sourceType": "document",
+            "recordType": "expense",
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "targetAccount": "Office expenses",
+            "vendorName": "Example Vendor",
+            "category": "Office Supplies",
+            "recordDate": "2026-07-22",
+            "amount": 121.0,
+            "vatAmount": 21.0,
+            "currency": "EUR",
+            "description": "Printer paper",
+            "reviewRequired": False,
+            "exportStatus": "executed",
+        })
+        self.ledger.replace_bookkeeping_record_line_items(record_id, [{
+            "itemName": "Printer paper",
+            "quantity": 1,
+            "amount": 100.0,
+            "taxAmount": 21.0,
+            "taxRate": 21.0,
+            "accountName": "Office expenses",
+        }])
+        self.ledger.upsert_export_attempt({
+            "bookkeepingRecordId": record_id,
+            "documentId": self.document_id,
+            "targetSystem": "waveapps_business",
+            "actionId": "transaction_add",
+            "operationId": "wave-operation-1",
+            "status": "executed",
+            "externalSubmission": "executed",
+            "externalId": "wave-transaction-1",
+        })
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        result = service.list_work_orders(limit=10)
+        order = result["workOrders"][0]
+
+        self.assertEqual(result["workOrderVersion"], "fab-drive-wave-work-order-v1")
+        self.assertEqual(result["summary"]["needsAttachmentVerification"], 1)
+        self.assertEqual(order["stage"], "upload_and_verify_attachment")
+        self.assertEqual(order["source"]["fileId"], "drive-file-1")
+        self.assertEqual(order["source"]["sha256"], self.source_hash)
+        self.assertEqual(order["wave"]["businessId"], BUSINESS_ID)
+        self.assertEqual(order["wave"]["externalTransactionId"], "wave-transaction-1")
+        self.assertEqual(order["wave"]["expectedFields"]["amount"], 121.0)
+        self.assertEqual(order["wave"]["lineItems"][0]["item_name"], "Printer paper")
+        self.assertEqual(
+            order["evidence"]["submission"]["path"],
+            f"/api/drive-wave/documents/{self.document_id}/attachment-evidence",
+        )
+        self.assertEqual(order["evidence"]["template"]["sourceSha256"], self.source_hash)
+        self.assertFalse(order["evidence"]["template"]["attachmentPresent"])
+        self.assertNotIn("ocr_text", str(order))
+
+    def test_work_order_never_queues_a_missing_local_source_for_upload(self):
+        self.ledger.upsert_bookkeeping_record({
+            "documentId": self.document_id,
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "reviewRequired": False,
+        })
+        document = self.ledger.get_document(self.document_id)
+        os.remove(document["storage_path"])
+
+        result = DriveWaveDeliveryService(self.ledger, self.config).work_order(self.document_id)
+
+        self.assertEqual(result["stage"], "source_file_unavailable")
+        self.assertFalse(result["source"]["localAvailable"])
+        self.assertIn("Restore or re-download", result["actionRequired"])
+
     def test_mismatched_attachment_hash_is_rejected(self):
         service = DriveWaveDeliveryService(self.ledger, self.config)
         result = service.record_attachment_evidence(
@@ -234,6 +308,36 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertEqual(planned.status_code, 200)
         self.assertEqual(planned.get_json()["result"]["status"], "planned")
         self.assertEqual(planned.get_json()["result"]["ready"], 1)
+
+    def test_api_and_hai_manifest_expose_read_only_attachment_work_orders(self):
+        self.ledger.upsert_bookkeeping_record({
+            "documentId": self.document_id,
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "reviewRequired": False,
+        })
+        config = {
+            **self.config,
+            "fab_local_ledger_path": self.ledger.path,
+            "fab_hai_connector_enabled": True,
+        }
+        client = create_app(config).test_client()
+
+        listed = client.get("/api/drive-wave/work-orders?limit=10")
+        document_order = client.get(
+            f"/api/drive-wave/documents/{self.document_id}/work-order"
+        )
+        manifest = client.get("/api/hai/manifest")
+
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["count"], 1)
+        self.assertEqual(document_order.status_code, 200)
+        self.assertEqual(document_order.get_json()["documentId"], self.document_id)
+        self.assertEqual(manifest.status_code, 200)
+        resource = manifest.get_json()["resources"][0]
+        self.assertEqual(resource["resourceId"], "wave_attachment_work_orders")
+        self.assertEqual(resource["path"], "/api/drive-wave/work-orders")
+        self.assertEqual(resource["externalSubmission"], "not_executed")
 
 
 if __name__ == "__main__":

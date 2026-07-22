@@ -261,17 +261,24 @@ For manual startup or development:
    **Detailed ledger** opens the complete local document, review,
    reconciliation, reporting, backup, and approval interface.
 
-Set `FAB_LOCAL_API_TOKEN` in `web/.env` to the same value as
-`operations.api_token` in `config/config.ini` when API authentication is
-enabled. The token is used only by the web server and is never sent to the
+`Start-FAB.cmd` passes `operations.api_token` to the dashboard server without
+printing it. For manual startup, set `FAB_LOCAL_API_TOKEN` in `web/.env` to the
+same value. The token is used only by the web server and is never sent to the
 browser. Local operator access accepts direct loopback requests in development;
 deployed environments require an authenticated administrator unless
 `FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
 
 The HAI connector publishes discovery at `/api/hai/manifest` and status at
 `/api/hai/status`. The default local configuration enables the bounded
-safe-command allowlist used by the dashboard. HAI cannot approve, export,
+governed-command allowlist used by the dashboard. HAI cannot approve, export,
 restore, change access controls, or submit downstream bookkeeping changes.
+
+Drive-to-Wave executor handoff is available at
+`GET /api/drive-wave/work-orders` and is advertised by the HAI manifest as the
+read-only resource `wave_attachment_work_orders`. Each work order binds one Drive provider
+file ID and SHA-256 to FAB's expected Wave fields, line items, transaction
+reference, required attachment readback evidence, and the current move-only
+archive gate. The dashboard exposes the same state in **Drive to Wave delivery**.
 
 ### Running the Workflow Locally
 To run the main automated bookkeeping workflow:

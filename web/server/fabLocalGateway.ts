@@ -47,6 +47,12 @@ export type FabControlCenter = {
   health: JsonRecord;
   autonomy: JsonRecord;
   closeReadiness: JsonRecord;
+  delivery: {
+    status: JsonRecord;
+    summary: JsonRecord;
+    workOrders: JsonRecord[];
+    count: number | null;
+  };
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -81,6 +87,8 @@ const READ_PATHS = {
   closeReadiness: "/api/close-readiness",
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
+  driveWaveStatus: "/api/drive-wave/status",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
@@ -238,6 +246,12 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     health: resources.health || {},
     autonomy: resources.autonomy || {},
     closeReadiness: resources.closeReadiness || {},
+    delivery: {
+      status: resources.driveWaveStatus || {},
+      summary: asRecord(resources.driveWaveWorkOrders?.summary) || {},
+      workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders),
+      count: nullableNumber(resources.driveWaveWorkOrders?.count),
+    },
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -249,7 +263,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
         configured: Boolean(resources.haiStatus?.enabled),
         ready: resources.haiStatus?.status === "ready",
         details: resources.haiStatus?.status === "ready"
-          ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} local-safe commands.`
+          ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} allowlisted commands.`
           : "Governed machine-control contract for safe local FAB commands.",
         allowedCommandIds: haiAllowedCommandIds,
       },
@@ -325,6 +339,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     health: {},
     autonomy: {},
     closeReadiness: {},
+    delivery: { status: {}, summary: {}, workOrders: [], count: null },
     exceptions: [],
     exceptionSummary: {},
     connections: [],

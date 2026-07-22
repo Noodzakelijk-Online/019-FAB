@@ -115,7 +115,7 @@ export function FabCommandDrawer({ open, connected, pendingCommand, commandStart
             </section>
           ))}
         </div>
-        <div className="fab-hai-note"><Bot aria-hidden="true" /><span><strong>{copy("HAI-ready contract", "HAI-gereed contract")}</strong>{copy("The same allowlisted command catalog is available through the disabled-by-default HAI connector.", "Dezelfde toegestane opdrachtencatalogus is beschikbaar via de standaard uitgeschakelde HAI-koppeling.")}</span></div>
+        <div className="fab-hai-note"><Bot aria-hidden="true" /><span><strong>{copy("HAI-ready contract", "HAI-gereed contract")}</strong>{copy("The same governed command catalog is exposed through the local HAI connector with explicit allowlisting and idempotent request IDs.", "Dezelfde beheerde opdrachtencatalogus is beschikbaar via de lokale HAI-koppeling met expliciete toestemming en idempotente aanvraag-ID's.")}</span></div>
       </aside>
     </div>,
     document.body,

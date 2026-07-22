@@ -5,6 +5,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { FabCommandDrawer } from "@/components/fab/FabCommandDrawer";
 import { FabConnections } from "@/components/fab/FabConnections";
 import { FabControlOverview } from "@/components/fab/FabControlOverview";
+import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
 import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
 import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
 import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
@@ -178,6 +179,12 @@ export default function AdminOperations() {
             recoveryResource={data?.resourceStates.recovery}
             activityResource={data?.resourceStates.activity}
             workflowResource={data?.resourceStates.workflows}
+            search={search}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+          />
+          <FabDeliveryQueue
+            delivery={data?.delivery || { status: {}, summary: {}, workOrders: [], count: null }}
+            resource={data?.resourceStates.driveWaveWorkOrders}
             search={search}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
           />

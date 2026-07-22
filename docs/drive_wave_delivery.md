@@ -62,8 +62,11 @@ folder, and leaves unattended interactive authorization disabled.
 
 ## HAI contract
 
-The HAI manifest exposes two bounded commands:
+The HAI manifest advertises one read-only resource and two bounded commands:
 
+- `wave_attachment_work_orders` returns the exact local source path,
+  provider file ID, source hash, expected Wave fields and line items, evidence
+  template, and current archive blockers without changing either system.
 - `record_wave_attachment_verification` records readback evidence only.
 - `archive_verified_drive_sources` defaults to a dry run and can move only
   documents that already satisfy every policy gate.
@@ -71,3 +74,8 @@ The HAI manifest exposes two bounded commands:
 Neither command can delete a source file or bypass unresolved reviews.
 Successful fresh evidence resolves only an earlier `drive_wave_archive_blocked`
 review; unrelated review items continue to block archival.
+
+The operator dashboard reads the same work-order endpoint. An empty queue is
+not represented as completed delivery when Drive authorization is missing; the
+connector state remains `needs_authorization` until the configured folder can
+be read with the persisted token.
