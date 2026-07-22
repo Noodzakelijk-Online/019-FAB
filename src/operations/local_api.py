@@ -6637,11 +6637,27 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/review")
     def review_queue():
+        requested_status = str(request.args.get("status") or "").strip().lower()
+        status_filter: Any = requested_status or None
+        if requested_status == "open":
+            status_filter = ("pending", "in_review")
+        review_items = ledger.list_review_items(
+            status=status_filter,
+            limit=_limit_arg(),
+        )
+        work_items = _review_work_items(ledger, review_items)
         return jsonify({
-            "reviewItems": ledger.list_review_items(
-                status=request.args.get("status"),
-                limit=_limit_arg(),
-            )
+            "reviewItems": review_items,
+            "workItems": work_items,
+            "categoryOptions": _review_category_options(ledger, config),
+            "summary": {
+                "reviewItems": len(review_items),
+                "documents": len([item for item in work_items if item.get("documentId")]),
+                "duplicateCandidates": len([
+                    item for item in work_items
+                    if "duplicate_candidate" in (item.get("reasons") or [])
+                ]),
+            },
         })
 
     @app.post("/api/review/<int:review_item_id>/resolve")
@@ -6658,7 +6674,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             corrections=payload.get("corrections") or _corrections_from_mapping(payload),
             learn_rule=bool(payload.get("learnRule", True)),
         )
-        status_code = 404 if result.get("status") == "not_found" else 200
+        status_code = {
+            "not_found": 404,
+            "already_resolved": 409,
+        }.get(result.get("status"), 200)
         return jsonify(result), status_code
 
     @app.post("/review/<int:review_item_id>/resolve")
@@ -7170,6 +7189,124 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> list:
+    grouped: Dict[str, list] = {}
+    for item in review_items:
+        document_id = item.get("document_id")
+        key = f"document:{document_id}" if document_id is not None else f"review:{item.get('id')}"
+        grouped.setdefault(key, []).append(item)
+
+    work_items = []
+    for group in grouped.values():
+        group = sorted(group, key=lambda item: int(item.get("id") or 0), reverse=True)
+        document_id = group[0].get("document_id")
+        document = ledger.get_document(int(document_id)) if document_id is not None else None
+        compact_document = _compact_review_document(document) if document else None
+        duplicate_candidates = []
+        for candidate in (document or {}).get("duplicate_candidates") or []:
+            if candidate.get("status") not in {"pending", "in_review"}:
+                continue
+            other_id = candidate.get("candidate_document_id")
+            if int(candidate.get("document_id") or 0) != int(document_id or 0):
+                other_id = candidate.get("document_id")
+            other_document = ledger.get_document(int(other_id)) if other_id is not None else None
+            duplicate_candidates.append({
+                "id": candidate.get("id"),
+                "candidateDocumentId": other_id,
+                "matchType": candidate.get("match_type"),
+                "confidenceScore": candidate.get("confidence_score"),
+                "reason": candidate.get("reason"),
+                "evidence": candidate.get("evidence") or {},
+                "document": _compact_review_document(other_document) if other_document else None,
+            })
+        work_items.append({
+            "id": f"document-{document_id}" if document_id is not None else f"review-{group[0].get('id')}",
+            "documentId": document_id,
+            "status": "in_review" if any(item.get("status") == "in_review" for item in group) else "pending",
+            "reasons": list(dict.fromkeys(str(item.get("reason") or "manual_review") for item in group)),
+            "reviewItems": [
+                {
+                    "id": item.get("id"),
+                    "reason": item.get("reason"),
+                    "details": item.get("details"),
+                    "status": item.get("status"),
+                    "correctedData": item.get("corrected_data") or {},
+                    "createdAt": item.get("created_at"),
+                    "updatedAt": item.get("updated_at"),
+                }
+                for item in group
+            ],
+            "document": compact_document,
+            "duplicateCandidates": duplicate_candidates,
+            "reviewPath": f"/documents/{document_id}" if document_id is not None else "/#review",
+        })
+    return sorted(
+        work_items,
+        key=lambda item: max(
+            [int(review.get("id") or 0) for review in item.get("reviewItems") or []] or [0]
+        ),
+        reverse=True,
+    )
+
+
+def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not document:
+        return None
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    provider = metadata.get("providerMetadata") if isinstance(metadata.get("providerMetadata"), dict) else {}
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    ocr_text = str(document.get("ocr_text") or "").strip()
+    target_system = str(metadata.get("targetSystem") or metadata.get("target_system") or "waveapps_business")
+    return {
+        "id": document.get("id"),
+        "filename": document.get("original_filename"),
+        "mimeType": document.get("mime_type"),
+        "source": document.get("source"),
+        "sourceDocumentId": document.get("source_document_id"),
+        "sourceUrl": provider.get("web_view_link"),
+        "processingStatus": document.get("processing_status"),
+        "vendorName": document.get("vendor_name"),
+        "transactionDate": document.get("transaction_date"),
+        "totalAmount": document.get("total_amount"),
+        "vatAmount": document.get("vat_amount"),
+        "currency": extracted.get("currency") or "EUR",
+        "category": document.get("category"),
+        "targetSystem": target_system,
+        "invoiceNumber": extracted.get("invoice_number"),
+        "receiptNumber": extracted.get("receipt_number"),
+        "confidenceScore": document.get("confidence_score"),
+        "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
+        "ocrExcerpt": ocr_text[:1200],
+    }
+
+
+def _review_category_options(ledger: LocalOperationsLedger, config: Dict[str, Any]) -> list:
+    categories = set()
+    for rule in ledger.list_vendor_category_rules(limit=500):
+        category = str(rule.get("category") or "").strip()
+        if category and category.lower() not in {"manual review", "uncategorized"}:
+            categories.add(category)
+    for document in ledger.list_documents(limit=500):
+        category = str(document.get("category") or "").strip()
+        if category and category.lower() not in {"manual review", "uncategorized"}:
+            categories.add(category)
+    for key in (
+        "waveapps_business_category_mapping",
+        "waveapps_business_category_account_ids",
+        "waveapps_personal_category_mapping",
+        "waveapps_personal_category_account_ids",
+    ):
+        value = _config_value(config, key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = {}
+        if isinstance(value, dict):
+            categories.update(str(category).strip() for category in value if str(category).strip())
+    return sorted(categories, key=str.casefold)
 
 
 def _corrections_from_mapping(values: Any) -> Dict[str, Any]:

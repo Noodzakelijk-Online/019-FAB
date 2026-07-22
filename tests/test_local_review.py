@@ -102,10 +102,60 @@ class TestLocalReviewService(unittest.TestCase):
             self.assertEqual(result["duplicateCandidatesResolved"], 1)
             document = ledger.get_document(duplicate_id)
             self.assertIsNone(document["duplicate_of_document_id"])
-            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertEqual(document["processing_status"], "reviewed")
             self.assertEqual(document["review_items"][0]["status"], "rejected")
             self.assertEqual(document["duplicate_candidates"][0]["status"], "rejected")
             self.assertEqual(ledger.dashboard_metrics()["documents"], 2)
+
+    def test_category_correction_resolves_satisfied_gates_but_preserves_duplicate_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "local_folder",
+                "sourceDocumentId": "doc-multi-gate",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "needs_review",
+                "vendorName": "Office Shop",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+            })
+            category_review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Choose a category.",
+            })
+            low_confidence_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "low_confidence_categorization",
+                "details": "Confirm category.",
+            })
+            validation_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Confirm extracted values.",
+            })
+            duplicate_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "duplicate_candidate",
+                "details": "Confirm duplicate decision.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                category_review_id,
+                status="approved",
+                resolution="Confirmed extracted details and category.",
+                corrections={"category": "Operations | Office Supplies"},
+            )
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["processingStatus"], "needs_review")
+            self.assertCountEqual(result["supersededReviewItemIds"], [low_confidence_id, validation_id])
+            open_reviews = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            self.assertEqual([item["id"] for item in open_reviews], [duplicate_id])
 
     def test_reconciliation_candidate_review_approval_reconciles_linked_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

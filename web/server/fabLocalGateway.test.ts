@@ -4,6 +4,7 @@ import {
   getFabControlCenter,
   getFabLocalApiBaseUrl,
   resetFabControlCenterCacheForTests,
+  resolveFabReviewItem,
   runFabOperatorCommand,
   uploadFabIntakeFile,
 } from "./fabLocalGateway";
@@ -76,6 +77,11 @@ describe("FAB local API gateway", () => {
         summary: { needsAttachmentVerification: 1, readyToArchive: 0 },
         workOrders: [{ workOrderId: "drive-wave-7-abcd", documentId: 7, stage: "upload_and_verify_attachment" }],
       },
+      "/api/review": {
+        summary: { reviewItems: 2, documents: 1, duplicateCandidates: 0 },
+        categoryOptions: ["Operations | Office Supplies"],
+        workItems: [{ id: "document-7", documentId: 7, reasons: ["manual_review_category"] }],
+      },
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -89,7 +95,7 @@ describe("FAB local API gateway", () => {
     const result = await getFabControlCenter();
 
     expect(result.connection.connected).toBe(true);
-    expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, unreconciled: 5, exceptions: 2 });
+    expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, pendingReviewDocuments: 1, unreconciled: 5, exceptions: 2 });
     expect(result.resourceStates.metrics.state).toBe("live");
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
@@ -106,6 +112,11 @@ describe("FAB local API gateway", () => {
       summary: { needsAttachmentVerification: 1 },
       workOrders: [expect.objectContaining({ documentId: 7 })],
     });
+    expect(result.reviews).toMatchObject({
+      summary: { reviewItems: 2, documents: 1 },
+      categoryOptions: ["Operations | Office Supplies"],
+      workItems: [expect.objectContaining({ documentId: 7 })],
+    });
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
 
@@ -120,6 +131,7 @@ describe("FAB local API gateway", () => {
     expect(result.metrics).toMatchObject({
       documents: null,
       pendingReview: null,
+      pendingReviewDocuments: null,
       unreconciled: null,
       exceptions: null,
     });
@@ -204,6 +216,40 @@ describe("FAB local API gateway", () => {
       status: "registered",
       path: "/api/intake/upload",
       body: { filename: "receipt.pdf", mimeType: "application/pdf" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves a review only through its fixed local API record path", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveFabReviewItem({
+      reviewItemId: 42,
+      status: "approved",
+      resolution: "Verified against the source receipt.",
+      corrections: {
+        category: "Operations | Office Supplies",
+        totalAmount: 42.5,
+      },
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      path: "/api/review/42/resolve",
+      body: {
+        status: "approved",
+        resolution: "Verified against the source receipt.",
+        corrections: { category: "Operations | Office Supplies", totalAmount: 42.5 },
+        learnRule: true,
+      },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

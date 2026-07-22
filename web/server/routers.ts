@@ -89,6 +89,7 @@ import {
 import {
   FAB_OPERATOR_COMMAND_IDS,
   getFabControlCenter,
+  resolveFabReviewItem,
   runFabOperatorCommand,
   uploadFabIntakeFile,
 } from "./fabLocalGateway";
@@ -439,6 +440,23 @@ export const appRouter = router({
         contentBase64: z.string().min(4).max(8_500_000),
       }).strict())
       .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    resolveReview: fabOperatorProcedure
+      .input(z.object({
+        reviewItemId: z.number().int().positive(),
+        status: z.enum(["approved", "rejected", "resolved", "ignored"]),
+        resolution: z.string().trim().min(3).max(1000),
+        corrections: z.object({
+          vendorName: z.string().trim().min(1).max(255).optional(),
+          category: z.string().trim().min(1).max(255).optional(),
+          transactionDate: z.iso.date().optional(),
+          totalAmount: z.number().finite().nonnegative().optional(),
+          vatAmount: z.number().finite().nonnegative().optional(),
+          targetSystem: z.enum(["waveapps_business", "waveapps_personal", "mijngeldzaken"]).optional(),
+          duplicateOfDocumentId: z.number().int().positive().optional(),
+        }).strict().optional(),
+        learnRule: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input }) => resolveFabReviewItem(input)),
     runCommand: fabOperatorProcedure
       .input(z.object({
         commandId: z.enum(FAB_OPERATOR_COMMAND_IDS),

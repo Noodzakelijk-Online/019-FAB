@@ -18,6 +18,7 @@ import { bool, count, exactDateTime, statusTone, text, type FabCommandId, type F
 type NullableMetrics = {
   documents: number | null;
   pendingReview: number | null;
+  pendingReviewDocuments: number | null;
   unreconciled: number | null;
   unreconciledDocuments: number | null;
   unreconciledBankTransactions: number | null;
@@ -72,8 +73,9 @@ export function FabControlOverview({
   const closeStatus = text(closeReadiness.status, "unavailable");
   const canRun = bool(autonomy.canRunAutonomously);
   const pendingReview = metrics.pendingReview;
-  const primary = pendingReview !== null && pendingReview > 0
-    ? { label: lang === "nl" ? `Controleer ${pendingReview} item${pendingReview === 1 ? "" : "s"}` : `Review ${pendingReview} item${pendingReview === 1 ? "" : "s"}`, action: () => document.getElementById("exceptions")?.scrollIntoView({ behavior: "smooth" }) }
+  const pendingReviewDocuments = metrics.pendingReviewDocuments;
+  const primary = pendingReviewDocuments !== null && pendingReviewDocuments > 0
+    ? { label: lang === "nl" ? `Controleer ${pendingReviewDocuments} document${pendingReviewDocuments === 1 ? "" : "en"}` : `Review ${pendingReviewDocuments} document${pendingReviewDocuments === 1 ? "" : "s"}`, action: () => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth" }) }
     : canRun
       ? { label: pendingCommand === "run_safe_cycle" ? copy("Cycle running...", "Cyclus wordt uitgevoerd...") : copy("Run safe cycle", "Veilige cyclus uitvoeren"), action: () => onCommand("run_safe_cycle") }
       : { label: copy("Inspect automation gates", "Automatiseringspoorten bekijken"), action: () => document.getElementById("automation")?.scrollIntoView({ behavior: "smooth" }) };
@@ -97,10 +99,12 @@ export function FabControlOverview({
     },
     {
       label: copy("Review backlog", "Controleachterstand"),
-      value: metric(metrics.pendingReview, lang),
-      detail: metrics.exceptions === null ? copy("Exception count unavailable", "Aantal uitzonderingen niet beschikbaar") : `${metrics.exceptions} ${copy("operating exceptions", "operationele uitzonderingen")}`,
+      value: metric(pendingReviewDocuments, lang),
+      detail: pendingReview === null
+        ? copy("Decision count unavailable", "Aantal beslissingen niet beschikbaar")
+        : `${pendingReview} ${copy(pendingReview === 1 ? "open decision" : "open decisions", pendingReview === 1 ? "open beslissing" : "open beslissingen")}`,
       icon: FileSearch,
-      tone: metrics.pendingReview !== null && metrics.pendingReview > 0 ? "warn" as const : "good" as const,
+      tone: pendingReviewDocuments !== null && pendingReviewDocuments > 0 ? "warn" as const : "good" as const,
       resource: metricResource,
     },
     {

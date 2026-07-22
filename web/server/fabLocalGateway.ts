@@ -38,6 +38,7 @@ export type FabControlCenter = {
   metrics: {
     documents: number | null;
     pendingReview: number | null;
+    pendingReviewDocuments: number | null;
     unreconciled: number | null;
     unreconciledDocuments: number | null;
     unreconciledBankTransactions: number | null;
@@ -52,6 +53,11 @@ export type FabControlCenter = {
     summary: JsonRecord;
     workOrders: JsonRecord[];
     count: number | null;
+  };
+  reviews: {
+    workItems: JsonRecord[];
+    categoryOptions: string[];
+    summary: JsonRecord;
   };
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
@@ -89,6 +95,7 @@ const READ_PATHS = {
   haiManifest: "/api/hai/manifest",
   driveWaveStatus: "/api/drive-wave/status",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
+  reviewQueue: "/api/review?status=open&limit=100",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
@@ -202,6 +209,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const connected = resourceStates.health.state === "live";
 
   const metrics = resources.metrics || {};
+  const reviewSummary = asRecord(resources.reviewQueue?.summary) || {};
   const exceptionsPayload = resources.exceptions || {};
   const settings = resources.settings || {};
   const sourceReadiness = resources.sourceReadiness || {};
@@ -237,6 +245,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     metrics: {
       documents: nullableNumber(metrics.documents),
       pendingReview: nullableNumber(metrics.pending_review),
+      pendingReviewDocuments: nullableNumber(reviewSummary.documents),
       unreconciled: sumNullable(metrics.unreconciled_bank_transactions, metrics.unreconciled_documents),
       unreconciledDocuments: nullableNumber(metrics.unreconciled_documents),
       unreconciledBankTransactions: nullableNumber(metrics.unreconciled_bank_transactions),
@@ -251,6 +260,11 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       summary: asRecord(resources.driveWaveWorkOrders?.summary) || {},
       workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders),
       count: nullableNumber(resources.driveWaveWorkOrders?.count),
+    },
+    reviews: {
+      workItems: arrayValue(resources.reviewQueue?.workItems),
+      categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
+      summary: asRecord(resources.reviewQueue?.summary) || {},
     },
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
@@ -310,6 +324,32 @@ export async function uploadFabIntakeFile(input: {
   }, { timeoutMs: 20_000 });
 }
 
+export async function resolveFabReviewItem(input: {
+  reviewItemId: number;
+  status: "approved" | "rejected" | "resolved" | "ignored";
+  resolution: string;
+  corrections?: {
+    vendorName?: string;
+    category?: string;
+    transactionDate?: string;
+    totalAmount?: number;
+    vatAmount?: number;
+    targetSystem?: string;
+    duplicateOfDocumentId?: number;
+  };
+  learnRule?: boolean;
+}): Promise<JsonRecord> {
+  return fabLocalRequest(`/api/review/${input.reviewItemId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({
+      status: input.status,
+      resolution: input.resolution,
+      corrections: input.corrections || {},
+      learnRule: input.learnRule ?? true,
+    }),
+  });
+}
+
 function disconnectedControlCenter(endpoint: string, checkedAt: string, error: string): FabControlCenter {
   const resourceStates = Object.fromEntries(
     (Object.keys(READ_PATHS) as FabResourceKey[]).map((resource) => [
@@ -330,6 +370,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     metrics: {
       documents: null,
       pendingReview: null,
+      pendingReviewDocuments: null,
       unreconciled: null,
       unreconciledDocuments: null,
       unreconciledBankTransactions: null,
@@ -340,6 +381,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     autonomy: {},
     closeReadiness: {},
     delivery: { status: {}, summary: {}, workOrders: [], count: null },
+    reviews: { workItems: [], categoryOptions: [], summary: {} },
     exceptions: [],
     exceptionSummary: {},
     connections: [],

@@ -854,6 +854,7 @@ class LocalOperationsLedger:
             self._ensure_export_attempt_schema(connection)
             self._ensure_wave_operation_snapshot_schema(connection)
             self._ensure_wave_entity_mirror_schema(connection)
+            self._ensure_review_item_schema(connection)
 
     def acquire_runtime_lease(
         self,
@@ -1243,19 +1244,74 @@ class LocalOperationsLedger:
 
     def create_review_item(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         now = self._now()
-        return self._insert(
-            "review_items",
-            {
-                "id": preferred_id,
-                "document_id": payload.get("documentId"),
-                "reason": payload.get("reason", "manual_review"),
-                "details": payload.get("details"),
-                "status": payload.get("status", "pending"),
-                "corrected_data_json": self._json(payload.get("correctedData")),
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
+        document_id = self._optional_int(payload.get("documentId"))
+        reason = str(payload.get("reason") or "manual_review").strip() or "manual_review"
+        status = str(payload.get("status") or "pending").strip() or "pending"
+        with self._connection() as connection:
+            def refresh_existing(row: sqlite3.Row) -> int:
+                corrected_data = self._json_load(row["corrected_data_json"]) or {}
+                if not isinstance(corrected_data, dict):
+                    corrected_data = {}
+                incoming = payload.get("correctedData")
+                if isinstance(incoming, dict):
+                    corrected_data.update(incoming)
+                existing_id = int(row["id"])
+                self._update_with_connection(
+                    connection,
+                    "review_items",
+                    existing_id,
+                    {
+                        "details": payload.get("details"),
+                        "corrected_data_json": self._json(corrected_data) if corrected_data else None,
+                        "updated_at": now,
+                    },
+                )
+                return existing_id
+
+            if document_id is not None and status in {"pending", "in_review"}:
+                existing = connection.execute(
+                    """
+                    SELECT id, corrected_data_json FROM review_items
+                    WHERE document_id = ? AND reason = ?
+                      AND status IN ('pending', 'in_review')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (document_id, reason),
+                ).fetchone()
+                if existing:
+                    return refresh_existing(existing)
+            try:
+                return self._insert_with_connection(
+                    connection,
+                    "review_items",
+                    {
+                        "id": preferred_id,
+                        "document_id": document_id,
+                        "reason": reason,
+                        "details": payload.get("details"),
+                        "status": status,
+                        "corrected_data_json": self._json(payload.get("correctedData")),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            except sqlite3.IntegrityError:
+                if document_id is None or status not in {"pending", "in_review"}:
+                    raise
+                existing = connection.execute(
+                    """
+                    SELECT id, corrected_data_json FROM review_items
+                    WHERE document_id = ? AND reason = ?
+                      AND status IN ('pending', 'in_review')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (document_id, reason),
+                ).fetchone()
+                if not existing:
+                    raise
+                return refresh_existing(existing)
 
     def record_duplicate_candidate(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         document_id = self._optional_int(payload.get("documentId") or payload.get("document_id"))
@@ -4457,6 +4513,73 @@ class LocalOperationsLedger:
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _ensure_review_item_schema(self, connection: sqlite3.Connection) -> None:
+        duplicate_groups = connection.execute(
+            """
+            SELECT document_id, reason, MAX(id) AS keep_id, COUNT(*) AS item_count
+            FROM review_items
+            WHERE document_id IS NOT NULL
+              AND status IN ('pending', 'in_review')
+            GROUP BY document_id, reason
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for group in duplicate_groups:
+            superseded_rows = connection.execute(
+                """
+                SELECT id, corrected_data_json
+                FROM review_items
+                WHERE document_id = ? AND reason = ?
+                  AND status IN ('pending', 'in_review') AND id != ?
+                ORDER BY id ASC
+                """,
+                (group["document_id"], group["reason"], group["keep_id"]),
+            ).fetchall()
+            superseded_ids = []
+            for row in superseded_rows:
+                corrected_data = self._json_load(row["corrected_data_json"]) or {}
+                if not isinstance(corrected_data, dict):
+                    corrected_data = {"previousCorrectedData": corrected_data}
+                corrected_data.update({
+                    "resolution": "Superseded by the newest equivalent open review item.",
+                    "supersededByReviewItemId": int(group["keep_id"]),
+                })
+                connection.execute(
+                    """
+                    UPDATE review_items
+                    SET status = 'resolved', corrected_data_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (self._json(corrected_data), self._now(), row["id"]),
+                )
+                superseded_ids.append(int(row["id"]))
+            if superseded_ids:
+                connection.execute(
+                    """
+                    INSERT INTO audit_events
+                      (action, entity_type, entity_id, details_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "local_ledger.open_reviews_deduplicated",
+                        "bookkeeping_document",
+                        str(group["document_id"]),
+                        self._json({
+                            "reason": group["reason"],
+                            "keptReviewItemId": int(group["keep_id"]),
+                            "supersededReviewItemIds": superseded_ids,
+                        }),
+                        self._now(),
+                    ),
+                )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_local_review_open_document_reason
+            ON review_items(document_id, reason)
+            WHERE document_id IS NOT NULL AND status IN ('pending', 'in_review')
+            """
+        )
 
     def _ensure_export_attempt_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(

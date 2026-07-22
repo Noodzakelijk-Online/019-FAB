@@ -464,7 +464,7 @@ class LocalDocumentProcessor:
         corrected_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         document_id = int(document["id"])
-        for item in document.get("review_items") or []:
+        for item in self.ledger.list_review_items(document_id=document_id, limit=100):
             if item.get("reason") == reason and item.get("status") in {"pending", "in_review"}:
                 return
         review_data = {

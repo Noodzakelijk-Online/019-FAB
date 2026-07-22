@@ -11,6 +11,7 @@ import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
 import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
+import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
 import { humanize, text } from "@/components/fab/fabView";
 import { useFabLocale } from "@/components/fab/fabLocale";
@@ -65,6 +66,7 @@ export default function AdminOperations() {
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
+  const resolveReview = trpc.fab.resolveReview.useMutation();
 
   const executeCommand = useCallback((commandId: FabCommandId, payload: FabRecord = {}) => {
     if (!controlCenter.data?.connection.connected || pendingCommand) return;
@@ -87,6 +89,18 @@ export default function AdminOperations() {
     await controlCenter.refetch();
     executeCommand("process_imported");
   }, [controlCenter, executeCommand]);
+
+  const resolveReviewItem = useCallback(async (input: FabReviewResolution) => {
+    try {
+      const result = await resolveReview.mutateAsync(input);
+      toast.success(`${copy("Review updated", "Controle bijgewerkt")}: ${humanize(text(result.processingStatus, text(result.status)))}`);
+      await controlCenter.refetch();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : copy("Review update failed", "Bijwerken van controle mislukt");
+      toast.error(message);
+      throw error;
+    }
+  }, [controlCenter, copy, resolveReview]);
 
   const operatorLabel = user?.name || user?.email || operatorAccess.data?.operatorLabel || "Operator";
   const data = controlCenter.data;
@@ -134,7 +148,7 @@ export default function AdminOperations() {
           )}
           <FabControlOverview
             connected={connected}
-            metrics={data?.metrics || { documents: null, pendingReview: null, unreconciled: null, unreconciledDocuments: null, unreconciledBankTransactions: null, exceptions: null, failedDocuments: null }}
+            metrics={data?.metrics || { documents: null, pendingReview: null, pendingReviewDocuments: null, unreconciled: null, unreconciledDocuments: null, unreconciledBankTransactions: null, exceptions: null, failedDocuments: null }}
             health={data?.health || {}}
             autonomy={data?.autonomy || {}}
             closeReadiness={data?.closeReadiness || {}}
@@ -151,6 +165,16 @@ export default function AdminOperations() {
             onCommand={executeCommand}
             onOpenIntake={() => setIntakeDrawerOpen(true)}
             onOpenCommands={() => setCommandDrawerOpen(true)}
+          />
+          <FabReviewWorkspace
+            workItems={data?.reviews.workItems || []}
+            categoryOptions={data?.reviews.categoryOptions || []}
+            summary={data?.reviews.summary || {}}
+            resource={data?.resourceStates.reviewQueue}
+            search={search}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
+            onResolve={resolveReviewItem}
           />
           <div className="fab-priority-grid">
             <FabExceptionsPanel

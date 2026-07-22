@@ -298,7 +298,13 @@ class TestLocalOperationsApi(unittest.TestCase):
 
             review = client.get("/api/review?status=pending")
             self.assertEqual(review.status_code, 200)
-            self.assertEqual(review.get_json()["reviewItems"][0]["reason"], "low_confidence")
+            review_payload = review.get_json()
+            self.assertEqual(review_payload["reviewItems"][0]["reason"], "low_confidence")
+            self.assertEqual(review_payload["summary"]["documents"], 1)
+            self.assertEqual(review_payload["summary"]["duplicateCandidates"], 0)
+            self.assertEqual(review_payload["workItems"][0]["documentId"], document_id)
+            self.assertEqual(review_payload["workItems"][0]["document"]["vendorName"], "Vendor")
+            self.assertEqual(review_payload["workItems"][0]["reviewItems"][0]["id"], review_id)
 
             resolved = client.post(
                 f"/api/review/{review_id}/resolve",
@@ -306,6 +312,13 @@ class TestLocalOperationsApi(unittest.TestCase):
             )
             self.assertEqual(resolved.status_code, 200)
             self.assertTrue(resolved.get_json()["success"])
+
+            repeated = client.post(
+                f"/api/review/{review_id}/resolve",
+                json={"status": "resolved", "resolution": "Repeated stale submission."},
+            )
+            self.assertEqual(repeated.status_code, 409)
+            self.assertEqual(repeated.get_json()["status"], "already_resolved")
 
             audit = client.get("/api/audit")
             self.assertEqual(audit.status_code, 200)

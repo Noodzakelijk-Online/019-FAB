@@ -20,7 +20,7 @@ import { useFabLocale } from "./fabLocale";
 
 const navigation = [
   { id: "control-room", label: "Overview", labelNl: "Overzicht", icon: LayoutDashboard },
-  { id: "exceptions", label: "Review queue", labelNl: "Controlewachtrij", icon: FileCheck2 },
+  { id: "review-workspace", label: "Review queue", labelNl: "Controlewachtrij", icon: FileCheck2 },
   { id: "automation", label: "Automation", labelNl: "Automatisering", icon: FileWarning },
   { id: "audit", label: "Activity", labelNl: "Activiteit", icon: History },
   { id: "recovery", label: "Recovery", labelNl: "Herstel", icon: RotateCcw },

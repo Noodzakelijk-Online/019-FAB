@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.operations.local_ledger import LocalOperationsLedger
 
@@ -796,6 +797,143 @@ class TestLocalOperationsLedger(unittest.TestCase):
             open_items = ledger.list_review_items(status=("pending", "in_review"))
 
             self.assertEqual({item["id"] for item in open_items}, {pending_id, in_review_id})
+
+    def test_create_review_item_reuses_open_document_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "review-idempotent",
+                "originalFilename": "receipt.pdf",
+            })
+            first_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Initial details.",
+            })
+            repeated_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Refreshed details.",
+            })
+
+            self.assertEqual(repeated_id, first_id)
+            open_items = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            self.assertEqual(len(open_items), 1)
+            self.assertEqual(open_items[0]["details"], "Refreshed details.")
+
+    def test_create_review_item_recovers_when_another_worker_wins_insert_race(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "review-insert-race",
+                "originalFilename": "receipt.pdf",
+            })
+            original_insert = ledger._insert_with_connection
+            raced = False
+
+            def simulate_competing_insert(connection, table, values):
+                nonlocal raced
+                if table == "review_items" and not raced:
+                    raced = True
+                    competitor = LocalOperationsLedger(ledger_path)
+                    competitor.create_review_item({
+                        "documentId": document_id,
+                        "reason": "manual_review_category",
+                        "details": "Competing worker details.",
+                    })
+                    raise sqlite3.IntegrityError("simulated unique-index race")
+                return original_insert(connection, table, values)
+
+            with patch.object(ledger, "_insert_with_connection", side_effect=simulate_competing_insert):
+                review_id = ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "manual_review_category",
+                    "details": "Current worker details.",
+                })
+
+            open_items = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            self.assertEqual(len(open_items), 1)
+            self.assertEqual(open_items[0]["id"], review_id)
+            self.assertEqual(open_items[0]["details"], "Current worker details.")
+
+    def test_existing_ledger_deduplicates_open_review_rows_before_unique_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "legacy-review-duplicates",
+                "originalFilename": "receipt.pdf",
+            })
+            first_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Older review gate.",
+            })
+            connection = sqlite3.connect(ledger_path)
+            try:
+                connection.execute("DROP INDEX idx_local_review_open_document_reason")
+                cursor = connection.execute(
+                    """
+                    INSERT INTO review_items
+                      (document_id, reason, details, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (
+                        document_id,
+                        "manual_review_category",
+                        "Newest review gate.",
+                        "2026-07-22T12:00:00+00:00",
+                        "2026-07-22T12:00:00+00:00",
+                    ),
+                )
+                newest_id = int(cursor.lastrowid)
+                connection.commit()
+            finally:
+                connection.close()
+
+            migrated = LocalOperationsLedger(ledger_path)
+            open_items = migrated.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            all_items = migrated.list_review_items(document_id=document_id)
+
+            self.assertEqual([item["id"] for item in open_items], [newest_id])
+            older = next(item for item in all_items if item["id"] == first_id)
+            self.assertEqual(older["status"], "resolved")
+            self.assertEqual(older["corrected_data"]["supersededByReviewItemId"], newest_id)
+            audit = migrated.list_audit_events(limit=1)[0]
+            self.assertEqual(audit["action"], "local_ledger.open_reviews_deduplicated")
+            self.assertEqual(audit["details"]["supersededReviewItemIds"], [first_id])
+            connection = sqlite3.connect(ledger_path)
+            try:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        INSERT INTO review_items
+                          (document_id, reason, details, status, created_at, updated_at)
+                        VALUES (?, ?, ?, 'pending', ?, ?)
+                        """,
+                        (
+                            document_id,
+                            "manual_review_category",
+                            "Should be blocked.",
+                            "2026-07-22T13:00:00+00:00",
+                            "2026-07-22T13:00:00+00:00",
+                        ),
+                    )
+            finally:
+                connection.close()
 
     def test_reconciliation_matches_can_be_filtered_and_resolved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
