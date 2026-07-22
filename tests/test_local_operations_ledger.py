@@ -795,8 +795,14 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             open_items = ledger.list_review_items(status=("pending", "in_review"))
+            first_page = ledger.list_review_items(status=("pending", "in_review"), limit=1)
+            second_page = ledger.list_review_items(status=("pending", "in_review"), limit=1, offset=1)
 
             self.assertEqual({item["id"] for item in open_items}, {pending_id, in_review_id})
+            self.assertEqual(
+                {first_page[0]["id"], second_page[0]["id"]},
+                {pending_id, in_review_id},
+            )
 
     def test_create_review_item_reuses_open_document_reason(self):
         with tempfile.TemporaryDirectory() as temp_dir:

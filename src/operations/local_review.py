@@ -10,6 +10,7 @@ APPLIED_REVIEW_STATUSES = {"approved", "resolved"}
 OPEN_REVIEW_STATUSES = {"pending", "in_review"}
 RECONCILIATION_REVIEW_REASONS = {"reconciliation_candidate", "missing_receipt", "unmatched_document"}
 CATEGORY_REVIEW_REASONS = {"low_confidence_categorization", "manual_review_category"}
+BATCH_VENDOR_CATEGORY_REASONS = CATEGORY_REVIEW_REASONS
 
 
 class LocalReviewService:
@@ -25,6 +26,7 @@ class LocalReviewService:
         resolution: Optional[str] = None,
         corrections: Optional[Dict[str, Any]] = None,
         learn_rule: bool = True,
+        apply_to_matching_vendor: bool = False,
     ) -> Dict[str, Any]:
         review_item = self.ledger.get_review_item(review_item_id)
         if not review_item:
@@ -159,6 +161,16 @@ class LocalReviewService:
                 },
             })
 
+        batch_propagation = None
+        if apply_to_matching_vendor:
+            batch_propagation = self._apply_vendor_category_to_matching_reviews(
+                primary_review_item=review_item,
+                primary_document=updated_document,
+                status=status,
+                resolution=resolution,
+                corrections=normalized_corrections,
+            )
+
         return {
             "success": True,
             "reviewItemId": review_item_id,
@@ -173,7 +185,126 @@ class LocalReviewService:
             "processingStatus": final_processing_status,
             "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
             "corrections": normalized_corrections,
+            "batchPropagation": batch_propagation,
         }
+
+    def _apply_vendor_category_to_matching_reviews(
+        self,
+        primary_review_item: Dict[str, Any],
+        primary_document: Optional[Dict[str, Any]],
+        status: str,
+        resolution: Optional[str],
+        corrections: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        vendor_name = str(corrections.get("vendorName") or (primary_document or {}).get("vendor_name") or "").strip()
+        category = str(corrections.get("category") or (primary_document or {}).get("category") or "").strip()
+        target_system = str(corrections.get("targetSystem") or _target_system(primary_document or {})).strip()
+        primary_document_id = _int(primary_review_item.get("document_id"))
+        result = {
+            "requested": True,
+            "policy": "exact_normalized_vendor_and_target_system",
+            "vendorName": vendor_name,
+            "category": category,
+            "targetSystem": target_system,
+            "matchedDocuments": 0,
+            "appliedDocuments": 0,
+            "appliedReviewItemIds": [],
+            "skipped": [],
+        }
+
+        invalid_reason = None
+        if status not in APPLIED_REVIEW_STATUSES:
+            invalid_reason = "primary_review_not_approved"
+        elif str(primary_review_item.get("reason") or "") not in BATCH_VENDOR_CATEGORY_REASONS:
+            invalid_reason = "primary_review_is_not_a_category_or_validation_gate"
+        elif not _normalized_vendor_key(vendor_name):
+            invalid_reason = "vendor_missing"
+        elif not category or category.lower() in {"manual review", "uncategorized"}:
+            invalid_reason = "verified_category_missing"
+        elif not target_system:
+            invalid_reason = "target_system_missing"
+        elif primary_document_id is None:
+            invalid_reason = "primary_document_missing"
+        if invalid_reason:
+            result["status"] = "not_applied"
+            result["reason"] = invalid_reason
+            self._record_vendor_category_batch_audit(primary_review_item, result)
+            return result
+
+        candidate_reviews = {}
+        scan_offset = 0
+        while True:
+            review_page = self.ledger.list_review_items(
+                status=tuple(OPEN_REVIEW_STATUSES),
+                limit=500,
+                offset=scan_offset,
+            )
+            for item in review_page:
+                document_id = _int(item.get("document_id"))
+                if document_id is None or document_id == primary_document_id:
+                    continue
+                if str(item.get("reason") or "") not in BATCH_VENDOR_CATEGORY_REASONS:
+                    continue
+                current = candidate_reviews.get(document_id)
+                if current is None or _batch_review_priority(item) < _batch_review_priority(current):
+                    candidate_reviews[document_id] = item
+            if len(review_page) < 500:
+                break
+            scan_offset += len(review_page)
+
+        vendor_key = _normalized_vendor_key(vendor_name)
+        for document_id, candidate_review in sorted(candidate_reviews.items()):
+            document = self.ledger.get_document(document_id)
+            if not document:
+                result["skipped"].append({"documentId": document_id, "reason": "document_missing"})
+                continue
+            if _normalized_vendor_key(document.get("vendor_name")) != vendor_key:
+                continue
+            if _target_system(document) != target_system:
+                continue
+            if document.get("duplicate_of_document_id") or str(document.get("processing_status") or "") == "duplicate":
+                result["skipped"].append({"documentId": document_id, "reason": "document_marked_duplicate"})
+                continue
+
+            result["matchedDocuments"] += 1
+            candidate_id = int(candidate_review["id"])
+            candidate_result = self.resolve_review_item(
+                candidate_id,
+                status="approved",
+                resolution=(
+                    f"Exact-vendor category decision propagated from review item #{primary_review_item['id']}. "
+                    f"{resolution or 'Verified by the operator.'}"
+                ),
+                corrections={"category": category, "targetSystem": target_system},
+                learn_rule=False,
+                apply_to_matching_vendor=False,
+            )
+            if candidate_result.get("success"):
+                result["appliedDocuments"] += 1
+                result["appliedReviewItemIds"].append(candidate_id)
+            else:
+                result["skipped"].append({
+                    "documentId": document_id,
+                    "reviewItemId": candidate_id,
+                    "reason": candidate_result.get("status") or "resolution_failed",
+                })
+
+        result["status"] = "applied"
+        result["reviewItemsScanned"] = scan_offset + len(review_page)
+        self._record_vendor_category_batch_audit(primary_review_item, result)
+        return result
+
+    def _record_vendor_category_batch_audit(
+        self,
+        primary_review_item: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        self.ledger.record_audit_event({
+            "action": "local_review.vendor_category_batch.resolve",
+            "entityType": "review_item",
+            "entityId": str(primary_review_item["id"]),
+            "details": result,
+        })
 
     def _resolve_superseded_document_reviews(
         self,
@@ -411,6 +542,17 @@ def _has_valid_required_fields(document: Dict[str, Any]) -> bool:
 def _target_system(document: Dict[str, Any]) -> str:
     metadata = document.get("metadata") or {}
     return str(metadata.get("targetSystem") or metadata.get("target_system") or "none")
+
+
+def _normalized_vendor_key(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _batch_review_priority(review_item: Dict[str, Any]) -> int:
+    return {
+        "manual_review_category": 0,
+        "low_confidence_categorization": 1,
+    }.get(str(review_item.get("reason") or ""), 99)
 
 
 def _reconciliation_match_id(review_item: Dict[str, Any]) -> Optional[int]:

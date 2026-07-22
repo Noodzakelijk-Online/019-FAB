@@ -411,6 +411,7 @@ export async function resolveFabReviewItem(input: {
     duplicateOfDocumentId?: number;
   };
   learnRule?: boolean;
+  applyToMatchingVendor?: boolean;
 }): Promise<JsonRecord> {
   return fabLocalRequest(`/api/review/${input.reviewItemId}/resolve`, {
     method: "POST",
@@ -419,6 +420,7 @@ export async function resolveFabReviewItem(input: {
       resolution: input.resolution,
       corrections: input.corrections || {},
       learnRule: input.learnRule ?? true,
+      applyToMatchingVendor: input.applyToMatchingVendor ?? false,
     }),
   });
 }

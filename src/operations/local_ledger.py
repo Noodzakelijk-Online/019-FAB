@@ -3838,8 +3838,10 @@ class LocalOperationsLedger:
         status: Optional[Any] = None,
         limit: int = 100,
         document_id: Optional[int] = None,
+        offset: int = 0,
     ) -> list:
         limit = self._bounded_limit(limit)
+        offset = max(0, self._int(offset, 0))
         query = "SELECT * FROM review_items"
         params = []
         where = []
@@ -3858,8 +3860,8 @@ class LocalOperationsLedger:
             params.append(document_id)
         if where:
             query = f"{query} WHERE {' AND '.join(where)}"
-        query = f"{query} ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(limit)
+        query = f"{query} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]

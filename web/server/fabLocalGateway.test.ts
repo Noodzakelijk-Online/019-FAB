@@ -288,6 +288,7 @@ describe("FAB local API gateway", () => {
         resolution: "Verified against the source receipt.",
         corrections: { category: "Operations | Office Supplies", totalAmount: 42.5 },
         learnRule: true,
+        applyToMatchingVendor: false,
       },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);

@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { humanize } from "./fabView";
 
@@ -29,11 +30,11 @@ const dutchStatuses: Record<string, string> = {
 
 export function useFabLocale() {
   const { lang, setLang } = useLanguage();
-  const copy = (english: string, dutch: string) => lang === "nl" ? dutch : english;
-  const status = (value: unknown) => {
+  const copy = useCallback((english: string, dutch: string) => lang === "nl" ? dutch : english, [lang]);
+  const status = useCallback((value: unknown) => {
     const key = typeof value === "string" ? value.toLowerCase() : "";
     return lang === "nl" && dutchStatuses[key] ? dutchStatuses[key] : humanize(value);
-  };
+  }, [lang]);
   return {
     lang,
     setLang,

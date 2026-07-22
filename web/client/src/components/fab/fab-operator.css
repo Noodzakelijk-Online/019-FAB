@@ -582,6 +582,10 @@ html.fab-operator-active body {
 .fab-review-field-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .fab-review-checkbox { display: flex !important; grid-template-columns: none; align-items: flex-start; gap: 9px !important; color: var(--fab-ink) !important; font-weight: 500 !important; }
 .fab-review-checkbox input { width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--fab-teal); }
+.fab-review-batch { padding: 11px 12px; border: 1px solid #bdd5d0; border-radius: 6px; background: #f2f8f6; }
+.fab-review-batch > span { display: grid; gap: 3px; }
+.fab-review-batch strong { color: var(--fab-ink); font-size: 12px; }
+.fab-review-batch small { color: var(--fab-muted); font-size: 11px; font-weight: 450; line-height: 1.45; }
 .fab-subsection-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .fab-subsection-heading > div { display: grid; }
 .fab-subsection-heading span { color: var(--fab-subtle); font-size: 9px; font-weight: 740; text-transform: uppercase; }

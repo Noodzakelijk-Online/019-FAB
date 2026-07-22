@@ -305,6 +305,14 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(review_payload["reviewItems"][0]["reason"], "low_confidence")
             self.assertEqual(review_payload["summary"]["documents"], 1)
             self.assertEqual(review_payload["summary"]["duplicateCandidates"], 0)
+            batch_capability = review_payload["capabilities"]["exactVendorCategoryBatch"]
+            self.assertTrue(batch_capability["enabled"])
+            self.assertTrue(batch_capability["requiresExplicitApproval"])
+            self.assertEqual(batch_capability["propagatedFields"], ["category", "targetSystem"])
+            self.assertEqual(
+                batch_capability["preservedReviewGates"],
+                ["duplicate_candidate", "validation_failed"],
+            )
             self.assertEqual(review_payload["workItems"][0]["documentId"], document_id)
             self.assertEqual(review_payload["workItems"][0]["document"]["vendorName"], "Vendor")
             self.assertEqual(review_payload["workItems"][0]["reviewItems"][0]["id"], review_id)
@@ -326,6 +334,53 @@ class TestLocalOperationsApi(unittest.TestCase):
             audit = client.get("/api/audit")
             self.assertEqual(audit.status_code, 200)
             self.assertEqual(audit.get_json()["auditEvents"][0]["action"], "local_review.review_item.resolve")
+
+    def test_review_api_can_apply_an_exact_vendor_category_batch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            review_ids = []
+            for source_id in ("telecom-1", "telecom-2"):
+                document_id = ledger.register_document({
+                    "source": "google_drive",
+                    "sourceDocumentId": source_id,
+                    "originalFilename": f"{source_id}.pdf",
+                    "processingStatus": "needs_review",
+                    "vendorName": "T-Mobile",
+                    "category": "Manual Review",
+                    "transactionDate": "2026-06-28",
+                    "totalAmount": 25.0,
+                    "metadata": {"targetSystem": "waveapps_business"},
+                })
+                review_ids.append(ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "manual_review_category",
+                    "details": "Choose a category.",
+                }))
+
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            response = app.test_client().post(
+                f"/api/review/{review_ids[0]}/resolve",
+                json={
+                    "status": "approved",
+                    "resolution": "Verified recurring telecom expense.",
+                    "corrections": {
+                        "vendorName": "T-Mobile",
+                        "category": "Operations | Telecommunications",
+                        "transactionDate": "2026-06-28",
+                        "totalAmount": 25.0,
+                        "targetSystem": "waveapps_business",
+                    },
+                    "learnRule": True,
+                    "applyToMatchingVendor": True,
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["batchPropagation"]["appliedDocuments"], 1)
+            self.assertEqual(ledger.get_review_item(review_ids[1])["status"], "approved")
 
     def test_api_registers_and_lists_sources_without_secret_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:

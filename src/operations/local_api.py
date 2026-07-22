@@ -6773,6 +6773,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "reviewItems": review_items,
             "workItems": work_items,
             "categoryOptions": _review_category_options(ledger, config),
+            "capabilities": {
+                "exactVendorCategoryBatch": {
+                    "enabled": True,
+                    "requiresExplicitApproval": True,
+                    "matchPolicy": "exact_normalized_vendor_and_target_system",
+                    "propagatedFields": ["category", "targetSystem"],
+                    "preservedFields": ["vendorName", "transactionDate", "totalAmount", "taxAmount"],
+                    "excludedDocuments": ["marked_duplicate"],
+                    "preservedReviewGates": ["duplicate_candidate", "validation_failed"],
+                },
+            },
             "summary": {
                 "reviewItems": len(review_items),
                 "documents": len([item for item in work_items if item.get("documentId")]),
@@ -6796,6 +6807,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             resolution=str(resolution) if resolution is not None else None,
             corrections=payload.get("corrections") or _corrections_from_mapping(payload),
             learn_rule=bool(payload.get("learnRule", True)),
+            apply_to_matching_vendor=bool(payload.get("applyToMatchingVendor", False)),
         )
         status_code = {
             "not_found": 404,

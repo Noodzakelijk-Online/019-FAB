@@ -16,7 +16,7 @@ import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
 import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
 import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
-import { humanize, text } from "@/components/fab/fabView";
+import { asRecord, count, humanize, text } from "@/components/fab/fabView";
 import { useFabLocale } from "@/components/fab/fabLocale";
 import { trpc } from "@/lib/trpc";
 import "@/components/fab/fab-operator.css";
@@ -134,7 +134,14 @@ export default function AdminOperations() {
   const resolveReviewItem = useCallback(async (input: FabReviewResolution) => {
     try {
       const result = await resolveReview.mutateAsync(input);
-      toast.success(`${copy("Review updated", "Controle bijgewerkt")}: ${humanize(text(result.processingStatus, text(result.status)))}`);
+      const batch = asRecord(result.batchPropagation);
+      const propagated = count(batch.appliedDocuments);
+      toast.success(propagated > 0
+        ? copy(
+          `Verified details saved and category applied to ${propagated} other exact vendor match${propagated === 1 ? "" : "es"}.`,
+          `Geverifieerde gegevens opgeslagen en categorie toegepast op ${propagated} andere exacte leveranciersmatch${propagated === 1 ? "" : "es"}.`,
+        )
+        : `${copy("Review updated", "Controle bijgewerkt")}: ${humanize(text(result.processingStatus, text(result.status)))}`);
       await controlCenter.refetch();
     } catch (error) {
       const message = error instanceof Error ? error.message : copy("Review update failed", "Bijwerken van controle mislukt");

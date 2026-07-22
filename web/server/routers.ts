@@ -492,6 +492,7 @@ export const appRouter = router({
           duplicateOfDocumentId: z.number().int().positive().optional(),
         }).strict().optional(),
         learnRule: z.boolean().optional(),
+        applyToMatchingVendor: z.boolean().optional(),
       }).strict())
       .mutation(async ({ input }) => resolveFabReviewItem(input)),
     runCommand: fabOperatorProcedure
