@@ -574,7 +574,7 @@ def _record_type(document: Dict[str, Any], extracted: Dict[str, Any], amount: Op
     document_type = str(_first_present(document.get("document_type"), extracted.get("document_type"), "") or "").lower()
     if document_type in {"invoice", "sales_invoice", "estimate"}:
         return "income"
-    if document_type == "bill":
+    if document_type in {"bill", "purchase_invoice", "vendor_invoice", "unpaid_purchase"}:
         return "bill"
     if amount is not None and amount < 0:
         return "expense"

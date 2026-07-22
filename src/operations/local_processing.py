@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from src.categorizers.hybrid_categorizer import HybridCategorizer
 from src.document_handling.duplicate_detector import DuplicateDetector
+from src.document_processors.document_type_classifier import DocumentTypeClassifier
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
@@ -29,6 +30,8 @@ PROCESSING_REVIEW_REASONS = {
     "empty_ocr_text",
     "low_confidence_categorization",
     "manual_review_category",
+    "document_type_conflict",
+    "non_posting_document_type",
     "sensitive_government_document",
     "validation_failed",
 }
@@ -50,6 +53,7 @@ class LocalDocumentProcessor:
         self._processor_pipeline = processor_pipeline
         self.categorizer = categorizer or HybridCategorizer(self.config)
         self.validator = validator or ValidationManager(self.config)
+        self.document_type_classifier = DocumentTypeClassifier()
         self.duplicate_detector = DuplicateDetector(self.config)
         self.review_confidence_threshold = _float_config(
             self.config,
@@ -84,6 +88,8 @@ class LocalDocumentProcessor:
                 summary["needsReview"] += 1
             summary["documents"].append(result)
 
+        summary["documentTypeBackfill"] = self.backfill_document_types(limit=500)
+
         self.ledger.record_audit_event({
             "action": "local_processing.batch_completed",
             "entityType": "bookkeeping_document",
@@ -96,6 +102,137 @@ class LocalDocumentProcessor:
             },
         })
         return summary
+
+    def backfill_document_types(self, limit: int = 500) -> Dict[str, Any]:
+        """Classify stored OCR evidence without rerunning OCR or changing categories."""
+        documents = self.ledger.list_documents(limit=limit)
+        summary = {
+            "requested": len(documents),
+            "evaluated": 0,
+            "classified": 0,
+            "unknown": 0,
+            "alreadyClassified": 0,
+            "conflicts": 0,
+            "reviewQueued": 0,
+            "externalSubmission": "not_executed",
+        }
+        for document in documents:
+            metadata = dict(document.get("metadata") or {})
+            processing = dict(metadata.get("processing") or {})
+            existing = processing.get("documentTypeClassification") or {}
+            if existing.get("classifier") == "deterministic_financial_document_type_v1":
+                summary["alreadyClassified"] += 1
+                continue
+            summary["evaluated"] += 1
+
+            classification = self.document_type_classifier.classify(
+                document.get("ocr_text", ""),
+                document.get("extracted_data") or {},
+            )
+            classified_type = str(classification.get("documentType") or "unknown")
+            current_type = str(document.get("document_type") or "unknown").strip().lower()
+            processing["documentTypeClassification"] = classification
+            metadata["processing"] = processing
+            update_payload: Dict[str, Any] = {"metadata": metadata}
+            applied_type = current_type
+            conflict = False
+
+            if classified_type == "unknown":
+                summary["unknown"] += 1
+            elif current_type in {"", "csv", "image", "pdf", "text", "unknown"}:
+                applied_type = classified_type
+                extracted_data = dict(document.get("extracted_data") or {})
+                extracted_data["document_type"] = classified_type
+                update_payload.update({
+                    "documentType": classified_type,
+                    "extractedData": extracted_data,
+                })
+                summary["classified"] += 1
+            elif current_type == classified_type:
+                summary["classified"] += 1
+            else:
+                conflict = True
+                summary["conflicts"] += 1
+
+            self.ledger.update_document(int(document["id"]), update_payload)
+            if classified_type != "unknown" and not conflict:
+                self._replace_document_type_extracted_field(document, classification)
+                LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(int(document["id"]))
+
+            if classification.get("reviewRequired"):
+                before_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
+                self._queue_review(
+                    document,
+                    "non_posting_document_type",
+                    _review_detail("non_posting_document_type", {}, "", 0.0),
+                    corrected_data={"documentTypeClassification": classification},
+                )
+                after_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
+                summary["reviewQueued"] += int(after_count > before_count)
+            if conflict:
+                before_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
+                self._queue_review(
+                    document,
+                    "document_type_conflict",
+                    f"Stored document type {current_type!r} conflicts with classifier result {classified_type!r}.",
+                    corrected_data={
+                        "storedDocumentType": current_type,
+                        "documentTypeClassification": classification,
+                    },
+                )
+                after_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
+                summary["reviewQueued"] += int(after_count > before_count)
+
+            self.ledger.record_audit_event({
+                "action": "local_processing.document_type_backfilled",
+                "entityType": "bookkeeping_document",
+                "entityId": str(document["id"]),
+                "details": {
+                    "previousDocumentType": current_type,
+                    "appliedDocumentType": applied_type,
+                    "classification": classification,
+                    "conflict": conflict,
+                    "externalSubmission": "not_executed",
+                },
+            })
+
+        if summary["evaluated"]:
+            self.ledger.record_audit_event({
+                "action": "local_processing.document_type_backfill_completed",
+                "entityType": "bookkeeping_document",
+                "details": dict(summary),
+            })
+        return summary
+
+    def _replace_document_type_extracted_field(
+        self,
+        document: Dict[str, Any],
+        classification: Dict[str, Any],
+    ) -> None:
+        fields = [
+            {
+                "fieldName": field.get("field_name"),
+                "value": field.get("field_value"),
+                "confidenceScore": field.get("confidence_score"),
+                "provenance": field.get("provenance") or {},
+            }
+            for field in document.get("extracted_fields") or []
+            if field.get("source") == "local_processing" and field.get("field_name") != "document_type"
+        ]
+        fields.append({
+            "fieldName": "document_type",
+            "value": classification.get("documentType"),
+            "confidenceScore": classification.get("confidenceScore"),
+            "provenance": {
+                "stage": "document_type_backfill",
+                "fieldSource": "document_type_classifier",
+                "classifier": classification.get("classifier"),
+                "evidence": classification.get("evidence") or [],
+                "postingEligible": bool(classification.get("postingEligible")),
+                "evidencePriority": classification.get("evidencePriority"),
+            },
+        })
+        self.ledger.replace_extracted_fields(int(document["id"]), fields)
 
     def retry_failed(self, limit: int = 25, actor: str = "fab_local_processing") -> Dict[str, Any]:
         documents = self.ledger.list_documents(status="failed", limit=limit)
@@ -187,6 +324,16 @@ class LocalDocumentProcessor:
         try:
             processed_data = self._process_path(path, document)
             extracted_data = _sanitize_extracted_data(processed_data.get("extracted_data") or {})
+            document_type_classification = self.document_type_classifier.classify(
+                processed_data.get("ocr_text", ""),
+                extracted_data,
+            )
+            semantic_document_type = str(document_type_classification.get("documentType") or "unknown")
+            if semantic_document_type != "unknown":
+                extracted_data["document_type"] = semantic_document_type
+            else:
+                semantic_document_type = str(document.get("document_type") or "unknown")
+            processed_data["document_type_classification"] = document_type_classification
             processed_data["extracted_data"] = extracted_data
             category_result = self.categorizer.categorize(processed_data)
             category = category_result.get("category", "Manual Review")
@@ -264,11 +411,13 @@ class LocalDocumentProcessor:
                     "validation": validation,
                     "duplicateMatch": duplicate_match if duplicate_match.get("is_duplicate") else None,
                     "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+                    "documentTypeClassification": document_type_classification,
                 }
             },
         )
         self.ledger.update_document(document_id, {
             "processingStatus": status,
+            "documentType": semantic_document_type,
             "duplicateFingerprint": duplicate_fingerprint,
             "duplicateOfDocumentId": duplicate_of_document_id,
             "vendorName": extracted_data.get("vendor_name"),
@@ -331,6 +480,7 @@ class LocalDocumentProcessor:
                 "duplicateOfDocumentId": duplicate_of_document_id,
                 "bookkeepingRecordId": record_result.get("recordId"),
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+                "documentTypeClassification": document_type_classification,
                 "resolvedReviewItemIds": resolved_review_item_ids,
             },
         })
@@ -342,6 +492,8 @@ class LocalDocumentProcessor:
             "reviewReasons": review_reasons,
             "validation": validation,
             "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+            "documentType": semantic_document_type,
+            "documentTypeClassification": document_type_classification,
             "bookkeepingRecordId": record_result.get("recordId"),
             "resolvedReviewItemIds": resolved_review_item_ids,
         }
@@ -429,6 +581,9 @@ class LocalDocumentProcessor:
             reasons.append("low_confidence_categorization")
         if str(category).strip().lower() in {"manual review", "uncategorized", ""}:
             reasons.append("manual_review_category")
+        document_type_classification = processed_data.get("document_type_classification") or {}
+        if document_type_classification.get("reviewRequired"):
+            reasons.append("non_posting_document_type")
         lowered_text = str(processed_data.get("ocr_text") or "").lower()
         if any(term in lowered_text for term in SENSITIVE_REVIEW_TERMS):
             reasons.append("sensitive_government_document")
@@ -738,6 +893,22 @@ def _extracted_field_records(
             "confidenceScore": confidence_score,
             "provenance": category_provenance,
         })
+    document_type_classification = processed_data.get("document_type_classification") or {}
+    document_type = str(document_type_classification.get("documentType") or "unknown")
+    if document_type != "unknown":
+        records.append({
+            "fieldName": "document_type",
+            "value": document_type,
+            "confidenceScore": _safe_float(document_type_classification.get("confidenceScore"), 0.0),
+            "provenance": {
+                **base_provenance,
+                "fieldSource": "document_type_classifier",
+                "classifier": document_type_classification.get("classifier"),
+                "evidence": document_type_classification.get("evidence") or [],
+                "postingEligible": bool(document_type_classification.get("postingEligible")),
+                "evidencePriority": document_type_classification.get("evidencePriority"),
+            },
+        })
     return records
 
 
@@ -816,6 +987,10 @@ def _review_detail(
         return "No OCR text was extracted from the document."
     if reason == "sensitive_government_document":
         return "Government, benefits, DigiD, or sensitive administration terms were detected."
+    if reason == "non_posting_document_type":
+        return "This document type is supporting evidence, not an automatically postable receipt or vendor invoice."
+    if reason == "document_type_conflict":
+        return "Stored and inferred document types conflict; review before routing."
     return "Review required."
 
 

@@ -122,7 +122,7 @@ Set-Location -LiteralPath $root
 $python = Get-Command python -ErrorAction Stop
 $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
 
-& $python.Source -c "import flask, PIL, pytesseract, pdf2image, langdetect, googleapiclient" 2>$null
+& $python.Source -c "import flask, PIL, pytesseract, pdf2image, langdetect, googleapiclient, sklearn, joblib" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Installing FAB local runtime dependencies..."
     & $python.Source -m pip install -r (Join-Path $root "requirements-local.txt")

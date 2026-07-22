@@ -91,6 +91,147 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["bookkeeping_record"]["export_status"], "ready")
             self.assertEqual(ledger.list_audit_events()[0]["action"], "local_processing.document_processed")
 
+    def test_vendor_invoice_type_is_persisted_and_routes_as_bill_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invoice_path = os.path.join(temp_dir, "invoice.txt")
+            with open(invoice_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "FACTUUR\nVendor: Test Vendor\nDate: 2026-06-28\n"
+                    "Total: EUR 42.50\nInvoice number: INV-0042\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "scanner-invoice-1",
+                "originalFilename": "scan.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": invoice_path,
+                "documentType": "pdf",
+                "processingStatus": "imported",
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            document = ledger.get_document(document_id)
+            self.assertEqual(result["status"], "processed")
+            self.assertEqual(document["document_type"], "vendor_invoice")
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "bill")
+            fields = {field["field_name"]: field for field in document["extracted_fields"]}
+            self.assertEqual(fields["document_type"]["field_value"], "vendor_invoice")
+            self.assertEqual(
+                fields["document_type"]["provenance"]["fieldSource"],
+                "document_type_classifier",
+            )
+
+    def test_order_confirmation_is_never_auto_ready_to_post(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            confirmation_path = os.path.join(temp_dir, "confirmation.txt")
+            with open(confirmation_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "Order confirmation\nVendor: Test Vendor\nDate: 2026-06-28\n"
+                    "Total: EUR 42.50\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "scanner-order-1",
+                "originalFilename": "scan.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": confirmation_path,
+                "documentType": "pdf",
+                "processingStatus": "imported",
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            self.assertEqual(result["status"], "needs_review")
+            self.assertIn("non_posting_document_type", result["reviewReasons"])
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["document_type"], "order_confirmation")
+            self.assertEqual(document["bookkeeping_record"]["export_status"], "blocked_by_review")
+
+    def test_document_type_backfill_is_audited_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "historic-receipt-1",
+                "originalFilename": "historic-scan.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "vendorName": "Historic Vendor",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 12.0,
+                "ocrText": "Ontvangstbewijs\nTotaal EUR 12,00",
+                "extractedData": {
+                    "vendor_name": "Historic Vendor",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 12.0,
+                },
+            })
+            processor = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            )
+
+            first = processor.backfill_document_types()
+            second = processor.backfill_document_types()
+
+            self.assertEqual(first["evaluated"], 1)
+            self.assertEqual(first["classified"], 1)
+            self.assertEqual(first["externalSubmission"], "not_executed")
+            self.assertEqual(second["evaluated"], 0)
+            self.assertEqual(second["alreadyClassified"], 1)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["document_type"], "receipt")
+            self.assertEqual(document["extracted_data"]["document_type"], "receipt")
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "expense")
+            actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
+            self.assertEqual(actions.count("local_processing.document_type_backfilled"), 1)
+            self.assertEqual(actions.count("local_processing.document_type_backfill_completed"), 1)
+
+    def test_document_type_backfill_queues_non_posting_review_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "historic-order-1",
+                "originalFilename": "historic-order.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "ocrText": "Order confirmation\nTotal EUR 12.00",
+                "extractedData": {"total_amount": 12.0},
+            })
+            processor = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            )
+
+            first = processor.backfill_document_types()
+            second = processor.backfill_document_types()
+
+            self.assertEqual(first["reviewQueued"], 1)
+            self.assertEqual(second["reviewQueued"], 0)
+            reviews = [
+                item for item in ledger.list_review_items(document_id=document_id, limit=20)
+                if item["reason"] == "non_posting_document_type"
+            ]
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(ledger.get_document(document_id)["document_type"], "order_confirmation")
+
     def test_process_text_document_queues_review_for_validation_and_sensitive_terms(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             letter_path = os.path.join(temp_dir, "belastingdienst.txt")

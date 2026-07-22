@@ -159,6 +159,37 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(dependencies["poppler"]["status"], "ok")
             self.assertEqual(sources["tesseract_ocr"]["status"], "ready")
 
+    def test_category_model_readiness_does_not_claim_an_untrained_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = os.path.join(temp_dir, "model.joblib")
+            vectorizer_path = os.path.join(temp_dir, "vectorizer.joblib")
+            missing_summary = LocalReadinessService({
+                "ml_model_path": model_path,
+                "ml_vectorizer_path": vectorizer_path,
+            }).summarize()
+            missing = next(
+                item for item in missing_summary["dependencies"]
+                if item["id"] == "category_model"
+            )
+
+            self.assertEqual(missing["status"], "attention")
+            self.assertFalse(missing["configured"])
+
+            for path in (model_path, vectorizer_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"approved-test-artifact")
+            ready_summary = LocalReadinessService({
+                "ml_model_path": model_path,
+                "ml_vectorizer_path": vectorizer_path,
+            }).summarize()
+            ready = next(
+                item for item in ready_summary["dependencies"]
+                if item["id"] == "category_model"
+            )
+
+            self.assertEqual(ready["status"], "ok")
+            self.assertTrue(ready["configured"])
+
     def test_api_settings_and_dashboard_render_readiness_without_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

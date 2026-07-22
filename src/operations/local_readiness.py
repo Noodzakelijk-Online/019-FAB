@@ -135,6 +135,15 @@ class LocalReadinessService:
         available_languages = available_tesseract_languages(self.config)
         missing_languages = sorted(set(configured_languages) - set(available_languages))
         poppler_path = resolve_poppler_path(self.config)
+        ml_model_value = str(
+            _config_value(self.config, "ml_model_path", default="data/models/ml_categorizer_model.joblib")
+        )
+        ml_vectorizer_value = str(
+            _config_value(self.config, "ml_vectorizer_path", default="data/models/tfidf_vectorizer.joblib")
+        )
+        ml_model_path = os.path.abspath(os.path.expanduser(os.path.expandvars(ml_model_value)))
+        ml_vectorizer_path = os.path.abspath(os.path.expanduser(os.path.expandvars(ml_vectorizer_value)))
+        ml_model_ready = os.path.isfile(ml_model_path) and os.path.isfile(ml_vectorizer_path)
         return [
             {
                 "id": "python",
@@ -183,6 +192,21 @@ class LocalReadinessService:
                 "details": "Required to render PDF receipts before Tesseract OCR.",
             },
             _python_dependency("PIL", "Pillow", "Image loading for OCR processors"),
+            _python_dependency("sklearn", "scikit-learn", "Optional approved-feedback category model"),
+            _python_dependency("joblib", "joblib", "Optional category model persistence"),
+            {
+                "id": "category_model",
+                "label": "Category model artifacts",
+                "status": "ok" if ml_model_ready else "attention",
+                "configured": ml_model_ready,
+                "modelPath": ml_model_path,
+                "vectorizerPath": ml_vectorizer_path,
+                "details": (
+                    "Local model and vectorizer files are available; training provenance remains review-controlled."
+                    if ml_model_ready
+                    else "No approved model is trained yet; deterministic and approved vendor rules remain available."
+                ),
+            },
             _python_dependency("googleapiclient", "Google API client", "Gmail, Drive, Photos, and Vision integrations"),
             _python_dependency("playwright", "Playwright", "Optional supervised browser tooling"),
         ]
