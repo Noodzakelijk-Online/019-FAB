@@ -3,6 +3,7 @@ import { AlertCircle, ChevronDown, LockKeyhole } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { FabCommandDrawer } from "@/components/fab/FabCommandDrawer";
+import { FabActivationChecklist } from "@/components/fab/FabActivationChecklist";
 import { FabConnections } from "@/components/fab/FabConnections";
 import { FabControlOverview } from "@/components/fab/FabControlOverview";
 import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
@@ -186,6 +187,14 @@ export default function AdminOperations() {
               <div>{data?.partialErrors.map((item) => <p key={item.resource}><strong>{humanize(item.resource)} - {humanize(item.state)}</strong><span>{item.error}{item.updatedAt ? ` Last valid response: ${item.updatedAt}.` : ""}</span></p>)}</div>
             </details>
           )}
+          {connected && <FabActivationChecklist
+            waveSetup={data?.waveSetup || {}}
+            driveAuthorization={data?.driveAuthorization || {}}
+            reviewSummary={data?.reviews.summary || {}}
+            onOpenWave={() => setWaveSetupOpen(true)}
+            onOpenDrive={() => setDriveSetupOpen(true)}
+            onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          />}
           <FabControlOverview
             connected={connected}
             metrics={data?.metrics || { documents: null, pendingReview: null, pendingReviewDocuments: null, unreconciled: null, unreconciledDocuments: null, unreconciledBankTransactions: null, exceptions: null, failedDocuments: null }}
