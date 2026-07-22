@@ -153,13 +153,17 @@ class WaveappsAccountDiscoveryService:
             required_missing.append("businessId")
         if not configured_anchor:
             required_missing.append("anchorAccountId")
-        if not category_accounts and not default_category_account_id:
+        # A catch-all account is not a substitute for an explicit category map.
+        # Treating it as complete can silently collapse unrelated expenses into
+        # one ledger account.
+        if not category_accounts:
             required_missing.append("categoryAccountIds")
         default_verified = None if accounts is None else (
             default_category_account_id in account_ids if default_category_account_id else True
         )
         verified = (
             accounts is not None
+            and not required_missing
             and configured_anchor in account_ids
             and all(row["verified"] for row in mapping_rows)
             and bool(default_verified)

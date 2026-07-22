@@ -51,6 +51,7 @@ class TestLocalWaveSetupApi(unittest.TestCase):
                 "targetSystem": "waveapps_business",
                 "anchorAccountId": "anchor-1",
                 "defaultCategoryAccountId": "expense-1",
+                "categoryAccountIds": {"Office Expenses": "expense-1"},
                 "actor": "dashboard-test",
             })
             status = client.get("/api/wave/setup")

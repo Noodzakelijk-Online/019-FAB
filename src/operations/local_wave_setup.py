@@ -41,6 +41,20 @@ class LocalWaveSetupService:
             target_system,
             accounts=accounts or None,
         )["targets"][0]
+        anchor_accounts = [account for account in accounts if _is_anchor_account(account)]
+        expense_accounts = [account for account in accounts if _is_expense_account(account)]
+        mapped_expense_ids = {
+            str(row.get("accountId") or "")
+            for row in mapping.get("categoryAccounts") or []
+            if row.get("verified") is True
+        }
+        available_expense_ids = {
+            str(account.get("id") or "")
+            for account in expense_accounts
+            if account.get("id")
+        }
+        mapped_expense_count = len(mapped_expense_ids & available_expense_ids)
+        available_expense_count = len(available_expense_ids)
         token_configured = bool(target.get("access_token"))
         business_id = str(target.get("business_id") or "")
         ready = token_configured and bool(business_id) and bool(mapping.get("verified"))
@@ -64,10 +78,18 @@ class LocalWaveSetupService:
             "environmentOverrides": _environment_overrides(target_system),
             "storage": storage,
             "mapping": mapping,
+            "mappingCoverage": {
+                "mappedExpenseAccounts": mapped_expense_count,
+                "availableExpenseAccounts": available_expense_count,
+                "percentage": round((mapped_expense_count / available_expense_count) * 100, 1)
+                if available_expense_count else 0.0,
+                "complete": bool(available_expense_count)
+                and mapped_expense_count == available_expense_count,
+            },
             "accounts": accounts,
             "accountOptions": {
-                "anchor": [account for account in accounts if _is_anchor_account(account)],
-                "expense": [account for account in accounts if _is_expense_account(account)],
+                "anchor": anchor_accounts,
+                "expense": expense_accounts,
             },
             "lastValidatedAt": discovery.get("validatedAt"),
             "validatedBusiness": discovery.get("business"),

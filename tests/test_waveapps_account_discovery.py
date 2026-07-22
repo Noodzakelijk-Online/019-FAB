@@ -58,14 +58,15 @@ class TestWaveappsAccountDiscoveryService(unittest.TestCase):
         self.assertEqual(result["status"], "not_configured")
         self.assertEqual(result["missingFields"], ["accessToken", "businessId"])
 
-    def test_default_category_account_is_not_marked_verified_before_discovery(self):
+    def test_default_category_account_does_not_replace_explicit_category_mapping(self):
         config = dict(self.config)
         config["waveapps_business_category_account_ids"] = {}
         config["waveapps_business_default_category_account_id"] = "default-expense"
 
         mapping = WaveappsAccountDiscoveryService(config).mapping_status("waveapps_business")["targets"][0]
 
-        self.assertTrue(mapping["configured"])
+        self.assertFalse(mapping["configured"])
+        self.assertIn("categoryAccountIds", mapping["requiredMissing"])
         self.assertIsNone(mapping["defaultCategoryAccount"]["verified"])
         self.assertFalse(mapping["verified"])
 

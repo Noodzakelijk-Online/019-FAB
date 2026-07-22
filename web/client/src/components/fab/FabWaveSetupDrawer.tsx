@@ -22,6 +22,7 @@ export type FabWaveSetupSaveInput = {
   businessId?: string;
   anchorAccountId?: string;
   defaultCategoryAccountId?: string;
+  categoryAccountIds?: Record<string, string>;
   clearAccessToken?: boolean;
 };
 
@@ -51,6 +52,7 @@ export function FabWaveSetupDrawer({
   const [businessId, setBusinessId] = useState("");
   const [anchorAccountId, setAnchorAccountId] = useState("");
   const [defaultCategoryAccountId, setDefaultCategoryAccountId] = useState("");
+  const [categoryAccountIds, setCategoryAccountIds] = useState<Record<string, string>>({});
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [error, setError] = useState("");
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -58,6 +60,7 @@ export function FabWaveSetupDrawer({
   const mapping = record(setup.mapping);
   const anchorMapping = record(mapping.anchorAccount);
   const defaultMapping = record(mapping.defaultCategoryAccount);
+  const configuredCategoryMappings = records(mapping.categoryAccounts);
   const accountOptions = record(setup.accountOptions);
   const anchorOptions = records(accountOptions.anchor);
   const expenseOptions = records(accountOptions.expense);
@@ -71,6 +74,19 @@ export function FabWaveSetupDrawer({
   const lastValidatedAt = text(setup.lastValidatedAt, "");
   const setupError = text(setup.error, "");
   const keyProtector = text(storage.keyProtector, "");
+  const configuredCategoryKey = configuredCategoryMappings
+    .map((row) => `${text(row.category)}:${text(row.accountId)}`)
+    .sort()
+    .join("|");
+  const expenseOptionsKey = expenseOptions
+    .map((account) => `${text(account.name)}:${text(account.id)}`)
+    .sort()
+    .join("|");
+  const selectedCategoryCount = Object.keys(categoryAccountIds).length;
+  const allExpenseCategoriesSelected = expenseOptions.length > 0 && expenseOptions.every((account) => {
+    const name = text(account.name);
+    return Boolean(name) && categoryAccountIds[name] === text(account.id);
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -78,9 +94,17 @@ export function FabWaveSetupDrawer({
     setBusinessId(text(setup.businessId, ""));
     setAnchorAccountId(text(anchorMapping.accountId, ""));
     setDefaultCategoryAccountId(text(defaultMapping.accountId, ""));
+    const configuredCategories = Object.fromEntries(configuredCategoryMappings.flatMap((row) => {
+      const category = text(row.category);
+      const accountId = text(row.accountId);
+      return category && accountId ? [[category, accountId]] : [];
+    }));
+    setCategoryAccountIds(Object.keys(configuredCategories).length
+      ? configuredCategories
+      : expenseCategoryMap(expenseOptions));
     setConfirmDisconnect(false);
     setError("");
-  }, [open, setup.businessId, anchorMapping.accountId, defaultMapping.accountId]);
+  }, [open, setup.businessId, anchorMapping.accountId, defaultMapping.accountId, configuredCategoryKey, expenseOptionsKey]);
 
   useEffect(() => {
     if (!open) return;
@@ -142,8 +166,8 @@ export function FabWaveSetupDrawer({
   }
 
   async function saveMapping() {
-    if (!anchorAccountId || !defaultCategoryAccountId) {
-      setError(copy("Select both a funding account and a default expense account.", "Selecteer zowel een betaalrekening als een standaardkostenrekening."));
+    if (!anchorAccountId || !defaultCategoryAccountId || selectedCategoryCount === 0) {
+      setError(copy("Select a funding account, a fallback expense account, and at least one explicit expense category.", "Selecteer een betaalrekening, een standaardkostenrekening en minimaal een expliciete kostencategorie."));
       return;
     }
     setError("");
@@ -152,10 +176,23 @@ export function FabWaveSetupDrawer({
         targetSystem: "waveapps_business",
         anchorAccountId,
         defaultCategoryAccountId,
+        categoryAccountIds,
       });
     } catch (cause) {
       setError(errorMessage(cause, copy("Wave account mapping could not be saved.", "Wave-rekeningtoewijzing kon niet worden opgeslagen.")));
     }
+  }
+
+  function toggleExpenseCategory(account: FabRecord) {
+    const category = text(account.name);
+    const accountId = text(account.id);
+    if (!category || !accountId) return;
+    setCategoryAccountIds((current) => {
+      const next = { ...current };
+      if (next[category] === accountId) delete next[category];
+      else next[category] = accountId;
+      return next;
+    });
   }
 
   async function disconnect() {
@@ -188,7 +225,7 @@ export function FabWaveSetupDrawer({
           <div className="fab-drive-setup-progress">
             <SetupStep complete={tokenConfigured && Boolean(text(setup.businessId))} icon={KeyRound} title={copy("Secure API connection", "Beveiligde API-koppeling")} detail={tokenConfigured ? copy("Token stored without browser exposure", "Token opgeslagen zonder browserweergave") : copy("Token and business ID required", "Token en bedrijfs-ID vereist")} />
             <SetupStep complete={validated} icon={Building2} title={copy("Business validation", "Bedrijfsvalidatie")} detail={validated ? `${records(setup.accounts).length} ${copy("accounts loaded", "rekeningen geladen")}` : copy("Live account read required", "Actuele rekeningcontrole vereist")} />
-            <SetupStep complete={mappingVerified} icon={Landmark} title={copy("Posting account mapping", "Toewijzing boekingsrekeningen")} detail={mappingVerified ? copy("Verified against Wave", "Gevalideerd tegen Wave") : copy("Funding and expense accounts required", "Betaal- en kostenrekening vereist")} />
+            <SetupStep complete={mappingVerified} icon={Landmark} title={copy("Posting account mapping", "Toewijzing boekingsrekeningen")} detail={mappingVerified ? `${configuredCategoryMappings.length} ${copy("explicit categories verified", "expliciete categorieen gevalideerd")}` : copy("Funding, fallback, and explicit expense categories required", "Betaalrekening, standaardrekening en expliciete kostencategorieen vereist")} />
           </div>
 
           <section className="fab-drive-credential-panel">
@@ -214,7 +251,22 @@ export function FabWaveSetupDrawer({
             <form className="fab-wave-form" onSubmit={(event) => { event.preventDefault(); void saveMapping(); }}>
               <label><span>{copy("Funding account", "Betaalrekening")}</span><select value={anchorAccountId} onChange={(event) => setAnchorAccountId(event.target.value)} disabled={busy || !validated}><option value="">{copy("Select a verified Wave account", "Selecteer een gevalideerde Wave-rekening")}</option>{anchorOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}</select></label>
               <label><span>{copy("Default expense account", "Standaardkostenrekening")}</span><select value={defaultCategoryAccountId} onChange={(event) => setDefaultCategoryAccountId(event.target.value)} disabled={busy || !validated}><option value="">{copy("Select a verified Wave account", "Selecteer een gevalideerde Wave-rekening")}</option>{expenseOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}</select></label>
-              <button className="fab-primary-button" type="submit" disabled={!connected || busy || !validated || !anchorAccountId || !defaultCategoryAccountId}>{busy ? <Loader2 className="is-spinning" aria-hidden="true" /> : <Landmark aria-hidden="true" />} {copy("Save verified mapping", "Gevalideerde toewijzing opslaan")}</button>
+              <div className="fab-wave-category-map">
+                <div className="fab-wave-category-map-heading">
+                  <div><strong>{copy("Explicit expense categories", "Expliciete kostencategorieen")}</strong><small>{selectedCategoryCount} / {expenseOptions.length} {copy("selected from Wave", "geselecteerd uit Wave")}</small></div>
+                  <button className="fab-secondary-button compact" type="button" disabled={busy || !validated || expenseOptions.length === 0} onClick={() => setCategoryAccountIds(allExpenseCategoriesSelected ? {} : expenseCategoryMap(expenseOptions))}>{allExpenseCategoriesSelected ? copy("Clear", "Wissen") : copy("Select all", "Alles selecteren")}</button>
+                </div>
+                <div className="fab-wave-category-list">
+                  {expenseOptions.map((account) => {
+                    const category = text(account.name);
+                    const accountId = text(account.id);
+                    const checked = Boolean(category) && categoryAccountIds[category] === accountId;
+                    return <label className="fab-review-checkbox" key={accountId || category}><input type="checkbox" checked={checked} onChange={() => toggleExpenseCategory(account)} disabled={busy || !validated} /><span><strong>{category || accountId}</strong><small>{copy("Use this exact Wave account as a FAB review and posting category", "Gebruik deze exacte Wave-rekening als FAB-controle- en boekingscategorie")}</small></span></label>;
+                  })}
+                  {validated && expenseOptions.length === 0 && <p className="fab-inline-error">{copy("Wave returned no expense accounts. Add an expense account in Wave and validate again.", "Wave heeft geen kostenrekeningen teruggegeven. Voeg een kostenrekening toe in Wave en valideer opnieuw.")}</p>}
+                </div>
+              </div>
+              <button className="fab-primary-button" type="submit" disabled={!connected || busy || !validated || !anchorAccountId || !defaultCategoryAccountId || selectedCategoryCount === 0}>{busy ? <Loader2 className="is-spinning" aria-hidden="true" /> : <Landmark aria-hidden="true" />} {copy("Save verified mapping", "Gevalideerde toewijzing opslaan")}</button>
             </form>
           </section>
 
@@ -257,6 +309,14 @@ function accountLabel(account: FabRecord): string {
   const subtype = record(account.subtype);
   const detail = text(subtype.name, text(subtype.value));
   return detail ? `${text(account.name, text(account.id))} - ${detail}` : text(account.name, text(account.id));
+}
+
+function expenseCategoryMap(accounts: FabRecord[]): Record<string, string> {
+  return Object.fromEntries(accounts.flatMap((account) => {
+    const category = text(account.name);
+    const accountId = text(account.id);
+    return category && accountId ? [[category, accountId]] : [];
+  }));
 }
 
 function errorMessage(cause: unknown, fallback: string): string {

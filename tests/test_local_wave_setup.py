@@ -42,6 +42,7 @@ class TestLocalWaveSetupService(unittest.TestCase):
                 "targetSystem": "waveapps_business",
                 "anchorAccountId": "anchor-1",
                 "defaultCategoryAccountId": "expense-1",
+                "categoryAccountIds": {"Office Expenses": "expense-1"},
             },
             actor="operator-1",
         )
@@ -51,6 +52,7 @@ class TestLocalWaveSetupService(unittest.TestCase):
         self.assertTrue(mapped["mapping"]["verified"])
         self.assertEqual(mapped["accountOptions"]["anchor"][0]["id"], "anchor-1")
         self.assertEqual(mapped["accountOptions"]["expense"][0]["id"], "expense-1")
+        self.assertEqual(mapped["mappingCoverage"]["percentage"], 100.0)
         events = self.ledger.list_audit_events(limit=10)
         rendered = json.dumps(events)
         self.assertNotIn("private-wave-token", rendered)
@@ -70,6 +72,27 @@ class TestLocalWaveSetupService(unittest.TestCase):
                 {"anchorAccountId": "unknown-account"},
                 actor="operator",
             )
+
+    def test_default_expense_account_alone_is_not_autonomy_ready(self):
+        self.service.save(
+            self.ledger,
+            {"accessToken": "token", "businessId": "business-1"},
+            actor="operator",
+        )
+        self._record_discovery()
+
+        result = self.service.save(
+            self.ledger,
+            {
+                "anchorAccountId": "anchor-1",
+                "defaultCategoryAccountId": "expense-1",
+            },
+            actor="operator",
+        )
+
+        self.assertEqual(result["status"], "needs_mapping")
+        self.assertFalse(result["ready"])
+        self.assertIn("categoryAccountIds", result["mapping"]["requiredMissing"])
 
     def test_clear_token_disconnects_without_removing_nonsecret_mapping(self):
         self.service.save(

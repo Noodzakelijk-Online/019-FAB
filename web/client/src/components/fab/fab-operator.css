@@ -651,6 +651,18 @@ html.fab-operator-active body {
 .fab-wave-form input:disabled,
 .fab-wave-form select:disabled { background: #f1f5f3; color: var(--fab-muted); cursor: not-allowed; }
 .fab-wave-form > .fab-primary-button { grid-column: 1 / -1; width: max-content; }
+.fab-wave-category-map { grid-column: 1 / -1; display: grid; gap: 9px; min-width: 0; }
+.fab-wave-category-map-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fab-wave-category-map-heading > div { display: grid; gap: 2px; }
+.fab-wave-category-map-heading strong { color: var(--fab-ink); font-size: 13px; }
+.fab-wave-category-map-heading small { color: var(--fab-muted); font-size: 11px; }
+.fab-wave-category-list { display: grid; max-height: 268px; overflow-y: auto; border: 1px solid var(--fab-line); border-radius: 5px; background: #fff; }
+.fab-wave-category-list > label { min-height: 54px; margin: 0; padding: 9px 10px; border-bottom: 1px solid var(--fab-line); }
+.fab-wave-category-list > label:last-child { border-bottom: 0; }
+.fab-wave-category-list > label > span { display: grid; gap: 2px; min-width: 0; }
+.fab-wave-category-list > label strong { overflow-wrap: anywhere; color: var(--fab-ink); font-size: 12px; }
+.fab-wave-category-list > label small { color: var(--fab-muted); font-size: 10px; font-weight: 500; line-height: 1.35; }
+.fab-wave-category-list .fab-inline-error { margin: 10px; }
 .fab-wave-disconnect { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid var(--fab-line); }
 .fab-wave-disconnect > button { width: max-content; color: var(--fab-red); border-color: #d7a3a0; }
 
