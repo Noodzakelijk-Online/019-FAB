@@ -283,6 +283,16 @@ class LocalConnectorIntakeService:
 
     def _sync_source(self, source: str) -> Dict[str, Any]:
         plan = self._source_plan(source)
+        existing_source = next((
+            item
+            for item in self.ledger.list_source_accounts(source_type=source, limit=100)
+            if str(item.get("source_identifier") or "") == str(plan["sourceIdentifier"])
+        ), None)
+        previous_metadata = (
+            dict(existing_source.get("metadata") or {})
+            if isinstance(existing_source, dict) and isinstance(existing_source.get("metadata"), dict)
+            else {}
+        )
         source_account_id = self.ledger.upsert_source_account({
             "sourceType": source,
             "sourceIdentifier": plan["sourceIdentifier"],
@@ -290,9 +300,11 @@ class LocalConnectorIntakeService:
             "status": "syncing" if plan["canSync"] else plan["status"],
             "lastScanAt": _now(),
             "metadata": {
+                **previous_metadata,
                 "configured": plan["configured"],
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
+                "scannerProfile": plan.get("scannerProfile"),
                 "nextAction": plan.get("nextAction"),
                 "externalSubmission": "not_executed",
             },
@@ -314,20 +326,46 @@ class LocalConnectorIntakeService:
 
         scan_started_at = _now()
         try:
-            fetcher = self.fetcher_factories[source](self.config)
+            fetcher_config = dict(self.config)
+            if source == "gmail":
+                checkpoint = _epoch_seconds(previous_metadata.get("lastSuccessfulSyncAt"))
+                overlap_seconds = int(_positive_float_config(
+                    self.config,
+                    "gmail_incremental_overlap_seconds",
+                    default=86400.0,
+                ))
+                if checkpoint:
+                    fetcher_config["gmail_incremental_after_epoch"] = max(
+                        1,
+                        checkpoint - overlap_seconds,
+                    )
+            fetcher = self.fetcher_factories[source](fetcher_config)
         except Exception as exc:
-            return self._source_failure(plan, source_account_id, exc, scan_started_at)
+            return self._source_failure(
+                plan,
+                source_account_id,
+                exc,
+                scan_started_at,
+                previous_metadata=previous_metadata,
+            )
 
         try:
             documents = fetcher.fetch_documents()
         except Exception as exc:
-            return self._source_failure(plan, source_account_id, exc, scan_started_at)
+            return self._source_failure(
+                plan,
+                source_account_id,
+                exc,
+                scan_started_at,
+                previous_metadata=previous_metadata,
+            )
         if not isinstance(documents, list):
             return self._source_failure(
                 plan,
                 source_account_id,
                 TypeError("Connector returned a non-list document payload"),
                 scan_started_at,
+                previous_metadata=previous_metadata,
             )
         registrar = LocalFolderIntake(self.ledger, allowed_extensions={"*"}, source=source)
         counters = {
@@ -391,12 +429,15 @@ class LocalConnectorIntakeService:
             "documentsImported": counters["registered"],
             "duplicatesDetected": counters["duplicates"],
             "metadata": {
+                **previous_metadata,
                 "configured": True,
                 "enabled": True,
                 "mode": plan["mode"],
+                "scannerProfile": plan.get("scannerProfile"),
                 "diagnostics": diagnostics,
                 "run": counters,
                 "error": error,
+                "lastSuccessfulSyncAt": _now() if status == "ready" else previous_metadata.get("lastSuccessfulSyncAt"),
                 "externalSubmission": "not_executed",
             },
         })
@@ -430,6 +471,7 @@ class LocalConnectorIntakeService:
         source_account_id: int,
         error: Exception,
         scan_started_at: str,
+        previous_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         message = _safe_error(error, self.config)
         self.ledger.upsert_source_account({
@@ -439,6 +481,7 @@ class LocalConnectorIntakeService:
             "status": "failed",
             "lastScanAt": scan_started_at,
             "metadata": {
+                **(previous_metadata or {}),
                 "configured": plan["configured"],
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
@@ -480,8 +523,16 @@ class LocalConnectorIntakeService:
             default=False,
         )
         source_identifier = self._source_identifier(source)
+        gmail_scanner_mode = _configured_bool(
+            self.config,
+            "gmail_scanner_mode",
+            default=False,
+        )
+        gmail_scanner_policy_ready = bool(
+            _list_config_value(self.config.get("gmail_trusted_senders"))
+        )
         label = {
-            "gmail": "Gmail",
+            "gmail": "Gmail scanner inbox" if gmail_scanner_mode else "Gmail",
             "google_drive": "Google Drive",
             "freshdesk": "Freshdesk",
             "google_photos": "Google Photos Picker",
@@ -512,7 +563,9 @@ class LocalConnectorIntakeService:
             }
         if not enabled:
             status = "disabled"
-        elif source == "google_drive" and self._drive_reauthorization_required():
+        elif source == "gmail" and gmail_scanner_mode and not gmail_scanner_policy_ready:
+            status = "needs_configuration"
+        elif source in {"gmail", "google_drive"} and self._reauthorization_required(source):
             status = "needs_authorization"
         elif not configured:
             status = "needs_configuration"
@@ -526,7 +579,8 @@ class LocalConnectorIntakeService:
             "enabled": enabled,
             "canSync": status == "ready",
             "status": status,
-            "mode": "read_only_connector",
+            "mode": "scanner_mailbox_read_only" if source == "gmail" and gmail_scanner_mode else "read_only_connector",
+            "scannerProfile": self._gmail_scanner_profile() if source == "gmail" else None,
             "nextAction": _next_action(source, status),
         }
 
@@ -565,13 +619,27 @@ class LocalConnectorIntakeService:
             "photos_credentials_path",
         ) and bool(token_path and token_path.lower().endswith(".json") and os.path.isfile(token_path))
 
-    def _drive_reauthorization_required(self) -> bool:
-        token_path = _config_path(
-            self.config,
-            "google_drive_token_file",
-            "drive_token_path",
-        )
+    def _reauthorization_required(self, source: str) -> bool:
+        token_keys = {
+            "gmail": ("gmail_token_file", "gmail_token_path"),
+            "google_drive": ("google_drive_token_file", "drive_token_path"),
+        }.get(source, ())
+        token_path = _config_path(self.config, *token_keys)
         return bool(token_path and os.path.isfile(f"{token_path}.reauthorize"))
+
+    def _gmail_scanner_profile(self) -> Dict[str, Any]:
+        trusted_senders = _list_config_value(self.config.get("gmail_trusted_senders"))
+        return {
+            "enabled": _configured_bool(self.config, "gmail_scanner_mode", default=False),
+            "trustedSenders": trusted_senders,
+            "query": str(
+                self.config.get("gmail_query")
+                or self.config.get("gmail_search_query")
+                or "has:attachment"
+            ),
+            "documentPolicy": "pdf_only_magic_verified",
+            "originalRetention": "email_unchanged",
+        }
 
     def _source_identifier(self, source: str) -> str:
         if source == "gmail":
@@ -607,6 +675,18 @@ def _normalize_sources(values: Optional[Iterable[str]]) -> list:
         if source and source not in normalized:
             normalized.append(source)
     return normalized
+
+
+def _list_config_value(value: Any) -> list:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = str(value or "").replace(";", ",").split(",")
+    return list(dict.fromkeys(
+        str(item or "").strip().lower()
+        for item in values
+        if str(item or "").strip()
+    ))
 
 
 def _empty_summary() -> Dict[str, int]:
@@ -709,6 +789,11 @@ def _next_action(source: str, status: str) -> Optional[str]:
             "Open Google Drive setup in the FAB operator dashboard, complete the desktop "
             "OAuth consent flow, and confirm the approved folder_id."
         )
+    if source == "gmail":
+        return (
+            "Open Gmail scanner setup in the FAB operator dashboard and complete the "
+            "read-only desktop OAuth consent flow."
+        )
     return f"Configure the read-only credentials and token required for {source}."
 
 
@@ -742,3 +827,16 @@ def _safe_error(error: Any, config: Dict[str, Any]) -> Optional[str]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _epoch_seconds(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0, int(parsed.timestamp()))

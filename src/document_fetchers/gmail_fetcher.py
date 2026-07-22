@@ -12,6 +12,8 @@ except ImportError:
     HttpError = Exception
 import os
 import base64
+from email.utils import parseaddr
+import re
 from typing import List, Dict, Any
 import pickle
 
@@ -39,12 +41,16 @@ class GmailFetcher(BaseFetcher):
         token_path = self.config.get("gmail_token_file") or self.config.get('gmail_token_path', 'token.pickle')
         credentials_path = self.config.get("gmail_credentials_file") or self.config.get('gmail_credentials_path', 'credentials.json')
 
-        if os.path.exists(token_path):
+        force_reauthorization = _as_bool(self.config.get("gmail_force_reauthorization"))
+        if os.path.exists(token_path) and not force_reauthorization:
             with open(token_path, 'rb') as token:
                 self.creds = pickle.load(token)
-        
-        if not self.creds or not self.creds.valid:
-            if self.creds and self.creds.expired and self.creds.refresh_token:
+
+        scopes_valid = bool(self.creds) and (
+            not hasattr(self.creds, "has_scopes") or self.creds.has_scopes(self.SCOPES)
+        )
+        if not self.creds or not self.creds.valid or not scopes_valid:
+            if self.creds and self.creds.expired and self.creds.refresh_token and scopes_valid:
                 self.creds.refresh(Request())
             else:
                 if not self._interactive_auth_enabled("gmail"):
@@ -54,6 +60,7 @@ class GmailFetcher(BaseFetcher):
                 flow = InstalledAppFlow.from_client_secrets_file(
                     credentials_path, self.SCOPES)
                 self.creds = flow.run_local_server(port=0)
+            os.makedirs(os.path.dirname(os.path.abspath(token_path)), exist_ok=True)
             with open(token_path, 'wb') as token:
                 pickle.dump(self.creds, token)
 
@@ -65,22 +72,48 @@ class GmailFetcher(BaseFetcher):
             self._fail_run(self.auth_error)
             return []
 
-        query = self.config.get("gmail_query") or self.config.get("gmail_search_query") or "has:attachment"
+        scanner_mode = _as_bool(self.config.get("gmail_scanner_mode"))
+        trusted_senders = _string_list(self.config.get("gmail_trusted_senders"))
+        if scanner_mode and not trusted_senders:
+            error = ValueError("Gmail scanner mode requires at least one trusted sender.")
+            self._fail_run(error)
+            return []
+        query = self.config.get("gmail_query") or self.config.get("gmail_search_query")
+        if not query:
+            query = _scanner_query(trusted_senders) if scanner_mode else "has:attachment"
+        incremental_after = _optional_epoch(self.config.get("gmail_incremental_after_epoch"))
+        effective_query = str(query).strip()
+        if incremental_after and not re.search(r"(?:^|\s)(?:after:|newer_than:)", effective_query, re.IGNORECASE):
+            effective_query = f"{effective_query} after:{incremental_after}"
         attachments_dir = self.config.get('gmail_attachment_download_dir') or self.config.get('attachments_save_dir', '/tmp/gmail_attachments')
         os.makedirs(attachments_dir, exist_ok=True)
         max_pages = _bounded_int(self.config.get("gmail_max_pages"), 50, 1, 500)
         max_messages = _bounded_int(self.config.get("gmail_max_messages"), 5000, 1, 50000)
+        max_attachment_bytes = _bounded_int(
+            self.config.get("gmail_max_attachment_bytes"),
+            25 * 1024 * 1024,
+            1024,
+            50 * 1024 * 1024,
+        )
 
         documents = []
         skipped = 0
         pages = 0
+        rejected = {
+            "untrusted_sender": 0,
+            "not_pdf": 0,
+            "invalid_pdf": 0,
+            "oversized": 0,
+            "missing_attachment": 0,
+        }
+        first_error = None
         try:
             page_token = None
             messages = []
             while pages < max_pages and len(messages) < max_messages:
                 request = self.service.users().messages().list(
                     userId="me",
-                    q=query,
+                    q=effective_query,
                     maxResults=min(500, max_messages - len(messages)),
                     **({"pageToken": page_token} if page_token else {}),
                 )
@@ -91,48 +124,119 @@ class GmailFetcher(BaseFetcher):
                 if not page_token:
                     break
 
-            for message in messages[:max_messages]:
-                msg = self.service.users().messages().get(userId='me', id=message['id']).execute()
-                for part in _attachment_parts(msg.get("payload") or {}):
-                    if part['filename'] and part['body'] and 'attachmentId' in part['body']:
-                        attachment_id = part['body']['attachmentId']
-                        attachment = self.service.users().messages().attachments().get(
-                            userId='me', messageId=message['id'], id=attachment_id).execute()
+            truncated = bool(page_token)
+            if truncated:
+                first_error = RuntimeError(
+                    "Gmail scan reached its configured page or message cap; increase the cap before advancing the source checkpoint."
+                )
 
-                        encoded = str(attachment.get("data") or "")
+            for message in messages[:max_messages]:
+                try:
+                    msg = self.service.users().messages().get(
+                        userId='me', id=message['id'], format='full'
+                    ).execute()
+                except Exception as error:
+                    skipped += 1
+                    first_error = first_error or error
+                    continue
+                payload = msg.get("payload") or {}
+                headers = _headers(payload)
+                sender_address = parseaddr(headers.get("from", ""))[1].strip().lower()
+                if scanner_mode and sender_address not in trusted_senders:
+                    rejected["untrusted_sender"] += 1
+                    skipped += 1
+                    continue
+                for part in _attachment_parts(payload):
+                    file_name = str(part.get('filename') or '').strip()
+                    body = part.get('body') if isinstance(part.get('body'), dict) else {}
+                    attachment_id = str(body.get('attachmentId') or '').strip()
+                    encoded = str(body.get("data") or "")
+                    if not encoded and attachment_id:
+                        try:
+                            attachment = self.service.users().messages().attachments().get(
+                                userId='me', messageId=message['id'], id=attachment_id
+                            ).execute()
+                            encoded = str(attachment.get("data") or "")
+                        except Exception as error:
+                            skipped += 1
+                            first_error = first_error or error
+                            continue
+                    if not file_name or not encoded:
+                        rejected["missing_attachment"] += 1
+                        skipped += 1
+                        continue
+                    if scanner_mode and not _pdf_candidate(file_name, part.get("mimeType")):
+                        rejected["not_pdf"] += 1
+                        skipped += 1
+                        continue
+                    try:
                         encoded += "=" * (-len(encoded) % 4)
                         file_data = base64.urlsafe_b64decode(encoded)
-                        file_name = part['filename']
-                        document_id = message['id'] + '_' + attachment_id
-                        local_path = self._content_download_path(
-                            attachments_dir,
-                            file_name,
-                            document_id,
-                            file_data,
-                        )
-
-                        with open(local_path, 'wb') as f:
-                            f.write(file_data)
-
-                        documents.append({
-                            'id': document_id,
-                            'source': 'gmail',
-                            'original_filename': file_name,
-                            'mime_type': part.get("mimeType"),
-                            'local_path': local_path,
-                            'timestamp': msg['internalDate'],
-                            'metadata': {
-                                'subject': next((header['value'] for header in msg['payload'].get('headers', []) if header['name'] == 'Subject'), ''),
-                                'from': next((header['value'] for header in msg['payload'].get('headers', []) if header['name'] == 'From'), ''),
-                                'message_id': message['id'],
-                                'attachment_id': attachment_id,
-                            }
-                        })
-                    else:
+                    except Exception:
+                        rejected["missing_attachment"] += 1
                         skipped += 1
-            self._finish_run(len(documents), skipped=skipped, pages=pages)
+                        continue
+                    if len(file_data) > max_attachment_bytes:
+                        rejected["oversized"] += 1
+                        skipped += 1
+                        continue
+                    if scanner_mode and not _is_pdf(file_data):
+                        rejected["invalid_pdf"] += 1
+                        skipped += 1
+                        continue
+                    stable_attachment_id = attachment_id or _inline_attachment_id(part, file_data)
+                    document_id = message['id'] + '_' + stable_attachment_id
+                    local_path = self._content_download_path(
+                        attachments_dir,
+                        file_name,
+                        document_id,
+                        file_data,
+                    )
+
+                    with open(local_path, 'wb') as f:
+                        f.write(file_data)
+
+                    documents.append({
+                        'id': document_id,
+                        'source': 'gmail',
+                        'original_filename': file_name,
+                        'mime_type': 'application/pdf' if scanner_mode else part.get("mimeType"),
+                        'local_path': local_path,
+                        'timestamp': msg.get('internalDate'),
+                        'metadata': {
+                            'subject': headers.get('subject', ''),
+                            'from': headers.get('from', ''),
+                            'sender_address': sender_address,
+                            'message_id': message['id'],
+                            'thread_id': msg.get('threadId'),
+                            'attachment_id': stable_attachment_id,
+                            'label_ids': list(msg.get('labelIds') or []),
+                            'scanner_profile': 'hp_eprint' if scanner_mode else None,
+                            'scanner_policy_verified': scanner_mode,
+                        }
+                    })
+            if first_error:
+                self._fail_run(first_error, fetched=len(documents), skipped=skipped, pages=pages)
+            else:
+                self._finish_run(len(documents), skipped=skipped, pages=pages)
+            self.last_run.update({
+                "query": effective_query,
+                "scannerMode": scanner_mode,
+                "trustedSenderCount": len(trusted_senders),
+                "incrementalAfter": incremental_after,
+                "truncated": truncated,
+                "rejected": rejected,
+            })
         except Exception as error:
             self._fail_run(error, fetched=len(documents), skipped=skipped, pages=pages)
+            self.last_run.update({
+                "query": effective_query,
+                "scannerMode": scanner_mode,
+                "trustedSenderCount": len(trusted_senders),
+                "incrementalAfter": incremental_after,
+                "truncated": bool(page_token),
+                "rejected": rejected,
+            })
         return documents
 
 
@@ -142,6 +246,67 @@ def _attachment_parts(payload: Dict[str, Any]):
             yield from _attachment_parts(part)
         if part.get("filename") and isinstance(part.get("body"), dict):
             yield part
+
+
+def _headers(payload: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        str(header.get("name") or "").strip().lower(): str(header.get("value") or "").strip()
+        for header in payload.get("headers") or []
+        if isinstance(header, dict) and str(header.get("name") or "").strip()
+    }
+
+
+def _string_list(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = str(value or "").replace(";", ",").split(",")
+    return list(dict.fromkeys(
+        str(item or "").strip().lower()
+        for item in values
+        if str(item or "").strip()
+    ))
+
+
+def _scanner_query(trusted_senders: List[str]) -> str:
+    sender_query = " OR ".join(f"from:{sender}" for sender in trusted_senders)
+    if len(trusted_senders) > 1:
+        sender_query = f"{{{sender_query}}}"
+    return f"label:all {sender_query} has:attachment filename:pdf"
+
+
+def _pdf_candidate(filename: str, mime_type: Any) -> bool:
+    return filename.lower().endswith(".pdf") and str(mime_type or "").lower() in {
+        "application/pdf",
+        "application/octet-stream",
+    }
+
+
+def _is_pdf(content: bytes) -> bool:
+    return content[:1024].lstrip(b"\x00\t\r\n ").startswith(b"%PDF-")
+
+
+def _inline_attachment_id(part: Dict[str, Any], content: bytes) -> str:
+    import hashlib
+
+    identity = f"{part.get('partId') or 'inline'}:{hashlib.sha256(content).hexdigest()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _optional_epoch(value: Any) -> int:
+    if value in (None, ""):
+        return 0
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:

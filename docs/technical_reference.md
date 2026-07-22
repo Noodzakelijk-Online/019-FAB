@@ -126,8 +126,12 @@ graph TD
 
 *   **Purpose**: Fetches email attachments from Gmail using the Gmail API.
 *   **Dependencies**: `google-api-python-client`, `google-auth-oauthlib`.
-*   **Configuration**: `gmail_credentials_file`, `gmail_token_file`, `gmail_attachment_download_dir`, `gmail_search_query`.
-*   **Runtime Behavior**: Follows Gmail `nextPageToken` pages up to configured limits, traverses nested MIME parts, writes content-addressed files, and refuses to start interactive OAuth from an unattended worker unless `interactive_auth=true` is explicitly selected for supervised setup.
+*   **Configuration**: `gmail_credentials_file`, `gmail_token_file`, `gmail_attachment_download_dir`, `gmail_search_query`, `gmail_scanner_mode`, `gmail_trusted_senders`, `gmail_max_attachment_bytes`.
+*   **Runtime Behavior**: Follows Gmail `nextPageToken` pages up to configured limits, traverses nested MIME parts, writes content-addressed files, and refuses to start interactive OAuth from an unattended worker unless `interactive_auth=true` is explicitly selected for supervised setup. Scanner mode additionally enforces an exact sender allowlist, PDF filename/MIME/magic-byte checks, bounded attachment size, stable message/attachment identity, per-item failure isolation, and read-only source retention. After a complete run, connector metadata advances a durable last-successful checkpoint; subsequent queries include a configurable overlap. A page/message cap is a partial run and never advances that checkpoint.
+
+### 2.6.1. Gmail scanner activation
+
+`LocalGmailAuthorizationCoordinator` and `/api/connectors/gmail/*` provide a loopback-only desktop OAuth setup flow. Credential JSON is schema/endpoint validated, written atomically with private permissions, and audited by hash without persisting secret values in the ledger. Credential rotation creates a reauthorization marker that blocks unattended collection until fresh consent succeeds. The React operator dashboard proxies only the fixed credential-install and read-only authorization endpoints; OAuth remains a user-owned browser action.
 
 ### 2.7. `src/document_fetchers/drive_fetcher.py` (`DriveFetcher`)
 

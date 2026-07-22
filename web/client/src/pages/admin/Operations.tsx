@@ -9,6 +9,7 @@ import { FabControlOverview } from "@/components/fab/FabControlOverview";
 import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
 import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
 import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
+import { FabGmailSetupDrawer } from "@/components/fab/FabGmailSetupDrawer";
 import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupDrawer";
 import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
@@ -36,6 +37,7 @@ export default function AdminOperations() {
   const [search, setSearch] = useState("");
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
   const [intakeDrawerOpen, setIntakeDrawerOpen] = useState(false);
+  const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
   const [driveSetupOpen, setDriveSetupOpen] = useState(false);
   const [waveSetupOpen, setWaveSetupOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
@@ -71,6 +73,8 @@ export default function AdminOperations() {
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
+  const installGmailCredentials = trpc.fab.installGmailCredentials.useMutation();
+  const startGmailAuthorization = trpc.fab.startGmailAuthorization.useMutation();
   const installGoogleDriveCredentials = trpc.fab.installGoogleDriveCredentials.useMutation();
   const startGoogleDriveAuthorization = trpc.fab.startGoogleDriveAuthorization.useMutation();
   const saveWaveSetup = trpc.fab.saveWaveSetup.useMutation();
@@ -108,6 +112,22 @@ export default function AdminOperations() {
     toast.success(copy("Google OAuth client installed locally.", "Google OAuth-client lokaal geïnstalleerd."));
     await controlCenter.refetch();
   }, [controlCenter, copy, installGoogleDriveCredentials]);
+
+  const installScannerCredentials = useCallback(async (file: File, replace: boolean) => {
+    await installGmailCredentials.mutateAsync({
+      filename: file.name,
+      contentBase64: await readFileBase64(file),
+      replace,
+    });
+    toast.success(copy("Gmail OAuth client installed locally.", "Gmail OAuth-client lokaal geinstalleerd."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, installGmailCredentials]);
+
+  const authorizeScanner = useCallback(async () => {
+    await startGmailAuthorization.mutateAsync();
+    toast.info(copy("Read-only Gmail authorization opened in your default browser.", "Alleen-lezen Gmail-autorisatie is geopend in je standaardbrowser."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, startGmailAuthorization]);
 
   const authorizeDrive = useCallback(async () => {
     await startGoogleDriveAuthorization.mutateAsync();
@@ -196,9 +216,11 @@ export default function AdminOperations() {
           )}
           {connected && <FabActivationChecklist
             waveSetup={data?.waveSetup || {}}
+            gmailAuthorization={data?.gmailAuthorization || {}}
             driveAuthorization={data?.driveAuthorization || {}}
             reviewSummary={data?.reviews.summary || {}}
             onOpenWave={() => setWaveSetupOpen(true)}
+            onOpenGmail={() => setGmailSetupOpen(true)}
             onOpenDrive={() => setDriveSetupOpen(true)}
             onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
           />}
@@ -276,6 +298,7 @@ export default function AdminOperations() {
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
             onSetupConnection={(connectionId) => {
+              if (connectionId === "gmail") setGmailSetupOpen(true);
               if (connectionId === "google_drive") setDriveSetupOpen(true);
               if (connectionId === "waveapps_business") setWaveSetupOpen(true);
             }}
@@ -298,6 +321,16 @@ export default function AdminOperations() {
         onUploadFile={uploadDocument}
         onFinished={finishIntake}
         onBusyChange={setUploading}
+      />
+      <FabGmailSetupDrawer
+        open={gmailSetupOpen}
+        connected={connected}
+        authorization={data?.gmailAuthorization || {}}
+        busy={installGmailCredentials.isPending || startGmailAuthorization.isPending}
+        onClose={() => setGmailSetupOpen(false)}
+        onInstallCredentials={installScannerCredentials}
+        onStartAuthorization={authorizeScanner}
+        onRefresh={async () => { await controlCenter.refetch(); }}
       />
       <FabGoogleDriveSetupDrawer
         open={driveSetupOpen}

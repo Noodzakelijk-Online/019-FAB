@@ -135,6 +135,12 @@ Configuration for fetching documents from Gmail.
 *   `query`: Gmail search query to filter emails. Examples:
     *   `has:attachment from:"example@vendor.com" subject:"Invoice"`
     *   `label:receipts after:2025/01/01`
+*   `scanner_mode`: Enables strict scanner-mailbox intake. In this mode FAB accepts only PDF filenames with an allowed PDF MIME type and a verified `%PDF-` file signature.
+*   `trusted_senders`: Comma-separated exact sender addresses accepted in scanner mode. The Noodzakelijk Online HP ePrint profile uses `eprintcenter@hp8.us`.
+*   `max_attachment_bytes`: Rejects oversized scanner attachments before writing them to the intake cache.
+*   `incremental_overlap_seconds`: Rechecks this many seconds before the durable last-successful checkpoint. The overlap prevents boundary loss while stable provider IDs keep repeated results idempotent.
+
+Use the **Gmail scanner** activation step in the operator dashboard to install a desktop OAuth client and complete user-owned, read-only Gmail consent. FAB reads matching attachments directly into its durable ledger; it does not stage them through Drive, mark messages read, add labels, or delete source email. The worker then runs OCR, field extraction, validation, duplicate detection, learned vendor categorization, routing, and the existing Wave approval/readback gates. Disable the older Apps Script trigger after activation so it cannot create a second, racing Drive copy.
 
 ### 4.3. `[google_drive]` Section
 

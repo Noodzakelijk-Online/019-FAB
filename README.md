@@ -3,8 +3,10 @@
 ## Overview
 This project aims to develop a fully automated system to fetch financial documents from various sources, extract relevant data, categorize them based on predefined rules, and enter the data into mijngeldzaken.nl and Waveapps accounts.
 
+The governed cutover from repository 025's Apps Script is documented in [docs/scanner_mailbox_migration.md](docs/scanner_mailbox_migration.md).
+
 ## Features
-- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
+- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Gmail can run as a strict scanner mailbox: exact trusted sender, PDF filename/MIME/signature validation, immutable local evidence, and no deletion or mutation of the source email. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
 - **Advanced Document Processing**: Utilizes OCR (Tesseract, Google Cloud Vision), including Dutch OCR, handwritten recognition, template matching, and line item extraction.
 - **Intelligent Categorization**: Employs rule-based, machine learning, and hybrid categorization approaches.
 - **Automated Data Entry**: Supports data entry into mijngeldzaken.nl (via browser automation) and Waveapps (via API).

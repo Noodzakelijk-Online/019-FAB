@@ -7,7 +7,9 @@ import {
   resolveFabReviewItem,
   runFabOperatorCommand,
   saveFabWaveSetup,
+  startFabGmailAuthorization,
   startFabGoogleDriveAuthorization,
+  uploadFabGmailCredentials,
   uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
   validateFabWaveSetup,
@@ -90,6 +92,13 @@ describe("FAB local API gateway", () => {
         tokenPresent: false,
         folderConfigured: true,
       },
+      "/api/connectors/gmail/authorization": {
+        status: "ready_to_authorize",
+        credentialsPresent: true,
+        tokenPresent: false,
+        scannerMode: true,
+        trustedSenders: ["eprintcenter@hp8.us"],
+      },
       "/api/wave/setup": {
         status: "needs_mapping",
         ready: false,
@@ -150,6 +159,11 @@ describe("FAB local API gateway", () => {
       status: "ready_to_authorize",
       credentialsPresent: true,
       tokenPresent: false,
+    });
+    expect(result.gmailAuthorization).toMatchObject({
+      status: "ready_to_authorize",
+      scannerMode: true,
+      trustedSenders: ["eprintcenter@hp8.us"],
     });
     expect(result.waveSetup).toMatchObject({
       status: "needs_mapping",
@@ -323,6 +337,40 @@ describe("FAB local API gateway", () => {
     });
     expect(started).toMatchObject({
       path: "/api/connectors/google-drive/authorization/start",
+      body: { actor: "fab_dashboard:7" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("installs Gmail credentials and starts only the read-only authorization workflow", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 202, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const installed = await uploadFabGmailCredentials({
+      filename: "gmail-client.json",
+      contentBase64: "e30=",
+      replace: false,
+      actor: "fab_dashboard:7",
+    });
+    const started = await startFabGmailAuthorization("fab_dashboard:7");
+
+    expect(installed).toMatchObject({
+      path: "/api/connectors/gmail/credentials",
+      body: {
+        filename: "gmail-client.json",
+        replace: false,
+        actor: "fab_dashboard:7",
+      },
+    });
+    expect(started).toMatchObject({
+      path: "/api/connectors/gmail/authorization/start",
       body: { actor: "fab_dashboard:7" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);

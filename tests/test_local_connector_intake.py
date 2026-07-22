@@ -224,6 +224,112 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(gmail["status"], "disabled")
             self.assertEqual(result["status"], "no_sources_enabled")
 
+    def test_gmail_scanner_plan_exposes_strict_profile_and_reauthorization_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
+            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            for path in (credentials_path, token_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+            with open(f"{token_path}.reauthorize", "wb") as handle:
+                handle.write(b"rotation pending")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalConnectorIntakeService(ledger, {
+                "gmail_enabled": True,
+                "gmail_credentials_file": credentials_path,
+                "gmail_token_file": token_path,
+                "gmail_attachment_download_dir": temp_dir,
+                "gmail_scanner_mode": True,
+                "gmail_trusted_senders": "eprintcenter@hp8.us",
+                "gmail_query": "label:all from:eprintcenter@hp8.us has:attachment filename:pdf",
+            })
+
+            gmail = next(item for item in service.plan()["sources"] if item["source"] == "gmail")
+
+            self.assertEqual(gmail["label"], "Gmail scanner inbox")
+            self.assertEqual(gmail["mode"], "scanner_mailbox_read_only")
+            self.assertEqual(gmail["status"], "needs_authorization")
+            self.assertFalse(gmail["canSync"])
+            self.assertEqual(gmail["scannerProfile"]["trustedSenders"], ["eprintcenter@hp8.us"])
+            self.assertEqual(gmail["scannerProfile"]["documentPolicy"], "pdf_only_magic_verified")
+
+    def test_gmail_scanner_plan_requires_a_trusted_sender_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
+            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            for path in (credentials_path, token_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+
+            service = LocalConnectorIntakeService(
+                LocalOperationsLedger(os.path.join(temp_dir, "operations.db")),
+                {
+                    "gmail_enabled": True,
+                    "gmail_credentials_file": credentials_path,
+                    "gmail_token_file": token_path,
+                    "gmail_attachment_download_dir": temp_dir,
+                    "gmail_scanner_mode": True,
+                    "gmail_trusted_senders": "",
+                },
+                fetcher_factories={"gmail": lambda _config: self.fail("unsafe connector was invoked")},
+            )
+
+            gmail = next(item for item in service.plan()["sources"] if item["source"] == "gmail")
+
+            self.assertEqual(gmail["status"], "needs_configuration")
+            self.assertFalse(gmail["canSync"])
+            self.assertEqual(gmail["scannerProfile"]["trustedSenders"], [])
+
+    def test_gmail_advances_incremental_checkpoint_only_after_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
+            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            for path in (credentials_path, token_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            observed_configs = []
+
+            def factory(config):
+                observed_configs.append(dict(config))
+                return _Fetcher([])
+
+            service = LocalConnectorIntakeService(
+                ledger,
+                {
+                    "gmail_enabled": True,
+                    "gmail_credentials_file": credentials_path,
+                    "gmail_token_file": token_path,
+                    "gmail_attachment_download_dir": temp_dir,
+                    "gmail_incremental_overlap_seconds": 3600,
+                },
+                fetcher_factories={"gmail": factory},
+            )
+
+            first = service.sync(["gmail"], actor="test")
+            second = service.sync(["gmail"], actor="test")
+
+            self.assertTrue(first["success"])
+            self.assertTrue(second["success"])
+            self.assertNotIn("gmail_incremental_after_epoch", observed_configs[0])
+            self.assertGreater(observed_configs[1]["gmail_incremental_after_epoch"], 0)
+            source = ledger.list_source_accounts(source_type="gmail")[0]
+            successful_checkpoint = source["metadata"]["lastSuccessfulSyncAt"]
+            self.assertTrue(successful_checkpoint)
+
+            def fail_factory(_config):
+                raise RuntimeError("provider unavailable")
+
+            service.fetcher_factories["gmail"] = fail_factory
+            failed = service.sync(["gmail"], actor="test")
+            source_after_failure = ledger.list_source_accounts(source_type="gmail")[0]
+
+            self.assertFalse(failed["success"])
+            self.assertEqual(
+                source_after_failure["metadata"]["lastSuccessfulSyncAt"],
+                successful_checkpoint,
+            )
+
     def test_drive_requires_an_approved_folder_scope(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "drive-credentials.json")

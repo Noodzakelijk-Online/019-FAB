@@ -159,7 +159,7 @@ html.fab-operator-active body {
 .fab-activation-heading > div { display: grid; }
 .fab-activation-heading > div > span { color: var(--fab-amber); font-size: 9px; font-weight: 760; text-transform: uppercase; }
 .fab-activation-heading h2 { margin: 3px 0 0; font-size: 17px; }
-.fab-activation-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.fab-activation-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .fab-activation-step { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 106px; padding: 12px 14px; border-right: 1px solid var(--fab-line); }
 .fab-activation-step:last-child { border-right: 0; }
 .fab-activation-step > div { display: grid; min-width: 0; }

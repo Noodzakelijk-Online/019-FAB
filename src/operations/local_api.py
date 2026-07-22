@@ -40,6 +40,7 @@ from src.operations.local_exports import (
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_grouping import LocalDocumentGroupingService
 from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
+from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_hai_connector import LocalHaiConnector
 from src.operations.local_intake import DEFAULT_ALLOWED_EXTENSIONS, LocalFolderIntake
 from src.operations.local_ledger import (
@@ -3718,6 +3719,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     ) or sorted(DEFAULT_ALLOWED_EXTENSIONS)
     ledger = LocalOperationsLedger(ledger_path)
     app = Flask(__name__)
+    app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(ledger, config)
     app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(ledger, config)
     app.config["FAB_LOCAL_LEDGER_PATH"] = ledger_path
     app.config["FAB_LOCAL_API_HOST"] = host
@@ -6650,6 +6652,52 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.get("/api/connectors/google-drive/relay")
     def google_drive_relay_status_api():
         return jsonify(DriveRelayIntakeService(ledger, config).status())
+
+    @app.get("/api/connectors/gmail/authorization")
+    def gmail_authorization_status_api():
+        return jsonify(app.config["FAB_GMAIL_AUTH"].status())
+
+    @app.post("/api/connectors/gmail/credentials")
+    def install_gmail_credentials_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        encoded = str(payload.get("contentBase64") or "")
+        if len(encoded) > 90_000:
+            return jsonify({"error": "Google OAuth credential payload exceeds the 64 KB limit"}), 413
+        replace = payload.get("replace", False)
+        if not isinstance(replace, bool):
+            return jsonify({"error": "replace must be a boolean"}), 400
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "contentBase64 must contain valid base64 data"}), 400
+        try:
+            result = app.config["FAB_GMAIL_AUTH"].install_credentials(
+                content,
+                filename=str(payload.get("filename") or ""),
+                replace=replace,
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 400
+        except (FileExistsError, RuntimeError) as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 409
+        return jsonify(result), 201
+
+    @app.post("/api/connectors/gmail/authorization/start")
+    def start_gmail_authorization_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = app.config["FAB_GMAIL_AUTH"].start(
+            actor=payload.get("actor") or "local_api",
+        )
+        if result.get("success"):
+            status_code = 200 if result.get("status") == "authorization_in_progress" else 202
+        else:
+            status_code = 409
+        return jsonify(result), status_code
 
     @app.get("/api/connectors/google-drive/authorization")
     def google_drive_authorization_status_api():

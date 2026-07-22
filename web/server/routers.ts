@@ -92,7 +92,9 @@ import {
   resolveFabReviewItem,
   runFabOperatorCommand,
   saveFabWaveSetup,
+  startFabGmailAuthorization,
   startFabGoogleDriveAuthorization,
+  uploadFabGmailCredentials,
   uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
   validateFabWaveSetup,
@@ -444,6 +446,20 @@ export const appRouter = router({
         contentBase64: z.string().min(4).max(8_500_000),
       }).strict())
       .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    installGmailCredentials: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
+        contentBase64: z.string().min(4).max(90_000),
+        replace: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => uploadFabGmailCredentials({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    startGmailAuthorization: fabOperatorProcedure
+      .mutation(async ({ ctx }) => startFabGmailAuthorization(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
     installGoogleDriveCredentials: fabOperatorProcedure
       .input(z.object({
         filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),

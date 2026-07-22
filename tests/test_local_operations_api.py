@@ -10,6 +10,7 @@ from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
+from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
 from src.operations.local_ledger import LocalOperationsLedger
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
@@ -495,6 +496,79 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertTrue(status["tokenPresent"])
             response_text = client.get("/api/audit").data.decode("utf-8")
             self.assertNotIn("api-test-client-secret", response_text)
+
+    def test_api_installs_and_launches_read_only_gmail_scanner_authorization(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            credentials_path = os.path.join(temp_dir, "credentials", "gmail.json")
+            token_path = os.path.join(temp_dir, "tokens", "gmail.pickle")
+            config = {
+                "fab_local_ledger_path": ledger_path,
+                "gmail_credentials_file": credentials_path,
+                "gmail_token_file": token_path,
+                "gmail_scanner_mode": True,
+                "gmail_trusted_senders": "eprintcenter@hp8.us",
+                "gmail_query": "label:all from:eprintcenter@hp8.us has:attachment filename:pdf",
+            }
+            app = create_app(config)
+            client = app.test_client()
+            credentials = json.dumps({
+                "installed": {
+                    "client_id": "fab-api-test.apps.googleusercontent.com",
+                    "client_secret": "gmail-api-test-client-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }).encode("utf-8")
+
+            initial = client.get("/api/connectors/gmail/authorization").get_json()
+            self.assertEqual(initial["status"], "credentials_required")
+            self.assertTrue(initial["scannerPolicyReady"])
+            installed = client.post(
+                "/api/connectors/gmail/credentials",
+                json={
+                    "filename": "gmail.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "actor": "api_test",
+                },
+            )
+            self.assertEqual(installed.status_code, 201)
+
+            ledger = LocalOperationsLedger(ledger_path)
+
+            def authorize(settings):
+                os.makedirs(os.path.dirname(settings["gmail_token_file"]), exist_ok=True)
+                with open(settings["gmail_token_file"], "wb") as handle:
+                    handle.write(b"test-token")
+                return {
+                    "success": True,
+                    "status": "authorized",
+                    "mailboxVerified": True,
+                    "emailAddress": "bookkeeping@example.com",
+                }
+
+            app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(
+                ledger,
+                config,
+                authorize=authorize,
+            )
+            started = client.post(
+                "/api/connectors/gmail/authorization/start",
+                json={"actor": "api_test"},
+            )
+            self.assertEqual(started.status_code, 202)
+            for _ in range(100):
+                status = client.get("/api/connectors/gmail/authorization").get_json()
+                if not status["authorizationInProgress"]:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status["status"], "authorized")
+            self.assertTrue(status["tokenPresent"])
+            self.assertEqual(status["emailAddress"], "bookkeeping@example.com")
+            response_text = client.get("/api/audit").data.decode("utf-8")
+            self.assertNotIn("gmail-api-test-client-secret", response_text)
 
     def test_google_drive_desktop_oauth_mutations_are_loopback_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
+import base64
 import os
 import shutil
 import tempfile
@@ -119,6 +120,98 @@ class TestDocumentFetchers(unittest.TestCase):
         self.assertEqual(service.users.return_value.messages.return_value.list.call_count, 2)
         for document in documents:
             os.remove(document["local_path"])
+
+    @patch("src.document_fetchers.gmail_fetcher.build")
+    @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.gmail_fetcher.Request")
+    @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
+    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    def test_gmail_scanner_profile_rejects_untrusted_and_invalid_pdf_attachments(
+        self,
+        mock_pickle,
+        mock_exists,
+        mock_Request,
+        mock_InstalledAppFlow,
+        mock_build,
+    ):
+        mock_exists.return_value = True
+        mock_pickle.load.return_value = MagicMock()
+        service = MagicMock()
+        mock_build.return_value = service
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "valid"}, {"id": "spoofed"}, {"id": "fake-pdf"}],
+        }
+        service.users.return_value.messages.return_value.get.return_value.execute.side_effect = [
+            _gmail_message("att-valid", "scan.pdf", sender="HP ePrint <eprintcenter@hp8.us>"),
+            _gmail_message("att-spoofed", "scan.pdf", sender="Attacker <other@example.com>"),
+            _gmail_message("att-fake", "scan.pdf", sender="eprintcenter@hp8.us"),
+        ]
+        service.users.return_value.messages.return_value.attachments.return_value.get.return_value.execute.side_effect = [
+            {"data": base64.urlsafe_b64encode(b"%PDF-1.7\nscanner").decode("ascii")},
+            {"data": base64.urlsafe_b64encode(b"not actually a pdf").decode("ascii")},
+        ]
+        config = {
+            **self.config,
+            "gmail_scanner_mode": True,
+            "gmail_trusted_senders": "eprintcenter@hp8.us",
+            "gmail_query": "label:all from:eprintcenter@hp8.us has:attachment filename:pdf",
+        }
+
+        fetcher = GmailFetcher(config)
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["metadata"]["sender_address"], "eprintcenter@hp8.us")
+        self.assertTrue(documents[0]["metadata"]["scanner_policy_verified"])
+        self.assertEqual(documents[0]["mime_type"], "application/pdf")
+        self.assertEqual(fetcher.last_run["rejected"]["untrusted_sender"], 1)
+        self.assertEqual(fetcher.last_run["rejected"]["invalid_pdf"], 1)
+        list_kwargs = service.users.return_value.messages.return_value.list.call_args.kwargs
+        self.assertEqual(list_kwargs["q"], config["gmail_query"])
+        os.remove(documents[0]["local_path"])
+
+    @patch("src.document_fetchers.gmail_fetcher.build")
+    @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.gmail_fetcher.Request")
+    @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
+    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    def test_gmail_fetcher_marks_capped_history_partial_and_uses_incremental_checkpoint(
+        self,
+        mock_pickle,
+        mock_exists,
+        mock_Request,
+        mock_InstalledAppFlow,
+        mock_build,
+    ):
+        mock_exists.return_value = True
+        mock_pickle.load.return_value = MagicMock()
+        service = MagicMock()
+        mock_build.return_value = service
+        service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
+            "messages": [{"id": "msg1"}],
+            "nextPageToken": "more-history",
+        }
+        service.users.return_value.messages.return_value.get.return_value.execute.return_value = _gmail_message(
+            "att1", "scan.pdf"
+        )
+        service.users.return_value.messages.return_value.attachments.return_value.get.return_value.execute.return_value = {
+            "data": base64.urlsafe_b64encode(b"%PDF-1.7\nscanner").decode("ascii"),
+        }
+        config = {
+            **self.config,
+            "gmail_max_messages": 1,
+            "gmail_incremental_after_epoch": 1_700_000_000,
+        }
+
+        fetcher = GmailFetcher(config)
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(fetcher.last_run["status"], "partial")
+        self.assertTrue(fetcher.last_run["truncated"])
+        query = service.users.return_value.messages.return_value.list.call_args.kwargs["q"]
+        self.assertEqual(query, "has:attachment after:1700000000")
+        os.remove(documents[0]["local_path"])
 
     @patch("src.document_fetchers.drive_fetcher.build")
     @patch("src.document_fetchers.drive_fetcher.InstalledAppFlow")
@@ -267,11 +360,14 @@ class TestDocumentFetchers(unittest.TestCase):
             if os.path.exists(self.config[key]):
                 shutil.rmtree(self.config[key])
 
-def _gmail_message(attachment_id, filename):
+def _gmail_message(attachment_id, filename, sender="vendor@example.com"):
     return {
         "internalDate": "1735689600000",
         "payload": {
-            "headers": [],
+            "headers": [
+                {"name": "Subject", "value": "Scanner document"},
+                {"name": "From", "value": sender},
+            ],
             "parts": [{
                 "filename": filename,
                 "body": {"attachmentId": attachment_id},

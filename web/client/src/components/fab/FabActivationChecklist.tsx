@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Cloud,
   FileCheck2,
+  Mail,
   ShieldCheck,
 } from "lucide-react";
 import { useFabLocale } from "./fabLocale";
@@ -10,23 +11,31 @@ import { bool, count, text, type FabRecord } from "./fabView";
 
 type FabActivationChecklistProps = {
   waveSetup: FabRecord;
+  gmailAuthorization: FabRecord;
   driveAuthorization: FabRecord;
   reviewSummary: FabRecord;
   onOpenWave: () => void;
+  onOpenGmail: () => void;
   onOpenDrive: () => void;
   onOpenReviews: () => void;
 };
 
 export function FabActivationChecklist({
   waveSetup,
+  gmailAuthorization,
   driveAuthorization,
   reviewSummary,
   onOpenWave,
+  onOpenGmail,
   onOpenDrive,
   onOpenReviews,
 }: FabActivationChecklistProps) {
   const { copy, status: localizedStatus } = useFabLocale();
   const waveReady = bool(waveSetup.ready);
+  const gmailReady = bool(gmailAuthorization.scannerPolicyReady)
+    && bool(gmailAuthorization.credentialsPresent)
+    && bool(gmailAuthorization.tokenPresent)
+    && !bool(gmailAuthorization.reauthorizationRequired);
   const driveReady = bool(driveAuthorization.credentialsPresent)
     && bool(driveAuthorization.tokenPresent)
     && bool(driveAuthorization.folderConfigured)
@@ -35,7 +44,7 @@ export function FabActivationChecklist({
   const reviewDocuments = count(reviewSummary.documents);
   const reviewsReady = reviewCountKnown && reviewDocuments === 0;
 
-  if (waveReady && driveReady && reviewsReady) return null;
+  if (waveReady && gmailReady && driveReady && reviewsReady) return null;
 
   return (
     <section className="fab-activation-checklist" aria-labelledby="fab-activation-title">
@@ -51,6 +60,14 @@ export function FabActivationChecklist({
           status={localizedStatus(text(waveSetup.status, "needs_token"))}
           actionLabel={copy("Connect Wave", "Wave koppelen")}
           onAction={onOpenWave}
+        />
+        <ActivationStep
+          icon={Mail}
+          complete={gmailReady}
+          title="Gmail scanner"
+          status={localizedStatus(text(gmailAuthorization.status, "credentials_required"))}
+          actionLabel={copy("Authorize Gmail", "Gmail autoriseren")}
+          onAction={onOpenGmail}
         />
         <ActivationStep
           icon={Cloud}

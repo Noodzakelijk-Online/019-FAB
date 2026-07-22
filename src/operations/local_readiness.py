@@ -250,7 +250,11 @@ class LocalReadinessService:
                 ready=any(path["exists"] for path in paths["intake"]),
                 details="Reads configured local_intake_paths into the local ledger.",
             ),
-            _oauth_source("gmail", "Gmail", credential_map["gmail_credentials"], credential_map["gmail_token"]),
+            _gmail_source(
+                credential_map["gmail_credentials"],
+                credential_map["gmail_token"],
+                self.config,
+            ),
             _drive_source(
                 credential_map["drive_credentials"],
                 credential_map["drive_token"],
@@ -521,6 +525,43 @@ def _oauth_source(identifier: str, label: str, credentials: Dict[str, Any], toke
     return source
 
 
+def _gmail_source(
+    credentials: Dict[str, Any],
+    token: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    scanner_mode = _truthy(_config_value(config, "gmail_scanner_mode", default=False))
+    label = "Gmail scanner inbox" if scanner_mode else "Gmail"
+    source = _oauth_source("gmail", label, credentials, token)
+    trusted_senders = [
+        item.lower()
+        for item in _list_config(config, "gmail_trusted_senders")
+    ]
+    reauthorization_required = bool(
+        token.get("path") and os.path.isfile(f"{token['path']}.reauthorize")
+    )
+    source["scannerMode"] = scanner_mode
+    source["trustedSenders"] = trusted_senders
+    source["query"] = str(
+        _config_value(config, "gmail_query", "gmail_search_query", default="has:attachment")
+    )
+    source["documentPolicy"] = "pdf_only_magic_verified" if scanner_mode else "configured_query"
+    if scanner_mode and not trusted_senders:
+        source["ready"] = False
+        source["status"] = "needs_attention"
+        source["details"] = "Scanner mode needs at least one exact trusted sender address."
+    elif reauthorization_required:
+        source["ready"] = False
+        source["status"] = "needs_auth"
+        source["details"] = "OAuth client changed; complete fresh Gmail consent before unattended intake."
+    elif source["ready"] and scanner_mode:
+        source["details"] = (
+            "Read-only scanner intake accepts only PDF attachments from the configured trusted sender; "
+            "the source email remains unchanged."
+        )
+    return source
+
+
 def _photos_picker_source(credentials: Dict[str, Any], token: Dict[str, Any]) -> Dict[str, Any]:
     source = _oauth_source(
         "google_photos",
@@ -667,6 +708,12 @@ def _list_config(config: Dict[str, Any], *keys: str) -> List[str]:
 
 def _has_value(config: Dict[str, Any], *keys: str) -> bool:
     return _config_value(config, *keys) not in (None, "")
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _config_value(config: Dict[str, Any], *keys: str, default: Any = None) -> Any:

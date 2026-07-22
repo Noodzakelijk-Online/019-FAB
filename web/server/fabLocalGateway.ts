@@ -59,6 +59,7 @@ export type FabControlCenter = {
     categoryOptions: string[];
     summary: JsonRecord;
   };
+  gmailAuthorization: JsonRecord;
   driveAuthorization: JsonRecord;
   waveSetup: JsonRecord;
   exceptions: JsonRecord[];
@@ -97,6 +98,7 @@ const READ_PATHS = {
   haiManifest: "/api/hai/manifest",
   driveWaveStatus: "/api/drive-wave/status",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
+  gmailAuthorization: "/api/connectors/gmail/authorization",
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",
   reviewQueue: "/api/review?status=open&limit=100",
@@ -283,6 +285,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
       summary: asRecord(resources.reviewQueue?.summary) || {},
     },
+    gmailAuthorization: resources.gmailAuthorization || {},
     driveAuthorization: resources.driveAuthorization || {},
     waveSetup,
     exceptions: arrayValue(exceptionsPayload.exceptions),
@@ -358,6 +361,32 @@ export async function uploadFabGoogleDriveCredentials(input: {
       actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
     }),
   }, { timeoutMs: 20_000 });
+}
+
+export async function uploadFabGmailCredentials(input: {
+  filename: string;
+  contentBase64: string;
+  replace?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/gmail/credentials", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: input.filename,
+      contentBase64: input.contentBase64,
+      replace: input.replace ?? false,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  }, { timeoutMs: 20_000 });
+}
+
+export async function startFabGmailAuthorization(actor: string): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/gmail/authorization/start", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
 }
 
 export async function startFabGoogleDriveAuthorization(actor: string): Promise<JsonRecord> {
@@ -457,6 +486,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     closeReadiness: {},
     delivery: { status: {}, summary: {}, workOrders: [], count: null },
     reviews: { workItems: [], categoryOptions: [], summary: {} },
+    gmailAuthorization: {},
     driveAuthorization: {},
     waveSetup: {},
     exceptions: [],
