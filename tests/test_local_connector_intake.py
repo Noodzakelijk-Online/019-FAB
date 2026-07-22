@@ -246,6 +246,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(drive["status"], "needs_configuration")
             self.assertEqual(result["status"], "attention_required")
             self.assertIn("folder_id", drive["nextAction"])
+            self.assertIn("Authorize-FAB-GoogleDrive.cmd", drive["nextAction"])
 
     def test_google_photos_requires_supervised_picker_instead_of_background_scan(self):
         with tempfile.TemporaryDirectory() as temp_dir:

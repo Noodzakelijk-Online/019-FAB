@@ -11,23 +11,71 @@ $webRoot = Join-Path $root "web"
 $dataRoot = Join-Path $root "data"
 $logsRoot = Join-Path $root "logs"
 $runtimePath = Join-Path $dataRoot "fab-runtime.json"
-$apiUrl = "http://127.0.0.1:5001/api/health"
-$dashboardUrl = "http://127.0.0.1:3000/admin/operations"
+$defaultApiPort = 5001
+$defaultWebPort = 3000
 
 function Test-FabEndpoint {
-    param([Parameter(Mandatory = $true)][string]$Url)
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$ExpectedService,
+        [string]$ApiToken = "",
+        [string]$ExpectedLocalApiEndpoint = ""
+    )
 
     try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
-        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+        $request = @{
+            Uri = $Url
+            UseBasicParsing = $true
+            TimeoutSec = 2
+        }
+        if ($ApiToken) {
+            $request.Headers = @{ Authorization = "Bearer $ApiToken" }
+        }
+        $response = Invoke-RestMethod @request
+        if ([string]$response.service -ne $ExpectedService) {
+            return $false
+        }
+        if ($ExpectedLocalApiEndpoint -and ([string]$response.localApiEndpoint).TrimEnd("/") -ne $ExpectedLocalApiEndpoint.TrimEnd("/")) {
+            return $false
+        }
+        return $true
     }
     catch {
-        $errorResponse = $_.Exception.Response
-        if ($errorResponse -and [int]$errorResponse.StatusCode -in @(401, 403)) {
-            return $true
-        }
         return $false
     }
+}
+
+function Test-TcpPortAvailable {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        $Port
+    )
+    try {
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
+function Find-AvailableFabPort {
+    param(
+        [Parameter(Mandatory = $true)][int]$StartPort,
+        [int]$Attempts = 20
+    )
+
+    for ($port = $StartPort; $port -lt ($StartPort + $Attempts); $port++) {
+        if (Test-TcpPortAvailable -Port $port) {
+            return $port
+        }
+    }
+    throw "No free loopback port was found from $StartPort through $($StartPort + $Attempts - 1)."
 }
 
 function Get-FabProcessId {
@@ -52,12 +100,15 @@ function Wait-FabEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$ExpectedService,
+        [string]$ApiToken = "",
+        [string]$ExpectedLocalApiEndpoint = "",
         [int]$TimeoutSeconds = 45
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if (Test-FabEndpoint -Url $Url) {
+        if (Test-FabEndpoint -Url $Url -ExpectedService $ExpectedService -ApiToken $ApiToken -ExpectedLocalApiEndpoint $ExpectedLocalApiEndpoint) {
             return
         }
         Start-Sleep -Milliseconds 500
@@ -86,6 +137,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "config\config.ini"))) {
 if (-not (Test-Path -LiteralPath (Join-Path $webRoot ".env"))) {
     Copy-Item -LiteralPath (Join-Path $webRoot ".env.example") -Destination (Join-Path $webRoot ".env")
 }
+
+$apiToken = & $python.Source -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
+if ($LASTEXITCODE -ne 0) {
+    throw "FAB could not read its local API configuration."
+}
+$apiToken = [string]$apiToken
 
 @(
     $dataRoot,
@@ -169,31 +226,110 @@ if (Test-Path -LiteralPath $runtimePath) {
 $apiPid = $null
 $workerPid = $null
 $webPid = $null
+$apiUrl = $null
+$dashboardUrl = $null
 if ($savedRuntime) {
     $apiPid = Get-FabProcessId -ProcessId $savedRuntime.apiPid -CommandMarker "src.operations.local_api"
     $workerPid = Get-FabProcessId -ProcessId $savedRuntime.workerPid -CommandMarker "src.run_worker"
     $webPid = Get-FabProcessId -ProcessId $savedRuntime.webPid -CommandMarker "pnpm"
+    if ($apiPid -and $savedRuntime.apiUrl -and (Test-FabEndpoint -Url $savedRuntime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken)) {
+        $apiUrl = [string]$savedRuntime.apiUrl
+    }
+    else {
+        $apiPid = $null
+    }
+    if ($webPid -and $savedRuntime.dashboardUrl) {
+        $savedDashboardUri = [System.Uri]$savedRuntime.dashboardUrl
+        $savedWebIdentityUrl = "$($savedDashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
+        $savedApiBaseUrl = if ($apiUrl) { ([System.Uri]$apiUrl).GetLeftPart([System.UriPartial]::Authority) } else { "" }
+        if ($savedApiBaseUrl -and (Test-FabEndpoint -Url $savedWebIdentityUrl -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $savedApiBaseUrl)) {
+            $dashboardUrl = [string]$savedRuntime.dashboardUrl
+        }
+        else {
+            $webPid = $null
+        }
+    }
 }
 
-if (-not (Test-FabEndpoint -Url $apiUrl)) {
-    $apiProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.operations.local_api") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "local-api.out.log") -RedirectStandardError (Join-Path $logsRoot "local-api.err.log") -PassThru
-    $apiPid = $apiProcess.Id
+if (-not $apiPid) {
+    $apiPort = Find-AvailableFabPort -StartPort $defaultApiPort
+    $apiUrl = "http://127.0.0.1:$apiPort/api/health"
+    $previousApiPort = $env:FAB_LOCAL_API_PORT
+    try {
+        $env:FAB_LOCAL_API_PORT = [string]$apiPort
+        $apiProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.operations.local_api") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "local-api.out.log") -RedirectStandardError (Join-Path $logsRoot "local-api.err.log") -PassThru
+        $apiPid = $apiProcess.Id
+    }
+    finally {
+        if ($null -eq $previousApiPort) {
+            Remove-Item Env:FAB_LOCAL_API_PORT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_LOCAL_API_PORT = $previousApiPort
+        }
+    }
 }
+$apiBaseUrl = ([System.Uri]$apiUrl).GetLeftPart([System.UriPartial]::Authority)
 
 if (-not $workerPid) {
     $workerProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.run_worker") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "worker.out.log") -RedirectStandardError (Join-Path $logsRoot "worker.err.log") -PassThru
     $workerPid = $workerProcess.Id
 }
 
-if (-not (Test-FabEndpoint -Url $dashboardUrl)) {
-    $webProcess = Start-Process -FilePath $pnpm.Source -ArgumentList @("--dir", $webRoot, "dev") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "web.out.log") -RedirectStandardError (Join-Path $logsRoot "web.err.log") -PassThru
-    $webPid = $webProcess.Id
+if (-not $webPid) {
+    $webPort = Find-AvailableFabPort -StartPort $defaultWebPort
+    $dashboardUrl = "http://127.0.0.1:$webPort/admin/operations"
+    $webIdentityUrl = "http://127.0.0.1:$webPort/api/fab/runtime"
+    $previousWebPort = $env:PORT
+    $previousLocalApiUrl = $env:FAB_LOCAL_API_URL
+    try {
+        $env:PORT = [string]$webPort
+        $env:FAB_LOCAL_API_URL = $apiBaseUrl
+        $webProcess = Start-Process -FilePath $pnpm.Source -ArgumentList @("--dir", $webRoot, "dev") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "web.out.log") -RedirectStandardError (Join-Path $logsRoot "web.err.log") -PassThru
+        $webPid = $webProcess.Id
+    }
+    finally {
+        if ($null -eq $previousWebPort) {
+            Remove-Item Env:PORT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:PORT = $previousWebPort
+        }
+        if ($null -eq $previousLocalApiUrl) {
+            Remove-Item Env:FAB_LOCAL_API_URL -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_LOCAL_API_URL = $previousLocalApiUrl
+        }
+    }
+}
+else {
+    $dashboardUri = [System.Uri]$dashboardUrl
+    $webIdentityUrl = "$($dashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
 }
 
-Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API"
-Wait-FabEndpoint -Url $dashboardUrl -Name "FAB operator dashboard" -TimeoutSeconds 60
+Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken
+Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -TimeoutSeconds 60
 if (-not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker")) {
     throw "FAB autonomous worker exited during startup. Check logs\worker.err.log."
+}
+
+try {
+    $driveStatusRequest = @{
+        Uri = "$apiBaseUrl/api/drive-wave/status"
+        UseBasicParsing = $true
+        TimeoutSec = 5
+    }
+    if ($apiToken) {
+        $driveStatusRequest.Headers = @{ Authorization = "Bearer $apiToken" }
+    }
+    $driveStatus = Invoke-RestMethod @driveStatusRequest
+    if ($driveStatus.status -eq "needs_authorization") {
+        Write-Warning "Google Drive is configured but not authorized. Run Authorize-FAB-GoogleDrive.cmd after installing the OAuth desktop credentials file."
+    }
+}
+catch {
+    Write-Warning "FAB could not read Drive authorization status during startup."
 }
 
 [ordered]@{
@@ -203,13 +339,15 @@ if (-not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker"
     workerPid = $workerPid
     webPid = $webPid
     apiUrl = $apiUrl
+    apiBaseUrl = $apiBaseUrl
     dashboardUrl = $dashboardUrl
+    webIdentityUrl = $webIdentityUrl
 } | ConvertTo-Json | Set-Content -LiteralPath $runtimePath -Encoding utf8
 
 Write-Host ""
 Write-Host "FAB is ready." -ForegroundColor Green
 Write-Host "Dashboard: $dashboardUrl"
-Write-Host "Detailed ledger: http://127.0.0.1:5001/"
+Write-Host "Detailed ledger: $apiBaseUrl/"
 Write-Host "Use Stop-FAB.cmd to stop the local services."
 
 if (-not $NoBrowser) {

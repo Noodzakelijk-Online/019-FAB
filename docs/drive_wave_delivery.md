@@ -54,9 +54,11 @@ id = <wave-business-id>
 ```
 
 The normal intake connector uses read-only Drive access. Moving existing Drive
-files requires a separately authorized full-Drive token. Perform that OAuth
-upgrade once under supervision by temporarily enabling `interactive_auth`, then
-disable interactive authorization before restarting the worker.
+files requires a separately authorized full-Drive token. Place the Google OAuth
+desktop client JSON at `credentials/drive_credentials.json`, then run
+`Authorize-FAB-GoogleDrive.cmd`. The supervised command opens Google in the
+operator's browser, writes the configured token, verifies access to the intake
+folder, and leaves unattended interactive authorization disabled.
 
 ## HAI contract
 

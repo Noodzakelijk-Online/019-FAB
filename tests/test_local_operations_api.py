@@ -275,6 +275,7 @@ class TestLocalOperationsApi(unittest.TestCase):
 
             health = client.get("/api/health")
             self.assertEqual(health.status_code, 200)
+            self.assertEqual(health.get_json()["service"], "fab-ledger-api")
             self.assertFalse(health.get_json()["authRequired"])
 
             dashboard = client.get("/api/dashboard")

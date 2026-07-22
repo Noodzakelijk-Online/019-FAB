@@ -224,6 +224,17 @@ autonomous worker, and dashboard on loopback, then opens the control room.
 Double-click `Stop-FAB.cmd` to stop only the processes recorded by that FAB
 runtime. Runtime logs are written under `logs/`.
 
+The launcher verifies FAB-specific service identity instead of trusting an
+occupied port. If another application uses `3000` or `5001`, FAB selects a
+free loopback port, records the actual URLs in `data/fab-runtime.json`, and
+opens the correct dashboard.
+
+For Google Drive intake and verified move-only archival, place a Google OAuth
+desktop client JSON at `credentials/drive_credentials.json`, then double-click
+`Authorize-FAB-GoogleDrive.cmd`. The supervised flow opens Google in your
+browser, writes `tokens/drive_token.pickle`, verifies access to the configured
+intake folder, and never prints or stores the token in the ledger.
+
 For manual startup or development:
 
 1. Start the Python ledger API from the repository root:

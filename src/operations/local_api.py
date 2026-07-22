@@ -3805,6 +3805,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         operations_health = LocalOperationsHealth(ledger, config).summarize()
         readiness = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions).compact()
         return jsonify({
+            "service": "fab-ledger-api",
+            "apiVersion": "1",
             "status": operations_health["status"],
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),

@@ -690,7 +690,10 @@ def _next_action(source: str, status: str) -> Optional[str]:
     if status == "disabled":
         return f"Enable {source} after its read-only credentials and approved source scope are configured."
     if source == "google_drive":
-        return "Configure read-only Drive credentials, a token, and the approved folder_id."
+        return (
+            "Install the OAuth desktop credentials, confirm folder_id, then run "
+            "Authorize-FAB-GoogleDrive.cmd."
+        )
     return f"Configure the read-only credentials and token required for {source}."
 
 

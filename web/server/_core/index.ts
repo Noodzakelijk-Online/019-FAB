@@ -11,6 +11,7 @@ import { serveStatic, setupVite } from "./vite";
 import { webhookLimiter, relaxedLimiter } from "../lib/rateLimiter";
 import { createLogger } from "../lib/logger";
 import { registerFabOperationsRoutes } from "../fabOperations";
+import { registerFabRuntimeRoute } from "../fabRuntime";
 import { ENV } from "./env";
 
 const log = createLogger("Server");
@@ -71,6 +72,8 @@ async function startServer() {
   // 10mb limit is generous for form data; file uploads go to S3
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ limit: "10mb", extended: true }));
+
+  registerFabRuntimeRoute(app);
 
   // ── OAuth callback ────────────────────────────────────────────
   registerOAuthRoutes(app);
