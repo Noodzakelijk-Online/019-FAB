@@ -110,7 +110,7 @@ export type FabResourceKey = keyof typeof READ_PATHS;
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
 
 const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord }> = {
-  run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true } },
+  run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true, includeConnectorSync: true } },
   rescan_intake: { path: "/api/intake/rescan", body: {} },
   process_imported: { path: "/api/documents/process-imported", body: { limit: 25 } },
   reprocess_incomplete: { path: "/api/documents/reprocess-incomplete", body: { limit: 25 } },

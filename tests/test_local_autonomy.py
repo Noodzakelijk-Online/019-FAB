@@ -27,6 +27,7 @@ class TestLocalAutonomousService(unittest.TestCase):
 
             response = client.get("/api/autonomy/plan")
             wave_sync_disabled = client.get("/api/autonomy/plan?includeWaveSync=false")
+            connector_sync_disabled = client.get("/api/autonomy/plan?includeConnectorSync=false")
             page = client.get("/")
 
             self.assertEqual(response.status_code, 200)
@@ -36,11 +37,17 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertIn("rescan_intake", payload["runnableActionIds"])
             self.assertIn("plan_wave_daily_reconciliation", payload["runnableActionIds"])
             self.assertIn("refresh_wave_entity_mirror", {action["id"] for action in payload["actions"]})
+            self.assertIn("sync_connector_sources", {action["id"] for action in payload["actions"]})
             disabled_action = next(
                 action for action in wave_sync_disabled.get_json()["actions"]
                 if action["id"] == "refresh_wave_entity_mirror"
             )
             self.assertIn("disabled for this request", disabled_action["blockedReason"])
+            disabled_connector_action = next(
+                action for action in connector_sync_disabled.get_json()["actions"]
+                if action["id"] == "sync_connector_sources"
+            )
+            self.assertIn("disabled for this request", disabled_connector_action["blockedReason"])
             self.assertIn("review_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("exception_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("approve_export_attempts", {action["id"] for action in payload["actions"]})
@@ -225,10 +232,12 @@ class TestLocalAutonomousService(unittest.TestCase):
             audit_actions = [event["action"] for event in client.get("/api/audit").get_json()["auditEvents"]]
             self.assertIn("local_autonomy.cycle_started", audit_actions)
             workflow = client.get(f"/api/workflows/{payload['workflowRunId']}").get_json()
-            self.assertEqual(len(workflow["steps"]), 12)
-            self.assertEqual(workflow["steps"][0]["step_key"], "rescan_intake")
-            self.assertEqual(workflow["steps"][0]["status"], "completed")
-            self.assertGreaterEqual(workflow["steps"][0]["duration_ms"], 0)
+            self.assertEqual(len(workflow["steps"]), 13)
+            self.assertEqual(workflow["steps"][0]["step_key"], "sync_connector_sources")
+            self.assertEqual(workflow["steps"][0]["status"], "skipped")
+            self.assertEqual(workflow["steps"][1]["step_key"], "rescan_intake")
+            self.assertEqual(workflow["steps"][1]["status"], "completed")
+            self.assertGreaterEqual(workflow["steps"][1]["duration_ms"], 0)
             self.assertEqual(workflow["stepSummary"]["completed"], len(payload["executedActions"]))
             self.assertEqual(workflow["stepSummary"]["skipped"], len(payload["skippedActions"]))
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
@@ -268,12 +277,94 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertNotIn("sensitive-value", result["error"])
             self.assertNotIn("unknown-secret", result["error"])
-            self.assertEqual(steps[0]["step_key"], "rescan_intake")
-            self.assertEqual(steps[0]["status"], "failed")
-            self.assertNotIn("sensitive-value", steps[0]["error_message"])
-            self.assertNotIn("unknown-secret", steps[0]["error_message"])
-            self.assertTrue(all(step["status"] == "not_run" for step in steps[1:]))
+            self.assertEqual(steps[0]["step_key"], "sync_connector_sources")
+            self.assertEqual(steps[0]["status"], "skipped")
+            self.assertEqual(steps[1]["step_key"], "rescan_intake")
+            self.assertEqual(steps[1]["status"], "failed")
+            self.assertNotIn("sensitive-value", steps[1]["error_message"])
+            self.assertNotIn("unknown-secret", steps[1]["error_message"])
+            self.assertTrue(all(step["status"] == "not_run" for step in steps[2:]))
             self.assertTrue(all(step["finished_at"] for step in steps))
+
+    def test_one_click_cycle_collects_connector_document_before_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_path = os.path.join(temp_dir, "scanner-receipt.txt")
+            with open(scan_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "Vendor: Test Vendor\nDate: 2026-06-28\n"
+                    "Total: EUR 42.50\nOffice supplies\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(
+                ledger,
+                {
+                    "fab_autonomy_ignore_health_blocks": True,
+                    "categorization_rules": {
+                        "Office Supplies": {
+                            "keywords": ["office supplies"],
+                            "vendors": ["test vendor"],
+                        }
+                    },
+                },
+                intake_paths=[],
+            )
+
+            with patch("src.operations.local_autonomy.LocalConnectorIntakeService") as connector_type:
+                connector = connector_type.return_value
+                connector.plan.return_value = {
+                    "enabledSources": ["gmail"],
+                    "syncableSources": ["gmail"],
+                    "sources": [{
+                        "source": "gmail",
+                        "status": "ready",
+                        "enabled": True,
+                        "canSync": True,
+                        "targetSystem": "waveapps_business",
+                    }],
+                }
+
+                def register_scan(**_kwargs):
+                    ledger.register_document({
+                        "source": "gmail",
+                        "sourceDocumentId": "scanner-message-1_attachment-1",
+                        "originalFilename": "scanner-receipt.txt",
+                        "mimeType": "text/plain",
+                        "storagePath": scan_path,
+                        "processingStatus": "imported",
+                        "metadata": {"targetSystem": "waveapps_business"},
+                    })
+                    return {
+                        "success": True,
+                        "status": "completed",
+                        "workflowRunId": 42,
+                        "summary": {"registered": 1},
+                    }
+
+                connector.sync.side_effect = register_scan
+                result = service.run_cycle(
+                    include_wave_plan=False,
+                    include_wave_sync=False,
+                )
+
+            executed_ids = [action["id"] for action in result["executedActions"]]
+            self.assertTrue(result["success"])
+            self.assertLess(
+                executed_ids.index("sync_connector_sources"),
+                executed_ids.index("process_imported"),
+            )
+            connector.sync.assert_called_once_with(
+                sources=["gmail"],
+                actor="local_autonomy",
+                trigger_source="local_autonomous_cycle",
+                workflow_metadata={"parentWorkflow": "local_autonomous_cycle"},
+            )
+            document = ledger.list_documents(limit=1)[0]
+            self.assertNotEqual(document["processing_status"], "imported")
+            processing = next(
+                action for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(processing["summary"]["requested"], 1)
 
     def test_autonomy_surfaces_and_prepares_mijngeldzaken_downstream_routes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -243,6 +243,7 @@ class FabWorker:
             limit=25,
             include_wave_plan=self.include_wave_plan,
             include_wave_sync=self.include_wave_sync,
+            include_connector_sync=False,
         )
         self._record_audit(
             "autonomy_cycle",
