@@ -924,6 +924,240 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 {"low_confidence_categorization", "manual_review_category"},
             )
 
+    def test_reprocess_review_queue_refreshes_pending_duplicate_without_clearing_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "hornbach-duplicate.pdf")
+            source_bytes = b"retained duplicate source"
+            with open(receipt_path, "wb") as handle:
+                handle.write(source_bytes)
+            source_mtime = os.stat(receipt_path).st_mtime_ns
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            canonical_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "canonical",
+                "originalFilename": "canonical.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Different Vendor",
+                "transactionDate": "2023-07-12",
+                "totalAmount": 15.60,
+            })
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "hornbach-duplicate-review",
+                "originalFilename": "hornbach-duplicate.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": (
+                    "~ Eri is altijd iets te doen.\n"
+                    "Hornbach Bouwmarkt B.V.\n"
+                    "BTW-nummer: NL8075.08.093.B.01\n"
+                    "Totaal [4] EUR 15,60\n"
+                    "BRUTO BTW NETTO\n"
+                    "21% 15,60 2,71 12,89"
+                ),
+                "vendorName": "~ Eri is altijd iets te doen.",
+                "category": "Manual Review",
+                "totalAmount": 15.60,
+                "vatAmount": 8075.08,
+                "duplicateOfDocumentId": canonical_id,
+            })
+            duplicate_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": document_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "exact_content_match",
+                "confidenceScore": 1.0,
+                "status": "pending",
+            })
+            for reason in (
+                "duplicate_candidate",
+                "validation_failed",
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Machine review gate.",
+                })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+                config={
+                    "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                },
+                processor_pipeline=RaisingPipeline(),
+                categorizer=StaticCategorizer(
+                    category="Construction Materials & Tools",
+                    confidence_score=0.99,
+                ),
+                validator=StaticValidator(),
+            ).reprocess_review_queue(actor="test-operator")
+
+            self.assertEqual(summary["requested"], 1)
+            self.assertEqual(summary["reprocessed"], 1)
+            self.assertEqual(summary["backup"]["status"], "valid")
+            self.assertEqual(len(summary["backup"]["ledgerSha256"]), 64)
+            self.assertFalse(summary["sourceFilesModified"])
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["vendor_name"], "Hornbach Bouwmarkt B.V.")
+            self.assertIsNone(document["vat_amount"])
+            self.assertEqual(
+                document["category"],
+                "Construction Materials & Tools",
+            )
+            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertEqual(document["duplicate_of_document_id"], canonical_id)
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in document["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                },
+                {"duplicate_candidate"},
+            )
+            self.assertEqual(
+                ledger.list_duplicate_candidates(
+                    status="pending",
+                    document_id=document_id,
+                )[0]["id"],
+                duplicate_candidate_id,
+            )
+            with open(receipt_path, "rb") as handle:
+                self.assertEqual(
+                    hashlib.sha256(handle.read()).hexdigest(),
+                    hashlib.sha256(source_bytes).hexdigest(),
+                )
+            self.assertEqual(os.stat(receipt_path).st_mtime_ns, source_mtime)
+
+    def test_reprocess_review_queue_audits_resolved_and_new_review_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "mantel-review.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "mantel-original",
+                "originalFilename": "mantel-original.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Mantel",
+                "transactionDate": "2023-07-08",
+                "totalAmount": 24.95,
+                "extractedData": {
+                    "vendor_name": "Mantel",
+                    "transaction_date": "2023-07-08",
+                    "total_amount": 24.95,
+                },
+            })
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "mantel-review",
+                "originalFilename": "mantel-review.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": "mantel A\\\n08-07-2023\nTOTAAL 24,95",
+                "vendorName": "mantel A\\",
+                "category": "Manual Review",
+                "transactionDate": "2023-07-08",
+                "totalAmount": 24.95,
+            })
+            prior_review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Stale extraction requires review.",
+            })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+                processor_pipeline=RaisingPipeline(),
+                categorizer=StaticCategorizer(confidence_score=0.99),
+                validator=StaticValidator(),
+            ).reprocess_review_queue(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["resolvedReviewItems"], 1)
+            self.assertEqual(summary["openedReviewItems"], 1)
+            self.assertEqual(
+                summary["documents"][0]["resolvedReviewItemIds"],
+                [prior_review_id],
+            )
+            self.assertEqual(
+                summary["documents"][0]["openedReviewItems"],
+                1,
+            )
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in document["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                },
+                {"duplicate_candidate"},
+            )
+
+    def test_reprocess_review_queue_fails_closed_when_backup_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "blocked-review.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "blocked-review",
+                "originalFilename": "blocked-review.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": "ACTION\n12-07-2023\nTOTAAL 1,98",
+                "vendorName": "Unchanged Vendor",
+                "category": "Manual Review",
+                "totalAmount": 0.16,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Machine review gate.",
+            })
+            processor = LocalDocumentProcessor(
+                ledger,
+                config={
+                    "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                },
+                processor_pipeline=RaisingPipeline(),
+            )
+
+            with patch(
+                "src.operations.local_processing.LocalBackupService.inspect_backup",
+                return_value={"success": False, "status": "invalid"},
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "validated, checksum-bound",
+                ):
+                    processor.reprocess_review_queue(actor="test-operator")
+
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["vendor_name"], "Unchanged Vendor")
+            self.assertEqual(document["total_amount"], 0.16)
+            self.assertNotIn(
+                "storedOcrReassessment",
+                (document.get("metadata") or {}).get("processing") or {},
+            )
+            self.assertEqual(
+                ledger.list_audit_events(limit=1)[0]["action"],
+                "local_processing.review_queue_reassessment_blocked",
+            )
+
     def test_reprocess_review_queue_keeps_implausible_transaction_year_blocked(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             receipt_path = os.path.join(temp_dir, "future-year.pdf")

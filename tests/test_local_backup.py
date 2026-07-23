@@ -86,6 +86,30 @@ class TestLocalBackupService(unittest.TestCase):
             self.assertEqual(listed["backups"][0]["backupFilename"], backup["backupFilename"])
             self.assertEqual(listed["backups"][0]["status"], "valid")
 
+    def test_inspect_rejects_checksum_mismatched_ledger_bytes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            backup_dir = os.path.join(temp_dir, "backups")
+            service = LocalBackupService(
+                ledger,
+                {"fab_local_backup_dir": backup_dir},
+            )
+            backup = service.create_backup()
+            with zipfile.ZipFile(backup["backupPath"], "r") as archive:
+                manifest = archive.read("manifest.json")
+                ledger_bytes = bytearray(archive.read("fab_operations.sqlite3"))
+            ledger_bytes[-1] ^= 1
+            with zipfile.ZipFile(
+                backup["backupPath"],
+                "w",
+                zipfile.ZIP_DEFLATED,
+            ) as archive:
+                archive.writestr("manifest.json", manifest)
+                archive.writestr("fab_operations.sqlite3", ledger_bytes)
+
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                service.inspect_backup(backup["backupPath"])
+
 
 if __name__ == "__main__":
     unittest.main()

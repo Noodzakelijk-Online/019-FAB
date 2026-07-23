@@ -984,29 +984,73 @@ class LocalDocumentProcessor:
             "reviewItemsBefore": _open_review_count(documents),
             "reviewItemsAfter": 0,
             "resolvedReviewItems": 0,
+            "openedReviewItems": 0,
             "externalSubmission": "not_executed",
             "sourceFilesModified": False,
             "ocrRerun": False,
             "documents": [],
         }
         if documents and create_backup:
-            backup = LocalBackupService(self.ledger, self.config).create_backup(
-                note="Automatic pre-reassessment backup before stored OCR review reprocessing"
-            )
-            manifest = backup.get("manifest") or {}
-            summary["backup"] = {
-                "status": backup.get("status"),
-                "backupFilename": backup.get("backupFilename"),
-                "ledgerSha256": manifest.get("ledgerSha256"),
-                "ledgerBytes": manifest.get("ledgerBytes"),
-            }
+            try:
+                backup_service = LocalBackupService(self.ledger, self.config)
+                backup = backup_service.create_backup(
+                    note=(
+                        "Automatic pre-reassessment backup before stored OCR "
+                        "review reprocessing"
+                    )
+                )
+                inspection = backup_service.inspect_backup(str(backup["backupPath"]))
+                if not inspection.get("success") or inspection.get("status") != "valid":
+                    raise RuntimeError("The pre-reassessment backup did not pass validation.")
+                manifest = inspection.get("manifest") or {}
+                if not manifest.get("ledgerSha256") or not manifest.get("ledgerBytes"):
+                    raise RuntimeError(
+                        "The pre-reassessment backup is not checksum-bound."
+                    )
+                summary["backup"] = {
+                    "status": inspection.get("status"),
+                    "backupFilename": backup.get("backupFilename"),
+                    "ledgerSha256": manifest.get("ledgerSha256"),
+                    "ledgerBytes": manifest.get("ledgerBytes"),
+                }
+            except Exception as exc:
+                self.ledger.record_audit_event({
+                    "action": "local_processing.review_queue_reassessment_blocked",
+                    "entityType": "bookkeeping_document",
+                    "details": {
+                        "actor": actor,
+                        "candidateCount": len(candidates),
+                        "requested": len(documents),
+                        "reason": str(exc),
+                        "externalSubmission": "not_executed",
+                        "sourceFilesModified": False,
+                    },
+                })
+                raise RuntimeError(
+                    "Stored OCR reassessment requires a validated, "
+                    "checksum-bound ledger backup."
+                ) from exc
 
         for document in documents:
             document_id = int(document["id"])
-            before_count = len(_open_reviews(document))
+            before_open_review_ids = {
+                int(item["id"])
+                for item in _open_reviews(document)
+            }
+            before_count = len(before_open_review_ids)
             result = self.process_document(document_id, reuse_stored_ocr=True)
             refreshed = self.ledger.get_document(document_id) or document
-            after_count = len(_open_reviews(refreshed))
+            after_open_review_ids = {
+                int(item["id"])
+                for item in _open_reviews(refreshed)
+            }
+            after_count = len(after_open_review_ids)
+            resolved_review_item_ids = sorted(
+                before_open_review_ids - after_open_review_ids
+            )
+            opened_review_item_ids = sorted(
+                after_open_review_ids - before_open_review_ids
+            )
             reassessment = {
                 "version": STORED_OCR_REASSESSMENT_VERSION,
                 "actor": actor,
@@ -1015,7 +1059,10 @@ class LocalDocumentProcessor:
                 "status": result.get("status"),
                 "reviewItemsBefore": before_count,
                 "reviewItemsAfter": after_count,
-                "resolvedReviewItems": max(0, before_count - after_count),
+                "resolvedReviewItems": len(resolved_review_item_ids),
+                "resolvedReviewItemIds": resolved_review_item_ids,
+                "openedReviewItems": len(opened_review_item_ids),
+                "openedReviewItemIds": opened_review_item_ids,
                 "ocrRerun": False,
                 "externalSubmission": "not_executed",
             }
@@ -1028,6 +1075,7 @@ class LocalDocumentProcessor:
             summary["reprocessed"] += 1
             summary["reviewItemsAfter"] += after_count
             summary["resolvedReviewItems"] += reassessment["resolvedReviewItems"]
+            summary["openedReviewItems"] += reassessment["openedReviewItems"]
             status = result.get("status")
             if status == "processed":
                 summary["processed"] += 1
@@ -1040,6 +1088,9 @@ class LocalDocumentProcessor:
                 "reviewItemsBefore": before_count,
                 "reviewItemsAfter": after_count,
                 "resolvedReviewItems": reassessment["resolvedReviewItems"],
+                "resolvedReviewItemIds": resolved_review_item_ids,
+                "openedReviewItems": reassessment["openedReviewItems"],
+                "openedReviewItemIds": opened_review_item_ids,
             })
 
         self.ledger.record_audit_event({
@@ -1333,7 +1384,12 @@ class LocalDocumentProcessor:
         if not document:
             return {"documentId": document_id, "status": "not_found", "error": "Document not found"}
 
-        if document.get("duplicate_of_document_id"):
+        pending_duplicate_review = any(
+            str(item.get("reason") or "") == "duplicate_candidate"
+            for item in _open_reviews(document)
+        )
+        allow_duplicate_reassessment = reuse_stored_ocr and pending_duplicate_review
+        if document.get("duplicate_of_document_id") and not allow_duplicate_reassessment:
             self._queue_review(
                 document,
                 "duplicate_candidate",
@@ -1451,6 +1507,8 @@ class LocalDocumentProcessor:
             }
 
         review_reasons = self._review_reasons(processed_data, validation, category, confidence_score)
+        if allow_duplicate_reassessment:
+            review_reasons = _dedupe([*review_reasons, "duplicate_candidate"])
         duplicate_candidate_id = None
         duplicate_candidate_document_id = None
         duplicate_of_document_id = document.get("duplicate_of_document_id")
@@ -1912,12 +1970,14 @@ def _eligible_for_stored_ocr_reassessment(document: Dict[str, Any]) -> bool:
         return False
     if not _has_source_file(document):
         return False
-    if document.get("duplicate_of_document_id"):
-        return False
     if document.get("review_corrections"):
         return False
     open_reviews = _open_reviews(document)
-    if any(str(item.get("reason") or "") == "duplicate_candidate" for item in open_reviews):
+    has_pending_duplicate_review = any(
+        str(item.get("reason") or "") == "duplicate_candidate"
+        for item in open_reviews
+    )
+    if document.get("duplicate_of_document_id") and not has_pending_duplicate_review:
         return False
     return any(
         str(item.get("reason") or "") in STORED_OCR_REASSESSMENT_REASONS
