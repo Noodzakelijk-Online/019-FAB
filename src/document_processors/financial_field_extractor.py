@@ -35,12 +35,28 @@ class FinancialFieldExtractor:
         "grand total",
         "saldo",
     ]
-    TOTAL_EXCLUSION_LABELS = [
+    NON_PAYABLE_AMOUNT_LABELS = [
         "discount",
         "korting",
         "prijsvoordeel",
         "savings",
         "besparing",
+        "verzekerde bedrag",
+        "verzekerde bedragen",
+        "verzekerd bedrag",
+        "cataloguswaarde",
+        "eigen risico",
+        "schade",
+        "dekking",
+        "dekkingsbedrag",
+        "coverage limit",
+        "insured amount",
+        "policy limit",
+        "sum insured",
+        "bijstandsnorm",
+        "vrij te laten vermogen",
+        "vrijlatingsgrens",
+        "vermogen is",
     ]
     VAT_LABELS = ["btw", "vat", "tax", "omzetbelasting"]
     DATE_PRIMARY_LABELS = (
@@ -193,8 +209,8 @@ class FinancialFieldExtractor:
         for line_index, line in enumerate(text.splitlines()):
             lowered = line.lower()
             context = f"{previous_nonempty} {lowered}"
-            if any(label in lowered for label in self.TOTAL_EXCLUSION_LABELS):
-                line_weight = 0.35
+            if any(label in lowered for label in self.NON_PAYABLE_AMOUNT_LABELS):
+                line_weight = 0.2
             elif any(label in lowered for label in self.TOTAL_LABELS):
                 line_weight = 0.95
             elif any(label in context for label in self.TOTAL_LABELS):
@@ -216,6 +232,10 @@ class FinancialFieldExtractor:
         if not candidates:
             return None, None, 0.0
 
+        candidates = [candidate for candidate in candidates if candidate[2] >= 0.5]
+        if not candidates:
+            return None, None, 0.0
+
         labelled = [candidate for candidate in candidates if candidate[2] >= 0.85]
         if labelled:
             highest_confidence = max(candidate[2] for candidate in labelled)
@@ -227,7 +247,9 @@ class FinancialFieldExtractor:
                 amount, currency, _, line_index = candidates[-1]
                 chosen = (amount, currency, 0.85, line_index)
             else:
-                chosen = max(candidates, key=lambda candidate: abs(candidate[0]))
+                highest_confidence = max(candidate[2] for candidate in candidates)
+                finalists = [candidate for candidate in candidates if candidate[2] == highest_confidence]
+                chosen = max(finalists, key=lambda candidate: abs(candidate[0]))
         return chosen[0], chosen[1], chosen[2]
 
     def _extract_vat_amount(self, text: str) -> Tuple[Optional[float], float]:

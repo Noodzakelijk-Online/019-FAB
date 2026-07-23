@@ -1,6 +1,7 @@
 from datetime import date
 from typing import Any, Dict, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_reconciliation import LocalReconciliationService
@@ -11,6 +12,16 @@ OPEN_REVIEW_STATUSES = {"pending", "in_review"}
 RECONCILIATION_REVIEW_REASONS = {"reconciliation_candidate", "missing_receipt", "unmatched_document"}
 CATEGORY_REVIEW_REASONS = {"low_confidence_categorization", "manual_review_category"}
 BATCH_VENDOR_CATEGORY_REASONS = CATEGORY_REVIEW_REASONS
+CORRECTABLE_DOCUMENT_TYPES = {
+    "bank_statement",
+    "credit_note",
+    "estimate",
+    "government_correspondence",
+    "insurance_policy",
+    "order_confirmation",
+    "receipt",
+    "vendor_invoice",
+}
 
 
 class LocalReviewService:
@@ -329,6 +340,8 @@ class LocalReviewService:
                 reasons.update(CATEGORY_REVIEW_REASONS)
             if _has_valid_required_fields(document):
                 reasons.add("validation_failed")
+            if corrections.get("documentType"):
+                reasons.update({"document_type_conflict", "non_posting_document_type"})
 
         resolved_ids = []
         for item in document.get("review_items") or []:
@@ -372,6 +385,8 @@ class LocalReviewService:
         review_item_id: int,
         correction_id: int,
     ) -> Optional[int]:
+        if is_non_posting_document_type(document.get("document_type")):
+            return None
         vendor_name = str(document.get("vendor_name") or "").strip()
         category = str(document.get("category") or "").strip()
         if not vendor_name or not category or category.lower() in {"manual review", "uncategorized"}:
@@ -446,6 +461,8 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
         "targetSystem": "targetSystem",
         "duplicate_of_document_id": "duplicateOfDocumentId",
         "duplicateOfDocumentId": "duplicateOfDocumentId",
+        "document_type": "documentType",
+        "documentType": "documentType",
     }
     for key, value in corrections.items():
         mapped = mapping.get(key)
@@ -460,6 +477,11 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
             parsed_id = _int(value)
             if parsed_id is not None:
                 result[mapped] = parsed_id
+            continue
+        if mapped == "documentType":
+            document_type = str(value).strip().lower()
+            if document_type in CORRECTABLE_DOCUMENT_TYPES:
+                result[mapped] = document_type
             continue
         result[mapped] = str(value).strip()
     return result
@@ -488,6 +510,16 @@ def _build_document_update(document: Dict[str, Any], corrections: Dict[str, Any]
         update["duplicateOfDocumentId"] = corrections["duplicateOfDocumentId"]
     if "targetSystem" in corrections:
         metadata["targetSystem"] = corrections["targetSystem"]
+    if "documentType" in corrections:
+        document_type = corrections["documentType"]
+        update["documentType"] = document_type
+        extracted_data["document_type"] = document_type
+        metadata.setdefault("review", {})["documentTypeOverride"] = {
+            "documentType": document_type,
+            "source": "manual_review_correction",
+        }
+        if is_non_posting_document_type(document_type):
+            update["category"] = "Supporting Evidence"
 
     if corrections:
         extracted_data.setdefault("manual_corrections", {}).update(corrections)

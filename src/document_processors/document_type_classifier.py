@@ -5,7 +5,29 @@ from typing import Any, Dict, Iterable, List, Tuple
 class DocumentTypeClassifier:
     """Conservatively infer the bookkeeping role of an OCR document."""
 
+    CLASSIFIER_VERSION = "deterministic_financial_document_type_v2"
+
     _PATTERNS: Tuple[Tuple[str, float, Tuple[str, ...]], ...] = (
+        (
+            "government_correspondence",
+            0.99,
+            (
+                r"\bparticipatiewet\b",
+                r"\bbijstandsnorm\b",
+                r"\buitkeringsspecificatie\b",
+                r"\btoeslagbeschikking\b",
+            ),
+        ),
+        (
+            "insurance_policy",
+            0.98,
+            (
+                r"\bpolisblad\b",
+                r"\bverzekeringspolis\b",
+                r"\binsurance\s+policy\b",
+                r"\bpolicy\s+schedule\b",
+            ),
+        ),
         (
             "credit_note",
             0.97,
@@ -78,11 +100,20 @@ class DocumentTypeClassifier:
     )
 
     _POSTING_ELIGIBLE = {"receipt", "vendor_invoice"}
-    _REVIEW_REQUIRED = {"bank_statement", "credit_note", "estimate", "order_confirmation"}
+    _REVIEW_REQUIRED = {
+        "bank_statement",
+        "credit_note",
+        "estimate",
+        "government_correspondence",
+        "insurance_policy",
+        "order_confirmation",
+    }
     _EVIDENCE_PRIORITY = {
         "receipt": 100,
         "vendor_invoice": 100,
         "credit_note": 95,
+        "government_correspondence": 90,
+        "insurance_policy": 90,
         "bank_statement": 60,
         "order_confirmation": 30,
         "estimate": 20,
@@ -120,8 +151,22 @@ class DocumentTypeClassifier:
             "postingEligible": document_type in self._POSTING_ELIGIBLE,
             "reviewRequired": document_type in self._REVIEW_REQUIRED,
             "evidencePriority": self._EVIDENCE_PRIORITY.get(document_type, 0),
-            "classifier": "deterministic_financial_document_type_v1",
+            "classifier": self.CLASSIFIER_VERSION,
         }
+
+
+NON_POSTING_DOCUMENT_TYPES = frozenset({
+    "bank_statement",
+    "credit_note",
+    "estimate",
+    "government_correspondence",
+    "insurance_policy",
+    "order_confirmation",
+})
+
+
+def is_non_posting_document_type(value: Any) -> bool:
+    return str(value or "").strip().lower() in NON_POSTING_DOCUMENT_TYPES
 
 
 def _normalize_text(value: Any) -> str:
@@ -135,6 +180,8 @@ def _evidence_label(pattern: str) -> str:
 def _select_candidate(candidates: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     priority = {
         "credit_note": 6,
+        "government_correspondence": 7,
+        "insurance_policy": 7,
         "order_confirmation": 5,
         "bank_statement": 4,
         "estimate": 3,

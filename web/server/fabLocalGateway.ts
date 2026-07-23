@@ -440,6 +440,7 @@ export async function resolveFabReviewItem(input: {
     vatAmount?: number;
     targetSystem?: string;
     duplicateOfDocumentId?: number;
+    documentType?: "receipt" | "vendor_invoice" | "credit_note" | "order_confirmation" | "estimate" | "bank_statement" | "insurance_policy" | "government_correspondence";
   };
   learnRule?: boolean;
   applyToMatchingVendor?: boolean;

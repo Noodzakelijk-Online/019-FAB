@@ -8,8 +8,10 @@ Repository `Noodzakelijk-Online/025-Scan-to-folder-automation` contains two diff
 2. FAB independently checks the parsed sender address, filename, MIME type, size, and PDF signature.
 3. The attachment is written to a content-addressed local evidence path and registered by Gmail message and attachment ID.
 4. Exact-content duplicates and changed provider revisions are held in the existing review workflow.
-5. The autonomous cycle runs OCR, semantic document typing, extraction, validation, learned vendor categorization, and Wave draft preparation. Receipts and vendor invoices are postable evidence; order confirmations, estimates, credit notes, and bank statements remain review-gated.
+5. The autonomous cycle runs OCR, semantic document typing, extraction, validation, learned vendor categorization, and Wave draft preparation. Receipts and vendor invoices are postable evidence. Order confirmations, estimates, credit notes, bank statements, insurance policies, and government correspondence become non-posting supporting evidence.
 6. External posting remains approval-gated. Drive-originated files retain the stricter Wave transaction and exact attachment readback gate before move-only archival.
+
+Supporting-evidence records never expose extracted coverage limits, thresholds, deductibles, or other contextual figures as transaction amounts. The original observations remain attached to the source evidence. Conflicting invoice/policy classifications stay blocked until an operator records an audited document-type decision in the review workspace.
 
 The Gmail source message remains unchanged. FAB does not mark it read, relabel it, move it, or delete it. Unlike the old hourly script, the durable provider checkpoint and immutable content hash make overlapping scans idempotent without silently skipping older mail.
 

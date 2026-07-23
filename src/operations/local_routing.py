@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.data_entry.mijngeldzaken_autonomous_operator import MijngeldzakenAutonomousOperator
 from src.data_entry.mijngeldzaken_surface import (
     build_mijngeldzaken_action_payload,
@@ -57,6 +58,24 @@ class LocalRoutingService:
             return {"success": False, "status": "not_found", "error": "Document not found"}
 
         target_system = _normalize_target_system(target_system or _target_system(document))
+        document_type_block = _document_type_routing_block(document, target_system)
+        if document_type_block:
+            if target_system in MIJNGELDZAKEN_TARGET_SYSTEMS:
+                return self._record_mijngeldzaken_blocked_attempt(
+                    document,
+                    document_type_block["status"],
+                    document_type_block["message"],
+                    document_type_block["metadata"],
+                    workflow_run_id=workflow_run_id,
+                )
+            if target_system in WAVE_TARGET_SYSTEMS:
+                return self._record_blocked_attempt(
+                    document,
+                    document_type_block["status"],
+                    document_type_block["message"],
+                    document_type_block["metadata"],
+                    workflow_run_id=workflow_run_id,
+                )
         if target_system in MIJNGELDZAKEN_TARGET_SYSTEMS:
             return self._prepare_mijngeldzaken_document_route(document, target_system, workflow_run_id)
         if target_system not in WAVE_TARGET_SYSTEMS:
@@ -1260,7 +1279,61 @@ def _blank(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def _document_type_routing_block(document: Dict[str, Any], target_system: str) -> Optional[Dict[str, Any]]:
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+    override = review_metadata.get("documentTypeOverride")
+    override_type = (
+        str(override.get("documentType") or "").strip().lower()
+        if isinstance(override, dict)
+        else ""
+    )
+    stored_type = str(document.get("document_type") or extracted.get("document_type") or "").strip().lower()
+    processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+    classification = (
+        processing.get("documentTypeClassification")
+        if isinstance(processing.get("documentTypeClassification"), dict)
+        else {}
+    )
+    classified_type = str(classification.get("documentType") or "").strip().lower()
+    effective_type = override_type or stored_type
+
+    if is_non_posting_document_type(effective_type):
+        return {
+            "status": "blocked_non_posting_document_type",
+            "message": (
+                f"Document type {effective_type!r} is supporting evidence and cannot be posted "
+                "as a bookkeeping transaction."
+            ),
+            "metadata": {
+                "targetSystem": target_system,
+                "documentType": effective_type,
+                "postingEligible": False,
+                "manualDocumentTypeOverride": bool(override_type),
+            },
+        }
+    if not override_type and is_non_posting_document_type(classified_type):
+        return {
+            "status": "blocked_document_type_conflict",
+            "message": (
+                f"Stored document type {stored_type!r} conflicts with non-posting classifier result "
+                f"{classified_type!r}; an explicit document-type review is required."
+            ),
+            "metadata": {
+                "targetSystem": target_system,
+                "documentType": stored_type,
+                "classifiedDocumentType": classified_type,
+                "postingEligible": False,
+                "documentTypeConflict": True,
+            },
+        }
+    return None
+
+
 def _blocked_export_status(status: str) -> str:
+    if status in {"blocked_document_type_conflict", "blocked_non_posting_document_type"}:
+        return "not_applicable"
     if status == "needs_review":
         return "blocked_by_review"
     if status == "blocked_duplicate":

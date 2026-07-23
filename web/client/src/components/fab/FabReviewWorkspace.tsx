@@ -36,6 +36,7 @@ export type FabReviewResolution = {
     vatAmount?: number;
     targetSystem?: "waveapps_business" | "waveapps_personal" | "mijngeldzaken";
     duplicateOfDocumentId?: number;
+    documentType?: ReviewDocumentType;
   };
   learnRule?: boolean;
   applyToMatchingVendor?: boolean;
@@ -182,6 +183,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
       totalAmount: numericText(document.totalAmount),
       vatAmount: numericText(document.vatAmount),
       category: text(document.category, "") === "Manual Review" ? "" : text(document.category, ""),
+      documentType: normalizedDocumentType(document.documentType),
       targetSystem: text(document.targetSystem, "waveapps_business") as ReviewForm["targetSystem"],
       resolution: copy("Verified against the source document in FAB.", "Geverifieerd aan de hand van het brondocument in FAB."),
       learnRule: true,
@@ -205,12 +207,16 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   if (!item) return null;
   const document = asRecord(item.document);
   const reviewItems = records(item.reviewItems);
-  const detailReview = reviewItems.find((review) => text(review.reason, "") !== "duplicate_candidate") || null;
+  const detailReview = reviewItems.find((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")))
+    || reviewItems.find((review) => text(review.reason, "") !== "duplicate_candidate")
+    || null;
   const duplicateReview = reviewItems.find((review) => text(review.reason, "") === "duplicate_candidate") || null;
   const duplicateCandidates = records(item.duplicateCandidates);
   const duplicateCandidate = duplicateCandidates[0] || null;
   const candidateDocument = asRecord(duplicateCandidate?.document);
   const isBusy = resolvingReviewId !== null;
+  const typeDecisionRequired = reviewItems.some((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")));
+  const selectedNonPosting = NON_POSTING_DOCUMENT_TYPES.has(form.documentType);
   const detailReviewSupportsBatch = VENDOR_CATEGORY_REASONS.has(text(detailReview?.reason, ""));
   const matchingVendorDocuments = detailReviewSupportsBatch ? workItems.filter((candidate) => {
     if (text(candidate.id, "") === text(item.id, "")) return false;
@@ -225,6 +231,26 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
   async function approveDetails() {
     if (!detailReview) return;
+    if (selectedNonPosting) {
+      if (form.resolution.trim().length < 3) {
+        setError(copy("Add a short decision note.", "Voeg een korte beslisnotitie toe."));
+        return;
+      }
+      setError("");
+      try {
+        await onResolve({
+          reviewItemId: count(detailReview.id),
+          status: "approved",
+          resolution: form.resolution.trim(),
+          corrections: { documentType: form.documentType },
+          learnRule: false,
+          applyToMatchingVendor: false,
+        });
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : copy("Review update failed.", "Bijwerken van controle mislukt."));
+      }
+      return;
+    }
     const totalAmount = parseNumber(form.totalAmount);
     const vatAmount = form.vatAmount.trim() ? parseNumber(form.vatAmount) : undefined;
     if (!form.vendorName.trim() || !form.transactionDate || totalAmount === undefined || !form.category.trim()) {
@@ -248,6 +274,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           vatAmount,
           category: form.category.trim(),
           targetSystem: form.targetSystem,
+          documentType: typeDecisionRequired ? form.documentType : undefined,
         },
         learnRule: form.learnRule,
         applyToMatchingVendor: form.applyToMatchingVendor,
@@ -300,18 +327,21 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
               <div className="fab-subsection-heading"><div><span>{copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
-              <label><span>{copy("Vendor", "Leverancier")}</span><input value={form.vendorName} onChange={(event) => setForm({ ...form, vendorName: event.target.value })} required /></label>
-              <div className="fab-review-field-row">
-                <label><span>{copy("Transaction date", "Transactiedatum")}</span><input type="date" value={form.transactionDate} onChange={(event) => setForm({ ...form, transactionDate: event.target.value })} required /></label>
-                <label><span>{copy("Amount", "Bedrag")}</span><input type="number" min="0" step="0.01" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} required /></label>
-                <label><span>{copy("VAT", "Btw")}</span><input type="number" min="0" step="0.01" value={form.vatAmount} onChange={(event) => setForm({ ...form, vatAmount: event.target.value })} /></label>
-              </div>
-              <label><span>{copy("Wave category", "Wave-categorie")}</span><input list="fab-review-categories" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder={copy("Enter the exact Wave category", "Voer de exacte Wave-categorie in")} required /><datalist id="fab-review-categories">{categoryOptions.map((category) => <option key={category} value={category} />)}</datalist></label>
-              <label><span>{copy("Destination", "Bestemming")}</span><select value={form.targetSystem} onChange={(event) => setForm({ ...form, targetSystem: event.target.value as ReviewForm["targetSystem"] })}><option value="waveapps_business">Wave - Noodzakelijk Online</option><option value="waveapps_personal">Wave - Personal</option><option value="mijngeldzaken">MijnGeldzaken</option></select></label>
+              {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value as ReviewDocumentType })}>{DOCUMENT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{humanize(option)}</option>)}</select><small>{copy(`Classifier suggestion: ${humanize(text(document.classifiedDocumentType, "unknown"))}`, `Classificatievoorstel: ${humanize(text(document.classifiedDocumentType, "unknown"))}`)}</small></label>}
+              {!selectedNonPosting && <>
+                <label><span>{copy("Vendor", "Leverancier")}</span><input value={form.vendorName} onChange={(event) => setForm({ ...form, vendorName: event.target.value })} required /></label>
+                <div className="fab-review-field-row">
+                  <label><span>{copy("Transaction date", "Transactiedatum")}</span><input type="date" value={form.transactionDate} onChange={(event) => setForm({ ...form, transactionDate: event.target.value })} required /></label>
+                  <label><span>{copy("Amount", "Bedrag")}</span><input type="number" min="0" step="0.01" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} required /></label>
+                  <label><span>{copy("VAT", "Btw")}</span><input type="number" min="0" step="0.01" value={form.vatAmount} onChange={(event) => setForm({ ...form, vatAmount: event.target.value })} /></label>
+                </div>
+                <label><span>{copy("Wave category", "Wave-categorie")}</span><input list="fab-review-categories" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder={copy("Enter the exact Wave category", "Voer de exacte Wave-categorie in")} required /><datalist id="fab-review-categories">{categoryOptions.map((category) => <option key={category} value={category} />)}</datalist></label>
+                <label><span>{copy("Destination", "Bestemming")}</span><select value={form.targetSystem} onChange={(event) => setForm({ ...form, targetSystem: event.target.value as ReviewForm["targetSystem"] })}><option value="waveapps_business">Wave - Noodzakelijk Online</option><option value="waveapps_personal">Wave - Personal</option><option value="mijngeldzaken">MijnGeldzaken</option></select></label>
+              </>}
               <label><span>{copy("Decision note", "Beslisnotitie")}</span><textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })} rows={3} required /></label>
-              <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span>{copy("Suggest this vendor/category rule for future receipts", "Stel deze leverancier/categorieregel voor toekomstige bonnen voor")}</span></label>
-              {matchingVendorDocuments > 0 && <label className="fab-review-checkbox fab-review-batch"><input type="checkbox" checked={form.applyToMatchingVendor} onChange={(event) => setForm({ ...form, applyToMatchingVendor: event.target.checked })} /><span><strong>{copy(`Apply this category to ${matchingVendorDocuments} other exact vendor match${matchingVendorDocuments === 1 ? "" : "es"}`, `Pas deze categorie toe op ${matchingVendorDocuments} andere exacte leveranciersmatch${matchingVendorDocuments === 1 ? "" : "es"}`)}</strong><small>{copy("Dates and amounts stay unchanged. Duplicate and missing-field reviews remain open.", "Datums en bedragen blijven ongewijzigd. Controles voor duplicaten en ontbrekende velden blijven open.")}</small></span></label>}
-              <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
+              {!selectedNonPosting && <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span>{copy("Suggest this vendor/category rule for future receipts", "Stel deze leverancier/categorieregel voor toekomstige bonnen voor")}</span></label>}
+              {!selectedNonPosting && matchingVendorDocuments > 0 && <label className="fab-review-checkbox fab-review-batch"><input type="checkbox" checked={form.applyToMatchingVendor} onChange={(event) => setForm({ ...form, applyToMatchingVendor: event.target.checked })} /><span><strong>{copy(`Apply this category to ${matchingVendorDocuments} other exact vendor match${matchingVendorDocuments === 1 ? "" : "es"}`, `Pas deze categorie toe op ${matchingVendorDocuments} andere exacte leveranciersmatch${matchingVendorDocuments === 1 ? "" : "es"}`)}</strong><small>{copy("Dates and amounts stay unchanged. Duplicate and missing-field reviews remain open.", "Datums en bedragen blijven ongewijzigd. Controles voor duplicaten en ontbrekende velden blijven open.")}</small></span></label>}
+              <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
             </form>
           )}
 
@@ -338,6 +368,7 @@ type ReviewForm = {
   totalAmount: string;
   vatAmount: string;
   category: string;
+  documentType: ReviewDocumentType;
   targetSystem: "waveapps_business" | "waveapps_personal" | "mijngeldzaken";
   resolution: string;
   learnRule: boolean;
@@ -345,10 +376,19 @@ type ReviewForm = {
 };
 
 function emptyForm(): ReviewForm {
-  return { vendorName: "", transactionDate: "", totalAmount: "", vatAmount: "", category: "", targetSystem: "waveapps_business", resolution: "", learnRule: true, applyToMatchingVendor: false };
+  return { vendorName: "", transactionDate: "", totalAmount: "", vatAmount: "", category: "", documentType: "receipt", targetSystem: "waveapps_business", resolution: "", learnRule: true, applyToMatchingVendor: false };
 }
 
 const VENDOR_CATEGORY_REASONS = new Set(["manual_review_category", "low_confidence_categorization"]);
+const TYPE_REVIEW_REASONS = new Set(["document_type_conflict", "non_posting_document_type"]);
+const DOCUMENT_TYPE_OPTIONS = ["receipt", "vendor_invoice", "credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"] as const;
+type ReviewDocumentType = typeof DOCUMENT_TYPE_OPTIONS[number];
+const NON_POSTING_DOCUMENT_TYPES = new Set<ReviewDocumentType>(["credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]);
+
+function normalizedDocumentType(value: unknown): ReviewDocumentType {
+  const normalized = text(value, "receipt") as ReviewDocumentType;
+  return DOCUMENT_TYPE_OPTIONS.includes(normalized) ? normalized : "receipt";
+}
 
 function normalizedVendor(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();

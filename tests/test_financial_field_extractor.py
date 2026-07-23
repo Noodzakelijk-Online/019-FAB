@@ -99,6 +99,33 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(result["extracted_data"]["total_amount"], 12.02)
         self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
 
+    def test_insurance_coverage_limits_are_not_transaction_totals(self):
+        result = FinancialFieldExtractor().extract(
+            "Polisblad\nCataloguswaarde EUR 4.300,00\n"
+            "WA verzekerd bedrag EUR 2.500.000,00\n"
+            "Dekking EUR 6.100.000,00\nEigen risico EUR 75,00"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+        self.assertEqual(result["field_confidences"]["total_amount"], 0.0)
+
+    def test_payable_premium_outranks_insurance_coverage_limit(self):
+        result = FinancialFieldExtractor().extract(
+            "Factuur verzekeringspremie\n"
+            "Verzekerd bedrag EUR 6.100.000,00\nTe betalen EUR 125,40"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 125.4)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
+    def test_government_thresholds_are_not_transaction_totals(self):
+        result = FinancialFieldExtractor().extract(
+            "Participatiewet\nBijstandsnorm EUR 1.243,03\n"
+            "Vrij te laten vermogen EUR 15.210,00"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+
 
 if __name__ == "__main__":
     unittest.main()

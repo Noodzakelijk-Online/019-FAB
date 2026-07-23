@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_ledger import LocalOperationsLedger
 
 
@@ -42,6 +43,8 @@ class LocalBookkeepingRecordService:
 
         payload = self._document_record_payload(document, status=status)
         record_id = self.ledger.upsert_bookkeeping_record(payload)
+        if payload.get("recordType") == "supporting_document":
+            self.ledger.clear_bookkeeping_record_financial_values(record_id)
         line_items = _document_line_items(document, payload)
         self.ledger.replace_bookkeeping_record_line_items(record_id, line_items)
         return {
@@ -332,6 +335,8 @@ class LocalBookkeepingRecordService:
     ) -> Dict[str, Any]:
         extracted = dict(document.get("extracted_data") or {})
         metadata = dict(document.get("metadata") or {})
+        document_type = str(_first_present(document.get("document_type"), extracted.get("document_type"), "") or "").lower()
+        non_posting = is_non_posting_document_type(document_type)
         vendor_name = _first_present(document.get("vendor_name"), extracted.get("vendor_name"))
         category = _first_present(document.get("category"), extracted.get("category"))
         record_date = _first_present(document.get("transaction_date"), extracted.get("transaction_date"))
@@ -349,7 +354,7 @@ class LocalBookkeepingRecordService:
             item for item in document.get("review_items") or []
             if item.get("status") in OPEN_REVIEW_STATUSES
         ]
-        missing_fields = _missing_document_fields(
+        missing_fields = [] if non_posting else _missing_document_fields(
             vendor_name=vendor_name,
             category=category,
             record_date=record_date,
@@ -363,12 +368,19 @@ class LocalBookkeepingRecordService:
             missing_fields=missing_fields,
         )
         latest_routing = _latest_routing_attempt(document)
-        record_status = status or _record_status_for_document(
-            str(document.get("processing_status") or "draft"),
+        if non_posting and not review_required:
+            record_status = status or "supporting_evidence"
+        else:
+            record_status = status or _record_status_for_document(
+                str(document.get("processing_status") or "draft"),
+                review_required=review_required,
+            )
+        export_status = "not_applicable" if non_posting else _export_status_for_document(
+            document,
+            latest_routing,
             review_required=review_required,
         )
-        export_status = _export_status_for_document(document, latest_routing, review_required=review_required)
-        line_items = _document_line_items_from_values(
+        line_items = [] if non_posting else _document_line_items_from_values(
             extracted=extracted,
             category=category,
             target_account=target_account,
@@ -377,19 +389,30 @@ class LocalBookkeepingRecordService:
             description=description,
             confidence=confidence,
         )
-        export_readiness = _line_item_export_readiness(line_items, vat_amount)
+        export_readiness = (
+            {
+                "lineItemCount": 0,
+                "hasTaxEvidence": False,
+                "missingAccountMapping": [],
+                "missingTaxCode": [],
+                "postingEligible": False,
+                "readyForWaveDraft": False,
+            }
+            if non_posting
+            else _line_item_export_readiness(line_items, vat_amount)
+        )
         return {
             "documentId": document.get("id"),
             "sourceType": "document",
-            "recordType": _record_type(document, extracted, amount),
+            "recordType": "supporting_document" if non_posting else _record_type(document, extracted, amount),
             "status": record_status,
             "targetSystem": _target_system(document, extracted),
             "targetAccount": target_account,
             "vendorName": vendor_name,
             "category": category,
             "recordDate": record_date,
-            "amount": amount,
-            "vatAmount": vat_amount,
+            "amount": None if non_posting else amount,
+            "vatAmount": None if non_posting else vat_amount,
             "currency": currency,
             "description": description,
             "confidenceScore": confidence,
@@ -401,6 +424,9 @@ class LocalBookkeepingRecordService:
                 "sourceDocumentId": document.get("source_document_id"),
                 "originalFilename": document.get("original_filename"),
                 "documentType": document.get("document_type"),
+                "nonPostingDocumentType": non_posting,
+                "evidenceAmount": amount if non_posting else None,
+                "evidenceVatAmount": vat_amount if non_posting else None,
                 "documentProcessingStatus": document.get("processing_status"),
                 "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
                 "missingFields": missing_fields,
@@ -653,6 +679,8 @@ def _record_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _document_line_items(document: Dict[str, Any], record_payload: Dict[str, Any]) -> list:
+    if record_payload.get("recordType") == "supporting_document":
+        return []
     extracted = dict(document.get("extracted_data") or {})
     return _document_line_items_from_values(
         extracted=extracted,

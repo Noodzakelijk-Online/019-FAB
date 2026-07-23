@@ -162,7 +162,13 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertIn("non_posting_document_type", result["reviewReasons"])
             document = ledger.get_document(document_id)
             self.assertEqual(document["document_type"], "order_confirmation")
-            self.assertEqual(document["bookkeeping_record"]["export_status"], "blocked_by_review")
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "supporting_document")
+            self.assertEqual(document["bookkeeping_record"]["export_status"], "not_applicable")
+            self.assertIsNone(document["bookkeeping_record"]["amount"])
+            self.assertEqual(document["bookkeeping_record"]["metadata"]["evidenceAmount"], 42.5)
+            self.assertFalse(
+                document["bookkeeping_record"]["metadata"]["exportReadiness"]["readyForWaveDraft"]
+            )
 
     def test_document_type_backfill_is_audited_and_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -236,7 +242,11 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 if item["reason"] == "non_posting_document_type"
             ]
             self.assertEqual(len(reviews), 1)
-            self.assertEqual(ledger.get_document(document_id)["document_type"], "order_confirmation")
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["document_type"], "order_confirmation")
+            self.assertEqual(document["category"], "Supporting Evidence")
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "supporting_document")
+            self.assertEqual(document["bookkeeping_record"]["export_status"], "not_applicable")
 
     def test_process_text_document_queues_review_for_validation_and_sensitive_terms(self):
         with tempfile.TemporaryDirectory() as temp_dir:

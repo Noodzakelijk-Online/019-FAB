@@ -1842,6 +1842,18 @@ class LocalOperationsLedger:
         values["updated_at"] = self._now()
         self._update("bookkeeping_records", record_id, values)
 
+    def clear_bookkeeping_record_financial_values(self, record_id: int) -> None:
+        """Remove transaction-only values when a record becomes supporting evidence."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET amount = NULL, vat_amount = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
+
     def get_bookkeeping_record(self, record_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(

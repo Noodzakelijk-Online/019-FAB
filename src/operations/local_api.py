@@ -7467,6 +7467,12 @@ def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dic
         "sourceDocumentId": document.get("source_document_id"),
         "sourceUrl": provider.get("web_view_link"),
         "processingStatus": document.get("processing_status"),
+        "documentType": document.get("document_type"),
+        "classifiedDocumentType": (
+            ((metadata.get("processing") or {}).get("documentTypeClassification") or {}).get("documentType")
+            if isinstance(metadata.get("processing"), dict)
+            else None
+        ),
         "vendorName": document.get("vendor_name"),
         "transactionDate": document.get("transaction_date"),
         "totalAmount": document.get("total_amount"),
@@ -7518,6 +7524,7 @@ def _corrections_from_mapping(values: Any) -> Dict[str, Any]:
         "vatAmount",
         "targetSystem",
         "duplicateOfDocumentId",
+        "documentType",
     )
     corrections = {}
     for key in keys:

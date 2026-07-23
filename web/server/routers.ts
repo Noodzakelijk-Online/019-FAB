@@ -506,6 +506,7 @@ export const appRouter = router({
           vatAmount: z.number().finite().nonnegative().optional(),
           targetSystem: z.enum(["waveapps_business", "waveapps_personal", "mijngeldzaken"]).optional(),
           duplicateOfDocumentId: z.number().int().positive().optional(),
+          documentType: z.enum(["receipt", "vendor_invoice", "credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]).optional(),
         }).strict().optional(),
         learnRule: z.boolean().optional(),
         applyToMatchingVendor: z.boolean().optional(),

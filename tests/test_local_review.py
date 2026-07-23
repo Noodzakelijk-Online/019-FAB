@@ -9,6 +9,62 @@ from src.operations.local_review import LocalReviewService
 
 
 class TestLocalReviewService(unittest.TestCase):
+    def test_document_type_override_resolves_conflict_without_learning_non_posting_rule(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "policy-conflict",
+                "originalFilename": "policy.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "Insurer",
+                "category": "Insurance",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 6100000,
+                "metadata": {
+                    "processing": {
+                        "documentTypeClassification": {
+                            "documentType": "insurance_policy",
+                            "classifier": "deterministic_financial_document_type_v2",
+                        },
+                    },
+                },
+            })
+            conflict_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "document_type_conflict",
+                "details": "Confirm invoice or policy.",
+            })
+            non_posting_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "non_posting_document_type",
+                "details": "Classifier found supporting evidence.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                conflict_id,
+                status="approved",
+                resolution="Verified as an insurance policy.",
+                corrections={"documentType": "insurance_policy"},
+            )
+            document = ledger.get_document(document_id)
+            record = document["bookkeeping_record"]
+
+            self.assertTrue(result["success"])
+            self.assertIn(non_posting_id, result["supersededReviewItemIds"])
+            self.assertEqual(document["document_type"], "insurance_policy")
+            self.assertEqual(document["category"], "Supporting Evidence")
+            self.assertEqual(document["processing_status"], "reviewed")
+            self.assertEqual(
+                document["metadata"]["review"]["documentTypeOverride"]["documentType"],
+                "insurance_policy",
+            )
+            self.assertEqual(record["record_type"], "supporting_document")
+            self.assertEqual(record["export_status"], "not_applicable")
+            self.assertIsNone(record["amount"])
+            self.assertEqual(ledger.list_vendor_category_rules(), [])
+
     def test_resolve_review_applies_corrections_and_suggests_rule(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

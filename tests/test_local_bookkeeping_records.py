@@ -88,6 +88,39 @@ class TestLocalBookkeepingRecordService(unittest.TestCase):
             self.assertIn("vendorName", record["metadata"]["missingFields"])
             self.assertIn("amount", record["metadata"]["missingFields"])
 
+    def test_non_posting_document_becomes_supporting_evidence_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "policy-record",
+                "originalFilename": "policy.pdf",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Insurer",
+                "category": "Insurance",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 6100000,
+            })
+            service = LocalBookkeepingRecordService(ledger, {})
+            initial = service.upsert_from_document(document_id)
+            self.assertEqual(ledger.get_bookkeeping_record(initial["recordId"])["amount"], 6100000.0)
+            ledger.update_document(document_id, {
+                "documentType": "insurance_policy",
+                "category": "Supporting Evidence",
+            })
+
+            result = service.upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["record_type"], "supporting_document")
+            self.assertEqual(record["status"], "supporting_evidence")
+            self.assertEqual(record["export_status"], "not_applicable")
+            self.assertIsNone(record["amount"])
+            self.assertEqual(record["metadata"]["evidenceAmount"], 6100000.0)
+            self.assertEqual(record["line_item_count"], 0)
+            self.assertFalse(record["metadata"]["exportReadiness"]["readyForWaveDraft"])
+
     def test_resolve_record_applies_corrections_and_audit_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

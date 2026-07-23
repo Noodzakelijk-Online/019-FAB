@@ -5,7 +5,10 @@ from typing import Any, Dict, Optional
 
 from src.categorizers.hybrid_categorizer import HybridCategorizer
 from src.document_handling.duplicate_detector import DuplicateDetector
-from src.document_processors.document_type_classifier import DocumentTypeClassifier
+from src.document_processors.document_type_classifier import (
+    DocumentTypeClassifier,
+    is_non_posting_document_type,
+)
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
@@ -244,7 +247,7 @@ class LocalDocumentProcessor:
             metadata = dict(document.get("metadata") or {})
             processing = dict(metadata.get("processing") or {})
             existing = processing.get("documentTypeClassification") or {}
-            if existing.get("classifier") == "deterministic_financial_document_type_v1":
+            if existing.get("classifier") == self.document_type_classifier.CLASSIFIER_VERSION:
                 summary["alreadyClassified"] += 1
                 continue
             summary["evaluated"] += 1
@@ -256,6 +259,19 @@ class LocalDocumentProcessor:
             classified_type = str(classification.get("documentType") or "unknown")
             current_type = str(document.get("document_type") or "unknown").strip().lower()
             processing["documentTypeClassification"] = classification
+            non_posting = is_non_posting_document_type(classified_type)
+            active_review_reasons = []
+            if non_posting:
+                active_review_reasons.append("non_posting_document_type")
+                if any(term in str(document.get("ocr_text") or "").lower() for term in SENSITIVE_REVIEW_TERMS):
+                    active_review_reasons.append("sensitive_government_document")
+                if document.get("duplicate_of_document_id"):
+                    active_review_reasons.append("duplicate_candidate")
+                processing.update({
+                    "category": "Supporting Evidence",
+                    "confidenceScore": 1.0,
+                    "reviewReasons": _dedupe(active_review_reasons),
+                })
             metadata["processing"] = processing
             update_payload: Dict[str, Any] = {"metadata": metadata}
             applied_type = current_type
@@ -278,10 +294,25 @@ class LocalDocumentProcessor:
                 conflict = True
                 summary["conflicts"] += 1
 
+            if non_posting and not conflict:
+                extracted_data = dict(document.get("extracted_data") or {})
+                extracted_data["document_type"] = classified_type
+                update_payload.update({
+                    "category": "Supporting Evidence",
+                    "confidenceScore": 1.0,
+                    "extractedData": extracted_data,
+                })
+
             self.ledger.update_document(int(document["id"]), update_payload)
             if classified_type != "unknown" and not conflict:
                 self._replace_document_type_extracted_field(document, classification)
                 LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(int(document["id"]))
+                if non_posting:
+                    self._resolve_inactive_processing_reviews(
+                        int(document["id"]),
+                        active_review_reasons,
+                        actor="document_type_backfill",
+                    )
 
             if classification.get("reviewRequired"):
                 before_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
@@ -459,23 +490,36 @@ class LocalDocumentProcessor:
                 semantic_document_type = str(document.get("document_type") or "unknown")
             processed_data["document_type_classification"] = document_type_classification
             processed_data["extracted_data"] = extracted_data
-            category_result = self.categorizer.categorize(processed_data)
-            category = category_result.get("category", "Manual Review")
-            confidence_score = _safe_float(category_result.get("confidence_score"), 0.0)
-            applied_rule = self._approved_vendor_category_rule(document, extracted_data)
-            if applied_rule:
-                category = applied_rule["category"]
-                confidence_score = max(confidence_score or 0.0, _safe_float(applied_rule.get("confidence_score"), 1.0) or 1.0)
-                processed_data["applied_vendor_category_rule"] = {
-                    "ruleId": applied_rule["id"],
-                    "vendorName": applied_rule["vendor_name"],
-                    "category": applied_rule["category"],
-                    "targetSystem": applied_rule["target_system"],
-                    "status": applied_rule["status"],
+            non_posting = is_non_posting_document_type(semantic_document_type)
+            if non_posting:
+                category = "Supporting Evidence"
+                confidence_score = 1.0
+                validation = {
+                    "is_valid": True,
+                    "errors": [],
+                    "warnings": ["Document is retained as non-posting supporting evidence."],
+                    "reason": "Non-posting document type requires evidence review, not receipt validation.",
+                    "blocking": False,
+                    "validationType": "supporting_evidence",
                 }
+            else:
+                category_result = self.categorizer.categorize(processed_data)
+                category = category_result.get("category", "Manual Review")
+                confidence_score = _safe_float(category_result.get("confidence_score"), 0.0)
+                applied_rule = self._approved_vendor_category_rule(document, extracted_data)
+                if applied_rule:
+                    category = applied_rule["category"]
+                    confidence_score = max(confidence_score or 0.0, _safe_float(applied_rule.get("confidence_score"), 1.0) or 1.0)
+                    processed_data["applied_vendor_category_rule"] = {
+                        "ruleId": applied_rule["id"],
+                        "vendorName": applied_rule["vendor_name"],
+                        "category": applied_rule["category"],
+                        "targetSystem": applied_rule["target_system"],
+                        "status": applied_rule["status"],
+                    }
+                validation = self.validator.validate_receipt(processed_data)
             processed_data["category"] = category
             processed_data["confidence_score"] = confidence_score
-            validation = self.validator.validate_receipt(processed_data)
             duplicate_match = self._duplicate_match(document, extracted_data, processed_data)
         except Exception as exc:
             self.ledger.update_document(document_id, {
@@ -708,15 +752,19 @@ class LocalDocumentProcessor:
         reasons = []
         if not str(processed_data.get("ocr_text") or "").strip():
             reasons.append("empty_ocr_text")
+        document_type_classification = processed_data.get("document_type_classification") or {}
+        if document_type_classification.get("reviewRequired") and not document_type_classification.get("postingEligible"):
+            reasons.append("non_posting_document_type")
+            lowered_text = str(processed_data.get("ocr_text") or "").lower()
+            if any(term in lowered_text for term in SENSITIVE_REVIEW_TERMS):
+                reasons.append("sensitive_government_document")
+            return _dedupe(reasons)
         if validation.get("blocking"):
             reasons.append("validation_failed")
         if confidence_score < self.review_confidence_threshold:
             reasons.append("low_confidence_categorization")
         if str(category).strip().lower() in {"manual review", "uncategorized", ""}:
             reasons.append("manual_review_category")
-        document_type_classification = processed_data.get("document_type_classification") or {}
-        if document_type_classification.get("reviewRequired"):
-            reasons.append("non_posting_document_type")
         lowered_text = str(processed_data.get("ocr_text") or "").lower()
         if any(term in lowered_text for term in SENSITIVE_REVIEW_TERMS):
             reasons.append("sensitive_government_document")
