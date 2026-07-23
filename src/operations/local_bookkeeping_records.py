@@ -428,14 +428,22 @@ class LocalBookkeepingRecordService:
             confidence=confidence,
         )
         for index, item in enumerate(line_items):
-            line_item_issue = (item.get("metadata") or {}).get("financialFieldIssue")
-            if not isinstance(line_item_issue, dict):
-                continue
-            financial_field_issues.append({
-                **line_item_issue,
-                "field": f"lineItems[{index}].taxAmount",
-                "lineItemIndex": index,
-            })
+            item_metadata = item.get("metadata") or {}
+            line_item_issues = item_metadata.get("financialFieldIssues") or []
+            if not isinstance(line_item_issues, list):
+                line_item_issues = []
+            single_issue = item_metadata.get("financialFieldIssue")
+            if isinstance(single_issue, dict) and single_issue not in line_item_issues:
+                line_item_issues = [single_issue, *line_item_issues]
+            for line_item_issue in line_item_issues:
+                if not isinstance(line_item_issue, dict):
+                    continue
+                evidence_index = line_item_issue.get("evidenceLineItemIndex", index)
+                financial_field_issues.append({
+                    **line_item_issue,
+                    "field": f"lineItems[{evidence_index}].taxAmount",
+                    "lineItemIndex": evidence_index,
+                })
         open_reviews = [
             item for item in document.get("review_items") or []
             if item.get("status") in OPEN_REVIEW_STATUSES
@@ -806,15 +814,62 @@ def _document_line_items_from_values(
         if isinstance(item, dict)
     ]
     normalized = [item for item in normalized if _line_item_has_value(item)]
-    if normalized:
-        return normalized
+    normalized_with_amounts = [
+        item for item in normalized
+        if item.get("amount") is not None
+    ]
+    evidence_line_total = round(
+        sum(float(item["amount"]) for item in normalized_with_amounts),
+        2,
+    )
+    evidence_tax_total = round(
+        sum(float(item["taxAmount"]) for item in normalized_with_amounts if item.get("taxAmount") is not None),
+        2,
+    )
+    evidence_gross_total = round(evidence_line_total + evidence_tax_total, 2)
+    document_total = _float(amount)
+    tolerance = max(0.02, abs(document_total or 0.0) * 0.01)
+    amounts_reconcile = (
+        bool(normalized_with_amounts)
+        and (
+            document_total is None
+            or abs(evidence_line_total - document_total) <= tolerance
+            or abs(evidence_gross_total - document_total) <= tolerance
+        )
+    )
+    if amounts_reconcile:
+        return normalized_with_amounts
 
+    fallback_financial_issues = [
+        {
+            **issue,
+            "evidenceLineItemIndex": index,
+        }
+        for index, item in enumerate(normalized)
+        for issue in [(item.get("metadata") or {}).get("financialFieldIssue")]
+        if isinstance(issue, dict)
+    ]
     return [_normalize_line_item(
         {
             "description": description,
             "amount": amount,
-            "taxAmount": vat_amount,
-            "metadata": {"fallback": "document_total"},
+            "taxAmount": None if fallback_financial_issues else vat_amount,
+            "metadata": {
+                "fallback": "document_total",
+                "fallbackReason": (
+                    "no_extracted_line_amounts"
+                    if not normalized_with_amounts
+                    else "extracted_line_total_mismatch"
+                ),
+                "evidenceLineItemCount": len(normalized),
+                "evidenceLineAmountCount": len(normalized_with_amounts),
+                "evidenceLineTotal": evidence_line_total if normalized_with_amounts else None,
+                "evidenceLineTaxTotal": evidence_tax_total if normalized_with_amounts else None,
+                "evidenceLineGrossTotal": evidence_gross_total if normalized_with_amounts else None,
+                "documentTotal": document_total,
+                "financialFieldIssue": fallback_financial_issues[0] if fallback_financial_issues else None,
+                "financialFieldIssues": fallback_financial_issues,
+            },
         },
         category=category,
         target_account=target_account,
@@ -857,7 +912,12 @@ def _normalize_line_item(
     fallback_source: str,
 ) -> Dict[str, Any]:
     quantity = _float(_first_present(item.get("quantity"), item.get("qty")))
-    amount = _float(_first_present(item.get("amount"), item.get("total_amount"), item.get("totalAmount")))
+    amount = _float(_first_present(
+        item.get("amount"),
+        item.get("total"),
+        item.get("total_amount"),
+        item.get("totalAmount"),
+    ))
     unit_price = _float(_first_present(item.get("unit_price"), item.get("unitPrice"), item.get("price")))
     if amount is None and unit_price is not None and quantity not in (None, 0):
         amount = unit_price * quantity

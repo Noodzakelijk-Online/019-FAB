@@ -20,6 +20,7 @@ from src.data_entry.waveapps_personal_handler import WaveappsPersonalHandler
 from src.utils.rate_limiter import reset_all_limiters
 from src.data_entry.waveapps_surface import (
     WAVE_SURFACE_CATALOG,
+    build_wave_action_payload,
     build_wave_report_payload,
     classify_wave_destination,
     list_wave_actions,
@@ -373,6 +374,50 @@ class TestDataEntry(unittest.TestCase):
         self.assertEqual(account_transactions_payload["fromDate"], "2026-06-28")
         self.assertEqual(account_transactions_payload["format"], "csv")
         self.assertEqual(balance_sheet_payload["asOfDate"], "2026-06-28")
+
+    def test_wave_payload_uses_reconciled_ocr_line_totals(self):
+        payload = build_wave_action_payload(
+            {
+                "document_type": "receipt",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 25.10,
+                    "line_items": [{"description": "Hardware", "total": 25.10}],
+                },
+            },
+            "Construction Materials & Tools",
+            default_account="materials-account",
+        )
+
+        self.assertEqual(payload["lineItems"], [{
+            "description": "Hardware",
+            "amount": 25.10,
+            "category": "Construction Materials & Tools",
+            "account": "materials-account",
+        }])
+
+    def test_wave_payload_never_repeats_document_total_for_uncertain_lines(self):
+        payload = build_wave_action_payload(
+            {
+                "document_type": "receipt",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 25.10,
+                    "line_items": [
+                        {"description": "OCR gross column", "total": 28.10},
+                        {"description": "Unpriced OCR row"},
+                    ],
+                },
+            },
+            "Construction Materials & Tools",
+            default_account="materials-account",
+        )
+
+        self.assertEqual(len(payload["lineItems"]), 1)
+        self.assertEqual(payload["lineItems"][0]["amount"], 25.10)
+        self.assertEqual(payload["lineItems"][0]["description"], "Praxis")
 
     def test_waveapps_action_planner(self):
         transaction_plan = plan_wave_action(

@@ -88,6 +88,75 @@ class TestLocalBookkeepingRecordService(unittest.TestCase):
             self.assertIn("vendorName", record["metadata"]["missingFields"])
             self.assertIn("amount", record["metadata"]["missingFields"])
 
+    def test_extractor_total_alias_becomes_a_reconciled_line_amount(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-total-alias",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 25.10,
+                "extractedData": {
+                    "currency": "EUR",
+                    "line_items": [{"description": "Hardware", "total": 25.10}],
+                },
+                "metadata": {
+                    "targetSystem": "waveapps_business",
+                    "targetAccount": "Construction Materials & Tools",
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(record["line_items"][0]["amount"], 25.10)
+            self.assertEqual(record["line_items"][0]["source"], "extracted_line_item")
+
+    def test_mismatched_extracted_lines_fall_back_to_one_document_total(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-mismatched-lines",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 25.10,
+                "extractedData": {
+                    "currency": "EUR",
+                    "line_items": [
+                        {"description": "OCR gross column", "total": 28.10},
+                        {"description": "OCR VAT column", "total": 4.36},
+                    ],
+                },
+                "metadata": {
+                    "targetSystem": "waveapps_business",
+                    "targetAccount": "Construction Materials & Tools",
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+            line_item = record["line_items"][0]
+
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(line_item["amount"], 25.10)
+            self.assertEqual(line_item["source"], "document_total")
+            self.assertEqual(
+                line_item["metadata"]["fallbackReason"],
+                "extracted_line_total_mismatch",
+            )
+            self.assertEqual(line_item["metadata"]["evidenceLineItemCount"], 2)
+
     def test_impossible_legacy_vat_is_suppressed_but_preserved_as_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

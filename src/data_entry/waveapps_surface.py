@@ -2720,9 +2720,20 @@ def _normalize_wave_line_items(
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             continue
+        amount = _wave_number(
+            raw_item.get("amount")
+            if raw_item.get("amount") not in (None, "")
+            else raw_item.get("total")
+            if raw_item.get("total") not in (None, "")
+            else raw_item.get("total_amount")
+            if raw_item.get("total_amount") not in (None, "")
+            else raw_item.get("totalAmount")
+        )
+        if amount is None:
+            continue
         item = {
             "description": raw_item.get("description") or raw_item.get("item_name") or raw_item.get("itemName") or fallback_description,
-            "amount": raw_item.get("amount") if raw_item.get("amount") not in (None, "") else fallback_amount,
+            "amount": amount,
             "category": raw_item.get("category") or fallback_category,
             "account": (
                 raw_item.get("account")
@@ -2744,14 +2755,36 @@ def _normalize_wave_line_items(
         if tax_amount not in (None, ""):
             item["taxAmount"] = tax_amount
         line_items.append(item)
+    document_total = _wave_number(fallback_amount)
+    line_total = round(sum(float(item["amount"]) for item in line_items), 2)
+    tolerance = max(0.02, abs(document_total or 0.0) * 0.01)
     if line_items:
-        return line_items
+        if document_total is None or abs(line_total - document_total) <= tolerance:
+            return line_items
+        if abs(abs(line_total) - abs(document_total)) <= tolerance:
+            direction = -1.0 if document_total < 0 else 1.0
+            return [
+                {
+                    **item,
+                    "amount": round(abs(float(item["amount"])) * direction, 2),
+                }
+                for item in line_items
+            ]
     return [{
         "description": fallback_description,
-        "amount": fallback_amount,
+        "amount": document_total if document_total is not None else fallback_amount,
         "category": fallback_category,
         "account": default_account,
     }]
+
+
+def _wave_number(value: Any) -> Optional[float]:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return None
 
 
 def build_wave_expense_import_row(
