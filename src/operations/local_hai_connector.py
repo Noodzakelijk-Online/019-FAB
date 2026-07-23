@@ -8,6 +8,7 @@ HAI_CONNECTOR_VERSION = "fab-hai-connector-v1"
 DEFAULT_HAI_COMMAND_IDS = (
     "rescan_intake",
     "process_imported",
+    "reprocess_incomplete",
     "sync_sources",
     "run_safe_cycle",
     "run_due_recovery",
@@ -71,6 +72,12 @@ HAI_COMMANDS = (
         "process_imported",
         "Process imported documents",
         "Run OCR, validation, duplicate checks, and classification for imported documents.",
+        _bounded_limit_schema(25, 100),
+    ),
+    HaiCommand(
+        "reprocess_incomplete",
+        "Recover incomplete OCR",
+        "Retry only review-gated documents with blank OCR after creating a local ledger backup.",
         _bounded_limit_schema(25, 100),
     ),
     HaiCommand(
@@ -467,6 +474,7 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
     allowed_fields = {
         "rescan_intake": set(),
         "process_imported": {"limit"},
+        "reprocess_incomplete": {"limit"},
         "sync_sources": {"sources"},
         "run_safe_cycle": {"limit", "dryRun"},
         "run_due_recovery": {"limit"},

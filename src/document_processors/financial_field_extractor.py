@@ -35,6 +35,13 @@ class FinancialFieldExtractor:
         "grand total",
         "saldo",
     ]
+    TOTAL_EXCLUSION_LABELS = [
+        "discount",
+        "korting",
+        "prijsvoordeel",
+        "savings",
+        "besparing",
+    ]
     VAT_LABELS = ["btw", "vat", "tax", "omzetbelasting"]
     DATE_PRIMARY_LABELS = (
         "date paid",
@@ -186,7 +193,9 @@ class FinancialFieldExtractor:
         for line_index, line in enumerate(text.splitlines()):
             lowered = line.lower()
             context = f"{previous_nonempty} {lowered}"
-            if any(label in lowered for label in self.TOTAL_LABELS):
+            if any(label in lowered for label in self.TOTAL_EXCLUSION_LABELS):
+                line_weight = 0.35
+            elif any(label in lowered for label in self.TOTAL_LABELS):
                 line_weight = 0.95
             elif any(label in context for label in self.TOTAL_LABELS):
                 line_weight = 0.88

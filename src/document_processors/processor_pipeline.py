@@ -56,6 +56,9 @@ class ProcessorPipeline(BaseProcessor):
             "field_confidences": {},
             "language": "",
             "ocr_confidence": 0.0,
+            "ocr_strategy": "not_run",
+            "ocr_fallback_pages": 0,
+            "ocr_fallback_recovered_pages": 0,
         }
         current_path = document_path
 
@@ -78,6 +81,9 @@ class ProcessorPipeline(BaseProcessor):
                 )
                 processed_data["language"] = result.get("language", "")
                 processed_data["ocr_confidence"] = result.get("ocr_confidence", 0.0)
+                processed_data["ocr_strategy"] = result.get("ocr_strategy", "standard")
+                processed_data["ocr_fallback_pages"] = result.get("ocr_fallback_pages", 0)
+                processed_data["ocr_fallback_recovered_pages"] = result.get("ocr_fallback_recovered_pages", 0)
                 continue
 
             if isinstance(step, (TemplateMatchingProcessor, LineItemExtractor)):

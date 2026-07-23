@@ -7,6 +7,7 @@ from src.categorizers.hybrid_categorizer import HybridCategorizer
 from src.document_handling.duplicate_detector import DuplicateDetector
 from src.document_processors.document_type_classifier import DocumentTypeClassifier
 from src.document_processors.processor_pipeline import ProcessorPipeline
+from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.validation.validation_manager import ValidationManager
@@ -35,6 +36,7 @@ PROCESSING_REVIEW_REASONS = {
     "sensitive_government_document",
     "validation_failed",
 }
+OCR_RECOVERY_VERSION = "illumination_normalization_v1"
 
 
 class LocalDocumentProcessor:
@@ -99,6 +101,128 @@ class LocalDocumentProcessor:
                 "needsReview": summary["needsReview"],
                 "failed": summary["failed"],
                 "skipped": summary["skipped"],
+            },
+        })
+        return summary
+
+    def reprocess_incomplete(
+        self,
+        limit: int = 25,
+        actor: str = "fab_local_processing",
+        create_backup: bool = True,
+    ) -> Dict[str, Any]:
+        """Retry blank-OCR review records once without crossing approval gates."""
+        bounded_limit = max(1, min(_safe_int(limit) or 25, 100))
+        incomplete = [
+            document
+            for document in self.ledger.list_documents(status="needs_review", limit=500)
+            if not str(document.get("ocr_text") or "").strip()
+        ]
+        previously_attempted = [
+            document
+            for document in incomplete
+            if _ocr_recovery_version(document) == OCR_RECOVERY_VERSION
+        ]
+        missing_source = [
+            document
+            for document in incomplete
+            if _ocr_recovery_version(document) != OCR_RECOVERY_VERSION
+            and not _has_source_file(document)
+        ]
+        documents = [
+            document
+            for document in incomplete
+            if _ocr_recovery_version(document) != OCR_RECOVERY_VERSION
+            and _has_source_file(document)
+        ][:bounded_limit]
+        summary: Dict[str, Any] = {
+            "candidates": len(incomplete),
+            "requested": len(documents),
+            "reprocessed": 0,
+            "ocrRecovered": 0,
+            "stillEmpty": 0,
+            "processed": 0,
+            "needsReview": 0,
+            "failed": 0,
+            "skipped": len(previously_attempted) + len(missing_source),
+            "skippedPreviouslyAttempted": len(previously_attempted),
+            "skippedMissingSource": len(missing_source),
+            "externalSubmission": "not_executed",
+            "sourceFilesModified": False,
+            "documents": [],
+        }
+        if documents and create_backup:
+            backup = LocalBackupService(self.ledger, self.config).create_backup(
+                note="Automatic pre-recovery backup before blank OCR reprocessing"
+            )
+            manifest = backup.get("manifest") or {}
+            summary["backup"] = {
+                "status": backup.get("status"),
+                "backupFilename": backup.get("backupFilename"),
+                "ledgerSha256": manifest.get("ledgerSha256"),
+                "ledgerBytes": manifest.get("ledgerBytes"),
+            }
+
+        for document in documents:
+            document_id = int(document["id"])
+            attempted_at = _now()
+            self._record_ocr_recovery(document_id, document, {
+                "version": OCR_RECOVERY_VERSION,
+                "actor": actor,
+                "attemptedAt": attempted_at,
+                "previousStatus": document.get("processing_status"),
+                "status": "running",
+            })
+            result = self.process_document(document_id)
+            refreshed = self.ledger.get_document(document_id) or document
+            recovered = bool(str(refreshed.get("ocr_text") or "").strip())
+            self._record_ocr_recovery(document_id, refreshed, {
+                "version": OCR_RECOVERY_VERSION,
+                "actor": actor,
+                "attemptedAt": attempted_at,
+                "completedAt": _now(),
+                "previousStatus": document.get("processing_status"),
+                "status": "recovered" if recovered else "still_empty",
+                "ocrTextLength": len(str(refreshed.get("ocr_text") or "")),
+                "ocrStrategy": (refreshed.get("metadata") or {}).get("processing", {}).get("ocrStrategy"),
+            })
+            status = result.get("status")
+            summary["reprocessed"] += 1
+            summary["ocrRecovered" if recovered else "stillEmpty"] += 1
+            if result.get("skipped"):
+                summary["skipped"] += 1
+            elif status == "processed":
+                summary["processed"] += 1
+            elif status == "failed":
+                summary["failed"] += 1
+            else:
+                summary["needsReview"] += 1
+            summary["documents"].append({
+                **result,
+                "ocrRecovered": recovered,
+                "ocrTextLength": len(str(refreshed.get("ocr_text") or "")),
+            })
+
+        self.ledger.record_audit_event({
+            "action": "local_processing.incomplete_ocr_reprocessed",
+            "entityType": "bookkeeping_document",
+            "details": {
+                "actor": actor,
+                "recoveryVersion": OCR_RECOVERY_VERSION,
+                "candidates": summary["candidates"],
+                "requested": summary["requested"],
+                "reprocessed": summary["reprocessed"],
+                "ocrRecovered": summary["ocrRecovered"],
+                "stillEmpty": summary["stillEmpty"],
+                "processed": summary["processed"],
+                "needsReview": summary["needsReview"],
+                "failed": summary["failed"],
+                "skipped": summary["skipped"],
+                "skippedPreviouslyAttempted": summary["skippedPreviouslyAttempted"],
+                "skippedMissingSource": summary["skippedMissingSource"],
+                "backup": summary.get("backup"),
+                "externalSubmission": "not_executed",
+                "sourceFilesModified": False,
             },
         })
         return summary
@@ -407,6 +531,9 @@ class LocalDocumentProcessor:
                 "processing": {
                     "category": category,
                     "confidenceScore": confidence_score,
+                    "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
+                    "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
+                    "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
                     "reviewReasons": review_reasons,
                     "validation": validation,
                     "duplicateMatch": duplicate_match if duplicate_match.get("is_duplicate") else None,
@@ -481,6 +608,9 @@ class LocalDocumentProcessor:
                 "bookkeepingRecordId": record_result.get("recordId"),
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
                 "documentTypeClassification": document_type_classification,
+                "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
+                "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
+                "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
                 "resolvedReviewItemIds": resolved_review_item_ids,
             },
         })
@@ -494,6 +624,9 @@ class LocalDocumentProcessor:
             "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
             "documentType": semantic_document_type,
             "documentTypeClassification": document_type_classification,
+            "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
+            "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
+            "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
             "bookkeepingRecordId": record_result.get("recordId"),
             "resolvedReviewItemIds": resolved_review_item_ids,
         }
@@ -725,6 +858,16 @@ class LocalDocumentProcessor:
                 },
             })
 
+    def _record_ocr_recovery(
+        self,
+        document_id: int,
+        document: Dict[str, Any],
+        recovery: Dict[str, Any],
+    ) -> None:
+        self.ledger.update_document(document_id, {
+            "metadata": self._metadata(document, {"processing": {"ocrRecovery": recovery}}),
+        })
+
     @staticmethod
     def _metadata(document: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
         metadata = dict(document.get("metadata") or {})
@@ -742,6 +885,18 @@ def _is_text_document(path: str, document: Dict[str, Any]) -> bool:
     extension = os.path.splitext(path)[1].lower()
     mime_type = str(document.get("mime_type") or "").lower()
     return extension in TEXT_EXTENSIONS or mime_type.startswith("text/")
+
+
+def _ocr_recovery_version(document: Dict[str, Any]) -> str:
+    metadata = document.get("metadata") or {}
+    processing = metadata.get("processing") or {}
+    recovery = processing.get("ocrRecovery") or {}
+    return str(recovery.get("version") or "")
+
+
+def _has_source_file(document: Dict[str, Any]) -> bool:
+    path = str(document.get("storage_path") or "").strip()
+    return bool(path and os.path.isfile(path))
 
 
 def _duplicate_comparison_document(document: Dict[str, Any]) -> Dict[str, Any]:

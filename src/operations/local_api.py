@@ -4171,6 +4171,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100)
             )
 
+        def reprocess_incomplete_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalDocumentProcessor(ledger, config).reprocess_incomplete(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+            )
+
         def sync_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
             return LocalConnectorIntakeService(ledger, config).sync(
                 sources=payload.get("sources"),
@@ -4234,6 +4240,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             executors={
                 "rescan_intake": rescan_intake_command,
                 "process_imported": process_imported_command,
+                "reprocess_incomplete": reprocess_incomplete_command,
                 "sync_sources": sync_sources_command,
                 "run_safe_cycle": run_safe_cycle_command,
                 "run_due_recovery": run_due_recovery_command,
@@ -6004,6 +6011,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         payload = request.get_json(silent=True) or {}
         limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
         return jsonify(LocalDocumentProcessor(ledger, config).process_imported(limit=limit))
+
+    @app.post("/api/documents/reprocess-incomplete")
+    def reprocess_incomplete_documents():
+        payload = request.get_json(silent=True) or {}
+        limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
+        actor = str(payload.get("actor") or "fab_local_api")
+        return jsonify(LocalDocumentProcessor(ledger, config).reprocess_incomplete(
+            limit=limit,
+            actor=actor,
+        ))
 
     @app.post("/documents/process-imported")
     def process_imported_form():

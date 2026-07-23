@@ -36,11 +36,17 @@ class RaisingPipeline:
 
 
 class StaticPipeline:
+    def __init__(self):
+        self.paths = []
+
     def process_document(self, path):
+        self.paths.append(path)
         return {
             "document_path": path,
             "ocr_text": "Vendor: Retry Vendor\nDate: 2026-06-28\nTotal: EUR 42.50\n",
             "language": "en",
+            "ocr_strategy": "illumination_normalized_fallback",
+            "ocr_fallback_pages": 1,
             "extracted_data": {
                 "vendor_name": "Retry Vendor",
                 "transaction_date": "2026-06-28",
@@ -423,6 +429,89 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(summary["processed"], 1)
             self.assertEqual(summary["needsReview"], 0)
             self.assertEqual(ledger.dashboard_metrics()["documents"], 2)
+
+    def test_reprocess_incomplete_only_retries_blank_review_documents_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            blank_path = os.path.join(temp_dir, "blank.pdf")
+            complete_path = os.path.join(temp_dir, "complete.pdf")
+            for path in (blank_path, complete_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"test document bytes")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            blank_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "blank-review",
+                "originalFilename": "blank.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": blank_path,
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "ocrText": "",
+            })
+            ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "complete-review",
+                "originalFilename": "complete.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": complete_path,
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "ocrText": "Already extracted",
+            })
+            pipeline = StaticPipeline()
+
+            summary = LocalDocumentProcessor(
+                ledger,
+                processor_pipeline=pipeline,
+                categorizer=StaticCategorizer(category="Manual Review", confidence_score=0.1),
+                validator=StaticValidator(valid=False, reason="review required"),
+            ).reprocess_incomplete(limit=25, actor="test-operator", create_backup=False)
+
+            self.assertEqual(summary["candidates"], 1)
+            self.assertEqual(summary["requested"], 1)
+            self.assertEqual(summary["reprocessed"], 1)
+            self.assertEqual(summary["ocrRecovered"], 1)
+            self.assertEqual(summary["needsReview"], 1)
+            self.assertEqual(summary["skippedMissingSource"], 0)
+            self.assertEqual(summary["externalSubmission"], "not_executed")
+            self.assertFalse(summary["sourceFilesModified"])
+            self.assertEqual(pipeline.paths, [blank_path])
+            document = ledger.get_document(blank_id)
+            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertIn("Vendor: Retry Vendor", document["ocr_text"])
+            self.assertEqual(document["metadata"]["processing"]["ocrStrategy"], "illumination_normalized_fallback")
+            recovery = document["metadata"]["processing"]["ocrRecovery"]
+            self.assertEqual(recovery["version"], "illumination_normalization_v1")
+            self.assertEqual(recovery["status"], "recovered")
+            self.assertEqual(recovery["actor"], "test-operator")
+            self.assertEqual(ledger.list_audit_events()[0]["action"], "local_processing.incomplete_ocr_reprocessed")
+
+    def test_reprocess_incomplete_does_not_consume_missing_source_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "missing-review",
+                "originalFilename": "missing.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": os.path.join(temp_dir, "missing.pdf"),
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "ocrText": "",
+            })
+
+            summary = LocalDocumentProcessor(ledger).reprocess_incomplete(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["candidates"], 1)
+            self.assertEqual(summary["requested"], 0)
+            self.assertEqual(summary["skipped"], 1)
+            self.assertEqual(summary["skippedMissingSource"], 1)
+            document = ledger.get_document(document_id)
+            metadata = document.get("metadata") or {}
+            self.assertNotIn("ocrRecovery", metadata.get("processing") or {})
 
     def test_process_text_document_flags_fuzzy_duplicate_candidate(self):
         with tempfile.TemporaryDirectory() as temp_dir:

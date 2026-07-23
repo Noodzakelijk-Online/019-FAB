@@ -248,6 +248,22 @@ describe("FAB local API gateway", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("maps unread-scan recovery to its bounded local endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({ status: "completed", path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runFabOperatorCommand("reprocess_incomplete", "operator-13", { limit: 10 });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      path: "/api/documents/reprocess-incomplete",
+      body: { limit: 10, actor: "operator-13" },
+    });
+  });
+
   it("uploads intake files only through the fixed local API path", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
       JSON.stringify({

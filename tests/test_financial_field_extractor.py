@@ -91,6 +91,14 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(data["total_amount"], 19.97)
         self.assertEqual(data["vat_amount"], 3.47)
 
+    def test_total_savings_never_outranks_payable_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Lidl Arnhem\nTotaal: 12,02 EUR\nTotaal prijsvoordeel 1,03"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 12.02)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
 
 if __name__ == "__main__":
     unittest.main()

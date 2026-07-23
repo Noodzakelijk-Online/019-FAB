@@ -2373,6 +2373,29 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("vendor_name", html)
             self.assertIn("processed", html)
 
+    def test_api_reprocess_incomplete_is_bounded_and_actor_audited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({"fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3")})
+            client = app.test_client()
+            expected = {
+                "requested": 2,
+                "reprocessed": 2,
+                "ocrRecovered": 1,
+                "externalSubmission": "not_executed",
+            }
+            with patch(
+                "src.operations.local_api.LocalDocumentProcessor.reprocess_incomplete",
+                return_value=expected,
+            ) as reprocess:
+                response = client.post("/api/documents/reprocess-incomplete", json={
+                    "limit": 2,
+                    "actor": "dashboard-operator",
+                })
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), expected)
+            reprocess.assert_called_once_with(limit=2, actor="dashboard-operator")
+
     def test_api_exposes_wave_control_center_without_external_submission(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app({

@@ -25,6 +25,9 @@ class TestProcessorPipeline(unittest.TestCase):
                 "currency": None,
             },
             "language": "eng",
+            "ocr_strategy": "illumination_normalized_fallback",
+            "ocr_fallback_pages": 1,
+            "ocr_fallback_recovered_pages": 1,
         }
 
         with patch.object(TesseractProcessor, "process_document", return_value=ocr_result):
@@ -34,6 +37,9 @@ class TestProcessorPipeline(unittest.TestCase):
         self.assertEqual(result["extracted_data"]["transaction_date"], "2023-08-07")
         self.assertEqual(result["extracted_data"]["total_amount"], 9.0)
         self.assertEqual(result["extracted_data"]["currency"], "USD")
+        self.assertEqual(result["ocr_strategy"], "illumination_normalized_fallback")
+        self.assertEqual(result["ocr_fallback_pages"], 1)
+        self.assertEqual(result["ocr_fallback_recovered_pages"], 1)
 
 
 if __name__ == "__main__":

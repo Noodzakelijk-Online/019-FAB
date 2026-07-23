@@ -110,7 +110,7 @@ class TestLocalHaiConnector(unittest.TestCase):
             })
 
             self.assertEqual(manifest.status_code, 200)
-            self.assertEqual(len(manifest.get_json()["commands"]), 11)
+            self.assertEqual(len(manifest.get_json()["commands"]), 12)
             resources = {
                 item["resourceId"] for item in manifest.get_json()["resources"]
             }

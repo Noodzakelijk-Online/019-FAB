@@ -10,6 +10,7 @@ export type FabCommandId =
   | "run_safe_cycle"
   | "rescan_intake"
   | "process_imported"
+  | "reprocess_incomplete"
   | "sync_sources"
   | "run_due_recovery"
   | "run_reconciliation"
