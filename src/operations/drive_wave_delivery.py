@@ -19,7 +19,7 @@ ARCHIVE_ACTION = "drive_wave.source_archived"
 REQUIRED_FIELD_MATCHES = ("vendor", "date", "amount", "currency", "category", "description")
 TERMINAL_EXPORT_STATUSES = {"executed", "submitted"}
 OPEN_REVIEW_STATUSES = {"pending", "open", "needs_review", "in_progress", "in_review"}
-WORK_ORDER_VERSION = "fab-drive-wave-work-order-v2"
+WORK_ORDER_VERSION = "fab-source-wave-work-order-v3"
 FINISHED_WAVE_TRANSACTION_STATUSES = {"completed", "posted", "reviewed"}
 ARCHIVABLE_BOOKKEEPING_RECORD_STATUSES = {
     "approved", "export_draft_prepared", "ready_to_route", "reconciled",
@@ -42,7 +42,7 @@ WAVE_RECEIPT_ALLOWED_MIME_TYPES = {
 
 
 class DriveWaveDeliveryService:
-    """Close the Drive-to-Wave loop without treating transaction presence as file proof."""
+    """Close source-to-Wave loops without treating transaction presence as file proof."""
 
     def __init__(
         self,
@@ -74,6 +74,7 @@ class DriveWaveDeliveryService:
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
         folders_distinct = bool(source_folder_id) and bool(archive_folder_id) and source_folder_id != archive_folder_id
         configured = enabled and folders_distinct and bool(business_id)
+        gmail_scanner_ready = self._gmail_scanner_configured()
         return {
             "status": "ready" if configured and token_present and not reauthorization_required else "needs_authorization" if configured else "needs_configuration",
             "archiveEnabled": enabled,
@@ -86,8 +87,10 @@ class DriveWaveDeliveryService:
             "driveCredentialsPresent": credentials_present,
             "relayIntakeReady": bool(source_folder_id),
             "relayIntakePath": "/api/connectors/google-drive/relay",
+            "gmailScannerReady": gmail_scanner_ready,
+            "gmailRetentionPolicy": "email_unchanged_local_evidence_retained",
             "driveScopeVerification": "checked_on_archive",
-            "verificationPolicy": "unique_reviewed_wave_transaction_and_attachment_hash_round_trip_v2",
+            "verificationPolicy": "unique_reviewed_wave_transaction_and_attachment_hash_round_trip_v3",
             "deletionPolicy": "never_delete_move_only",
             "externalSubmission": "policy_gated",
         }
@@ -95,15 +98,16 @@ class DriveWaveDeliveryService:
     def list_candidates(self, limit: int = 100) -> Dict[str, Any]:
         documents = [
             document
-            for document in self.ledger.list_documents(limit=limit)
+            for document in self.ledger.list_documents(limit=500)
             if self._is_configured_source(document)
-        ]
+        ][:_bounded_candidate_limit(limit)]
         candidates = []
         for document in documents:
             plan = self.plan_archive(int(document["id"]))
             candidates.append({
                 "documentId": document["id"],
                 "sourceDocumentId": document.get("source_document_id"),
+                "sourceProvider": _source_provider(document),
                 "filename": document.get("original_filename"),
                 "storagePath": document.get("storage_path"),
                 "sourceSha256": _source_sha256(document),
@@ -233,6 +237,8 @@ class DriveWaveDeliveryService:
             upload_reasons=upload_reasons,
         )
         source_sha256 = _source_sha256(document)
+        source_provider = _source_provider(document)
+        provider_metadata = _provider_metadata(document)
         external_transaction_id = str(
             evidence.get("externalTransactionId")
             or (terminal_export or {}).get("external_id")
@@ -271,14 +277,18 @@ class DriveWaveDeliveryService:
             "success": True,
             "status": "ready",
             "workOrderVersion": WORK_ORDER_VERSION,
-            "workOrderId": f"drive-wave-{document_id}-{source_sha256[:12] or 'unhashed'}",
+            "workOrderId": f"source-wave-{document_id}-{source_sha256[:12] or 'unhashed'}",
             "documentId": int(document_id),
             "stage": stage,
             "actionRequired": _stage_action(stage),
             "source": {
-                "provider": "google_drive",
+                "provider": source_provider,
                 "fileId": document.get("source_document_id"),
-                "folderId": self._source_folder_id(),
+                "folderId": self._source_folder_id() if source_provider == "google_drive" else None,
+                "messageId": provider_metadata.get("message_id") if source_provider == "gmail" else None,
+                "attachmentId": provider_metadata.get("attachment_id") if source_provider == "gmail" else None,
+                "scannerProfile": provider_metadata.get("scanner_profile") if source_provider == "gmail" else None,
+                "deliveryPath": provider_metadata.get("delivery_path") if source_provider == "gmail" else None,
                 "filename": document.get("original_filename"),
                 "mimeType": document.get("mime_type"),
                 "localPath": document.get("storage_path"),
@@ -291,6 +301,18 @@ class DriveWaveDeliveryService:
                     "maxBytes": WAVE_RECEIPT_MAX_BYTES,
                     "allowedExtensions": sorted(WAVE_RECEIPT_ALLOWED_EXTENSIONS),
                 },
+                "retention": (
+                    {
+                        "policy": "email_unchanged_local_evidence_retained",
+                        "sourceEmailMutation": "never",
+                        "localEvidenceDeletion": "never",
+                    }
+                    if source_provider == "gmail"
+                    else {
+                        "policy": "move_only_after_verified_readback",
+                        "sourceDeletion": "never",
+                    }
+                ),
             },
             "wave": {
                 "businessId": self._business_id(),
@@ -321,7 +343,8 @@ class DriveWaveDeliveryService:
                     "contentType": "multipart/form-data",
                     "fileField": "attachment",
                     "metadataField": "evidence",
-                    "requiredForArchive": True,
+                    "requiredForArchive": source_provider == "google_drive",
+                    "requiredForCompletion": True,
                 },
                 "requiredFieldMatches": required_field_matches,
                 "template": evidence_template,
@@ -347,6 +370,13 @@ class DriveWaveDeliveryService:
         document = self.ledger.get_document(int(document_id))
         if not document:
             return {"success": False, "status": "not_found", "reasons": ["document_not_found"]}
+        if not self._is_configured_source(document):
+            return {
+                "success": False,
+                "status": "outside_configured_source",
+                "reasons": ["document_outside_configured_source"],
+                "externalSubmission": "not_executed",
+            }
         if not isinstance(content, bytes) or not content:
             return self.record_attachment_evidence(
                 document_id,
@@ -389,6 +419,13 @@ class DriveWaveDeliveryService:
         document = self.ledger.get_document(int(document_id))
         if not document:
             return {"success": False, "status": "not_found", "reasons": ["document_not_found"]}
+        if not self._is_configured_source(document):
+            return {
+                "success": False,
+                "status": "outside_configured_source",
+                "reasons": ["document_outside_configured_source"],
+                "externalSubmission": "not_executed",
+            }
         normalized = _normalize_evidence(evidence)
         normalized["attachmentReadbackVerified"] = bool(readback_bytes_verified)
         normalized["readbackOrigin"] = (
@@ -459,6 +496,7 @@ class DriveWaveDeliveryService:
             "waveObservedAt": normalized["waveObservedAt"],
         })
         metadata["driveWaveLifecycle"] = lifecycle
+        metadata["waveDeliveryLifecycle"] = lifecycle
         self.ledger.update_document(int(document_id), {"metadata": metadata})
         self._resolve_archive_review_items(int(document_id), actor, evidence_digest)
         return {
@@ -474,6 +512,8 @@ class DriveWaveDeliveryService:
         document = self.ledger.get_document(int(document_id))
         if not document:
             return {"status": "blocked", "canArchive": False, "reasons": ["document_not_found"]}
+        if _source_provider(document) == "gmail":
+            return self._plan_gmail_retention(document)
         metadata = document.get("metadata") or {}
         lifecycle = metadata.get("driveWaveLifecycle") if isinstance(metadata.get("driveWaveLifecycle"), dict) else {}
         if lifecycle.get("status") == "archived":
@@ -486,37 +526,8 @@ class DriveWaveDeliveryService:
             }
 
         reasons = self._document_reasons(document)
-        evidence_event = self.ledger.find_audit_event(
-            EVIDENCE_ACTION,
-            "bookkeeping_document",
-            str(document_id),
-        )
-        evidence = (evidence_event or {}).get("details") or {}
-        if not evidence:
-            reasons.append("wave_attachment_evidence_missing")
-        else:
-            reasons.extend(self._evidence_reasons(document, evidence))
-            if not _timestamp_is_fresh(
-                evidence_event.get("created_at"),
-                self._evidence_max_age_seconds(),
-            ):
-                reasons.append("wave_attachment_verification_stale")
-            exports = self.ledger.list_export_attempts(document_id=int(document_id), limit=5)
-            terminal_exports = [item for item in exports if str(item.get("status") or "").lower() in TERMINAL_EXPORT_STATUSES]
-            if terminal_exports:
-                business_exports = [
-                    item for item in terminal_exports
-                    if str(item.get("target_system") or "") == "waveapps_business"
-                ]
-                business_external_ids = {
-                    str(item.get("external_id") or "").strip()
-                    for item in business_exports
-                    if str(item.get("external_id") or "").strip()
-                }
-                if not business_exports:
-                    reasons.append("wave_target_is_not_business")
-                elif business_external_ids and str(evidence.get("externalTransactionId") or "") not in business_external_ids:
-                    reasons.append("wave_transaction_id_mismatch")
+        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(document)
+        reasons.extend(evidence_reasons)
 
         reasons = sorted(set(reasons))
         return {
@@ -537,6 +548,8 @@ class DriveWaveDeliveryService:
     def archive_document(self, document_id: int, actor: str = "local_worker") -> Dict[str, Any]:
         document_id = int(document_id)
         plan = self.plan_archive(document_id)
+        if plan.get("status") == "not_applicable":
+            return {"success": False, **plan, "externalSubmission": "not_executed"}
         if plan.get("status") == "already_archived":
             return {"success": True, **plan, "externalSubmission": "already_executed"}
         if not plan.get("canArchive"):
@@ -566,6 +579,8 @@ class DriveWaveDeliveryService:
 
     def _archive_document_with_lease(self, document_id: int, actor: str) -> Dict[str, Any]:
         plan = self.plan_archive(document_id)
+        if plan.get("status") == "not_applicable":
+            return {"success": False, **plan, "externalSubmission": "not_executed"}
         if plan.get("status") == "already_archived":
             return {"success": True, **plan, "externalSubmission": "already_executed"}
         if not plan.get("canArchive"):
@@ -663,6 +678,7 @@ class DriveWaveDeliveryService:
             "postMoveVerified": True,
         })
         metadata["driveWaveLifecycle"] = lifecycle
+        metadata["waveDeliveryLifecycle"] = lifecycle
         self.ledger.update_document(document_id, {"metadata": metadata})
         audit_event_id = self.ledger.record_audit_event({
             "action": ARCHIVE_ACTION,
@@ -726,26 +742,84 @@ class DriveWaveDeliveryService:
             "externalSubmission": "executed" if results else "not_executed",
         }
 
-    def _document_reasons(self, document: Dict[str, Any]) -> list[str]:
+    def _plan_gmail_retention(self, document: Dict[str, Any]) -> Dict[str, Any]:
+        document_id = int(document["id"])
+        reasons = self._common_delivery_reasons(document)
+        if not self._is_gmail_scanner_source(document):
+            reasons.append("gmail_scanner_source_not_trusted")
+        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(document)
+        reasons.extend(evidence_reasons)
+        reasons = sorted(set(reasons))
+        return {
+            "status": "not_applicable",
+            "canArchive": False,
+            "reasons": reasons,
+            "retentionStatus": "verified" if not reasons else "pending",
+            "evidenceVerified": not reasons,
+            "retentionPolicy": "email_unchanged_local_evidence_retained",
+            "sourceEmailMutation": "never",
+            "localEvidenceDeletion": "never",
+            "externalTransactionId": evidence.get("externalTransactionId"),
+            "attachmentObjectId": evidence.get("attachmentObjectId"),
+            "evidenceDigest": evidence.get("evidenceDigest"),
+            "verifiedAt": (evidence_event or {}).get("created_at"),
+            "verificationMethod": evidence.get("verificationMethod"),
+            "moveOnly": False,
+            "deleteSource": False,
+        }
+
+    def _wave_evidence_plan(
+        self,
+        document: Dict[str, Any],
+    ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], list[str]]:
+        document_id = int(document["id"])
+        evidence_event = self.ledger.find_audit_event(
+            EVIDENCE_ACTION,
+            "bookkeeping_document",
+            str(document_id),
+        )
+        evidence = (evidence_event or {}).get("details") or {}
         reasons = []
-        if not self._archive_enabled():
-            reasons.append("drive_archive_disabled")
-        if document.get("source") != "google_drive":
-            reasons.append("source_is_not_google_drive")
-        if not self._source_folder_id():
-            reasons.append("source_folder_not_configured")
-        if not self._archive_folder_id():
-            reasons.append("archive_folder_not_configured")
-        if self._source_folder_id() and self._source_folder_id() == self._archive_folder_id():
-            reasons.append("archive_folder_matches_source_folder")
+        if not evidence:
+            reasons.append("wave_attachment_evidence_missing")
+            return evidence_event, evidence, reasons
+
+        reasons.extend(self._evidence_reasons(document, evidence))
+        if not _timestamp_is_fresh(
+            evidence_event.get("created_at"),
+            self._evidence_max_age_seconds(),
+        ):
+            reasons.append("wave_attachment_verification_stale")
+        exports = self.ledger.list_export_attempts(document_id=document_id, limit=5)
+        terminal_exports = [
+            item
+            for item in exports
+            if str(item.get("status") or "").lower() in TERMINAL_EXPORT_STATUSES
+        ]
+        if terminal_exports:
+            business_exports = [
+                item
+                for item in terminal_exports
+                if str(item.get("target_system") or "") == "waveapps_business"
+            ]
+            business_external_ids = {
+                str(item.get("external_id") or "").strip()
+                for item in business_exports
+                if str(item.get("external_id") or "").strip()
+            }
+            if not business_exports:
+                reasons.append("wave_target_is_not_business")
+            elif (
+                business_external_ids
+                and str(evidence.get("externalTransactionId") or "") not in business_external_ids
+            ):
+                reasons.append("wave_transaction_id_mismatch")
+        return evidence_event, evidence, reasons
+
+    def _common_delivery_reasons(self, document: Dict[str, Any]) -> list[str]:
+        reasons = []
         if not self._business_id():
             reasons.append("wave_business_not_configured")
-        if self._drive_reauthorization_required():
-            reasons.append("drive_reauthorization_required")
-        if not self._is_configured_source(document):
-            reasons.append("document_outside_configured_source_folder")
-        if not str(document.get("source_document_id") or "").strip():
-            reasons.append("drive_provider_file_id_missing")
         if not str(document.get("original_filename") or "").strip():
             reasons.append("source_filename_missing")
         if not str(document.get("mime_type") or "").strip():
@@ -772,6 +846,26 @@ class DriveWaveDeliveryService:
                 reasons.append("bookkeeping_record_not_wave_business")
             if str(record.get("status") or "").lower() not in ARCHIVABLE_BOOKKEEPING_RECORD_STATUSES:
                 reasons.append("bookkeeping_record_not_ready")
+        return reasons
+
+    def _document_reasons(self, document: Dict[str, Any]) -> list[str]:
+        reasons = self._common_delivery_reasons(document)
+        if not self._archive_enabled():
+            reasons.append("drive_archive_disabled")
+        if document.get("source") != "google_drive":
+            reasons.append("source_is_not_google_drive")
+        if not self._source_folder_id():
+            reasons.append("source_folder_not_configured")
+        if not self._archive_folder_id():
+            reasons.append("archive_folder_not_configured")
+        if self._source_folder_id() and self._source_folder_id() == self._archive_folder_id():
+            reasons.append("archive_folder_matches_source_folder")
+        if self._drive_reauthorization_required():
+            reasons.append("drive_reauthorization_required")
+        if not self._is_configured_source(document):
+            reasons.append("document_outside_configured_source_folder")
+        if not str(document.get("source_document_id") or "").strip():
+            reasons.append("drive_provider_file_id_missing")
         return reasons
 
     def _evidence_reasons(self, document: Dict[str, Any], evidence: Dict[str, Any]) -> list[str]:
@@ -936,12 +1030,51 @@ class DriveWaveDeliveryService:
             })
 
     def _is_configured_source(self, document: Dict[str, Any]) -> bool:
+        if document.get("source") == "gmail":
+            return self._is_gmail_scanner_source(document)
         if document.get("source") != "google_drive":
             return False
         metadata = document.get("metadata") or {}
         provider = metadata.get("providerMetadata") if isinstance(metadata.get("providerMetadata"), dict) else {}
         folder_id = provider.get("folder_id") or provider.get("folderId") or metadata.get("sourceIdentifier")
         return bool(self._source_folder_id()) and str(folder_id or "") == self._source_folder_id()
+
+    def _is_gmail_scanner_source(self, document: Dict[str, Any]) -> bool:
+        if document.get("source") != "gmail" or not self._gmail_scanner_configured():
+            return False
+        provider = _provider_metadata(document)
+        sender = str(provider.get("sender_address") or "").strip().lower()
+        if sender not in self._gmail_trusted_senders():
+            return False
+        if provider.get("scanner_policy_verified") is not True:
+            return False
+        if not str(provider.get("message_id") or "").strip():
+            return False
+        if not str(provider.get("attachment_id") or "").strip():
+            return False
+        return _path_is_within(
+            document.get("storage_path"),
+            self._gmail_attachment_root(),
+        )
+
+    def _gmail_scanner_configured(self) -> bool:
+        return bool(
+            _as_bool(self.config.get("gmail_scanner_mode"))
+            and self._gmail_trusted_senders()
+            and self._gmail_attachment_root()
+        )
+
+    def _gmail_trusted_senders(self) -> set[str]:
+        return set(_string_values(self.config.get("gmail_trusted_senders")))
+
+    def _gmail_attachment_root(self) -> str:
+        value = _first(
+            self.config,
+            "gmail_attachment_download_dir",
+            "gmail_download_dir",
+            "attachments_save_dir",
+        )
+        return str(value or "").strip()
 
     def _archive_enabled(self) -> bool:
         return _as_bool(_first(self.config, "google_drive_archive_verified_files", "drive_archive_verified_files"), False)
@@ -1003,6 +1136,17 @@ def _source_sha256(document: Dict[str, Any]) -> str:
     return str(metadata.get("contentSha256") or "").lower().strip()
 
 
+def _source_provider(document: Dict[str, Any]) -> str:
+    source = str(document.get("source") or "").strip().lower()
+    return "gmail" if source == "gmail" else "google_drive" if source == "google_drive" else source
+
+
+def _provider_metadata(document: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    provider = metadata.get("providerMetadata")
+    return provider if isinstance(provider, dict) else {}
+
+
 def _source_size(document: Dict[str, Any]) -> Optional[int]:
     metadata = document.get("metadata") or {}
     provider = metadata.get("providerMetadata") if isinstance(metadata.get("providerMetadata"), dict) else {}
@@ -1011,6 +1155,34 @@ def _source_size(document: Dict[str, Any]) -> Optional[int]:
         return int(value) if value not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_candidate_limit(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 100
+    return max(1, min(parsed, 500))
+
+
+def _string_values(value: Any) -> list[str]:
+    values = value if isinstance(value, (list, tuple, set)) else re.split(r"[,;\n]", str(value or ""))
+    return list(dict.fromkeys(
+        str(item or "").strip().lower()
+        for item in values
+        if str(item or "").strip()
+    ))
+
+
+def _path_is_within(path: Any, root: Any) -> bool:
+    if not str(path or "").strip() or not str(root or "").strip():
+        return False
+    candidate = os.path.realpath(os.path.abspath(os.path.expanduser(os.path.expandvars(str(path)))))
+    configured_root = os.path.realpath(os.path.abspath(os.path.expanduser(os.path.expandvars(str(root)))))
+    try:
+        return os.path.commonpath((configured_root, candidate)) == configured_root
+    except ValueError:
+        return False
 
 
 def _expected_wave_fields(
@@ -1132,9 +1304,13 @@ def _work_order_stage(
     upload_reasons: list[str],
 ) -> str:
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
-    lifecycle = metadata.get("driveWaveLifecycle") if isinstance(metadata.get("driveWaveLifecycle"), dict) else {}
-    if lifecycle.get("status") == "archived" or plan.get("status") == "already_archived":
-        return "completed"
+    lifecycle = (
+        metadata.get("waveDeliveryLifecycle")
+        if isinstance(metadata.get("waveDeliveryLifecycle"), dict)
+        else metadata.get("driveWaveLifecycle")
+        if isinstance(metadata.get("driveWaveLifecycle"), dict)
+        else {}
+    )
     if not document.get("storage_path") or not os.path.isfile(str(document.get("storage_path"))):
         return "source_file_unavailable"
     if upload_reasons:
@@ -1145,6 +1321,10 @@ def _work_order_stage(
         "registered", "imported", "processing", "failed", "needs_review"
     }:
         return "needs_processing"
+    if lifecycle.get("status") == "archived" or plan.get("status") == "already_archived":
+        return "completed"
+    if _source_provider(document) == "gmail" and plan.get("evidenceVerified") is True:
+        return "completed"
     if plan.get("canArchive"):
         return "ready_to_archive"
     if evidence:
@@ -1158,7 +1338,7 @@ def _work_order_stage(
 
 def _stage_action(stage: str) -> str:
     return {
-        "source_file_unavailable": "Restore or re-download the exact Drive source before Wave upload.",
+        "source_file_unavailable": "Restore or re-download the exact retained source before Wave upload.",
         "source_incompatible": "Convert or split the source into a Wave-supported receipt file without changing the retained original.",
         "needs_processing": "Finish OCR, validation, categorization, and review in FAB.",
         "blocked_by_review": "Resolve the blocking FAB review before downstream execution.",
@@ -1166,7 +1346,7 @@ def _stage_action(stage: str) -> str:
         "upload_and_verify_attachment": "Upload the exact source file and read the stored Wave attachment and transaction back.",
         "refresh_wave_readback": "Repeat Wave transaction and attachment readback and submit fresh complete evidence.",
         "ready_to_archive": "All gates pass; the worker may move the Drive source to the configured archive folder.",
-        "completed": "No action required; the same Drive provider file has been archived after verified Wave readback.",
+        "completed": "No action required; Wave readback is verified and the source retention policy has been satisfied.",
     }.get(stage, "Inspect the work order before proceeding.")
 
 

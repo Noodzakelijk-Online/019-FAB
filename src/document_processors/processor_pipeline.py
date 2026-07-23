@@ -54,6 +54,7 @@ class ProcessorPipeline(BaseProcessor):
             "ocr_text": "",
             "extracted_data": {},
             "field_confidences": {},
+            "field_evidence": {},
             "language": "",
             "ocr_confidence": 0.0,
             "ocr_strategy": "not_run",
@@ -103,6 +104,7 @@ class ProcessorPipeline(BaseProcessor):
     def _merge_extracted_data(self, processed_data: Dict[str, Any], result: Dict[str, Any]) -> None:
         incoming_data = result.get("extracted_data", {}) or {}
         incoming_confidences = result.get("field_confidences", {}) or {}
+        incoming_evidence = result.get("field_evidence", {}) or {}
 
         for key, value in incoming_data.items():
             if self._is_empty(value):
@@ -113,6 +115,10 @@ class ProcessorPipeline(BaseProcessor):
             if self._is_empty(existing_value) or incoming_confidence >= existing_confidence:
                 processed_data["extracted_data"][key] = value
                 processed_data["field_confidences"][key] = incoming_confidence
+                if key in incoming_evidence:
+                    processed_data["field_evidence"][key] = incoming_evidence[key]
+                else:
+                    processed_data["field_evidence"].pop(key, None)
 
     @staticmethod
     def _is_empty(value: Any) -> bool:

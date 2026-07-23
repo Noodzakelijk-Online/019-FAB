@@ -6,10 +6,11 @@ Repository `Noodzakelijk-Online/025-Scan-to-folder-automation` at audited source
 
 1. Gmail is searched with `label:all from:eprintcenter@hp8.us has:attachment filename:pdf`.
 2. FAB independently checks the parsed sender address, filename, MIME type, size, and PDF signature.
-3. The attachment is written to a content-addressed local evidence path and registered by Gmail message and attachment ID.
+3. The attachment is written directly to a content-addressed FAB evidence path and registered by Gmail message and attachment ID. Source readiness exposes profile `hp_eprint_v1`, the audited repository/commit, and delivery path `gmail_to_fab_direct` so operators can distinguish this migration from a generic mailbox query.
 4. Exact-content duplicates and changed provider revisions are held in the existing review workflow.
 5. The autonomous cycle runs OCR, semantic document typing, extraction, validation, learned vendor categorization, and Wave draft preparation. Receipts and vendor invoices are postable evidence. Credit notes become review-gated posting reversals that reduce the original expense and input VAT. Order confirmations, estimates, bank statements, insurance policies, and government correspondence become non-posting supporting evidence.
-6. External posting remains approval-gated. Drive-originated files retain the stricter Wave transaction and exact attachment readback gate before move-only archival.
+6. Every accepted scanner PDF receives a source-to-Wave attachment work order. Completion requires the exact stored Wave attachment to be downloaded and verified against the retained source hash, size, filename, MIME type, transaction, and bookkeeping fields.
+7. External posting remains approval-gated. Gmail messages and local evidence remain unchanged after verification. Drive-originated files retain the stricter move-only archival gate.
 
 Supporting-evidence records never expose extracted coverage limits, thresholds, deductibles, or other contextual figures as transaction amounts. The original observations remain attached to the source evidence. Conflicting invoice/policy classifications stay blocked until an operator records an audited document-type decision in the review workspace.
 

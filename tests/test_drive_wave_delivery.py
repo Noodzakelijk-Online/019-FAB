@@ -161,6 +161,78 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         evidence.update(updates)
         return evidence
 
+    def _register_gmail_scanner_document(
+        self,
+        *,
+        sender="eprintcenter@hp8.us",
+        outside_download_root=False,
+    ):
+        download_root = os.path.join(self.temp_dir.name, "gmail-downloads")
+        os.makedirs(download_root, exist_ok=True)
+        storage_root = self.temp_dir.name if outside_download_root else download_root
+        is_default = sender == "eprintcenter@hp8.us" and not outside_download_root
+        source_bytes = (
+            b"trusted scanner invoice"
+            if is_default
+            else f"scanner invoice:{sender}:{outside_download_root}".encode("utf-8")
+        )
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        filename = "scanner-invoice.pdf" if is_default else f"scanner-{source_hash[:8]}.pdf"
+        source_path = os.path.join(storage_root, filename)
+        with open(source_path, "wb") as handle:
+            handle.write(source_bytes)
+        document_id = self.ledger.register_document({
+            "source": "gmail",
+            "sourceDocumentId": f"sha256:{source_hash}",
+            "originalFilename": filename,
+            "mimeType": "application/pdf",
+            "storagePath": source_path,
+            "documentType": "pdf",
+            "processingStatus": "routed",
+            "duplicateFingerprint": source_hash,
+            "vendorName": "Example Vendor",
+            "category": "Office Supplies",
+            "transactionDate": "2026-07-22",
+            "totalAmount": 121.0,
+            "vatAmount": 21.0,
+            "extractedData": {"invoice_number": "INV-1", "currency": "EUR"},
+            "metadata": {
+                "contentSha256": source_hash,
+                "sizeBytes": len(source_bytes),
+                "providerMetadata": {
+                    "sender_address": sender,
+                    "message_id": "gmail-message-1",
+                    "attachment_id": "gmail-attachment-1",
+                    "scanner_profile": "hp_eprint",
+                    "scanner_policy_verified": True,
+                    "delivery_path": "gmail_to_fab_direct",
+                },
+            },
+        })
+        self.ledger.upsert_bookkeeping_record({
+            "documentId": document_id,
+            "sourceType": "document",
+            "recordType": "expense",
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "targetAccount": "Office expenses",
+            "vendorName": "Example Vendor",
+            "category": "Office Supplies",
+            "recordDate": "2026-07-22",
+            "amount": 121.0,
+            "vatAmount": 21.0,
+            "currency": "EUR",
+            "description": "invoice.pdf",
+            "reviewRequired": False,
+        })
+        config = {
+            **self.config,
+            "gmail_scanner_mode": True,
+            "gmail_trusted_senders": "eprintcenter@hp8.us",
+            "gmail_attachment_download_dir": download_root,
+        }
+        return document_id, source_path, source_bytes, source_hash, config
+
     def test_drive_credential_rotation_blocks_archive_until_fresh_consent(self):
         token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
         for path in (token_path, f"{token_path}.reauthorize"):
@@ -247,7 +319,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         result = service.list_work_orders(limit=10)
         order = result["workOrders"][0]
 
-        self.assertEqual(result["workOrderVersion"], "fab-drive-wave-work-order-v2")
+        self.assertEqual(result["workOrderVersion"], "fab-source-wave-work-order-v3")
         self.assertEqual(result["summary"]["needsAttachmentVerification"], 1)
         self.assertEqual(order["stage"], "upload_and_verify_attachment")
         self.assertEqual(order["source"]["fileId"], "drive-file-1")
@@ -273,6 +345,103 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             f"/api/drive-wave/documents/{self.document_id}/attachment-readback",
         )
         self.assertNotIn("ocr_text", str(order))
+
+    def test_trusted_gmail_scanner_source_gets_evidence_bound_wave_work_order(self):
+        document_id, source_path, source_bytes, source_hash, config = (
+            self._register_gmail_scanner_document()
+        )
+        service = DriveWaveDeliveryService(self.ledger, config)
+
+        result = service.list_work_orders(limit=10)
+        order = next(
+            item for item in result["workOrders"]
+            if item["documentId"] == document_id
+        )
+
+        self.assertEqual(order["source"]["provider"], "gmail")
+        self.assertEqual(order["source"]["messageId"], "gmail-message-1")
+        self.assertEqual(order["source"]["attachmentId"], "gmail-attachment-1")
+        self.assertEqual(order["source"]["scannerProfile"], "hp_eprint")
+        self.assertEqual(order["source"]["sha256"], source_hash)
+        self.assertTrue(os.path.isfile(source_path))
+        self.assertFalse(order["evidence"]["binaryReadbackSubmission"]["requiredForArchive"])
+        self.assertTrue(order["evidence"]["binaryReadbackSubmission"]["requiredForCompletion"])
+        self.assertEqual(
+            order["source"]["retention"]["policy"],
+            "email_unchanged_local_evidence_retained",
+        )
+        self.assertEqual(order["archivePlan"]["status"], "not_applicable")
+        self.assertFalse(order["archivePlan"]["evidenceVerified"])
+        self.assertEqual(order["stage"], "locate_or_create_transaction")
+
+    def test_gmail_scanner_completes_only_after_exact_wave_attachment_readback(self):
+        document_id, source_path, source_bytes, source_hash, config = (
+            self._register_gmail_scanner_document()
+        )
+        service = DriveWaveDeliveryService(self.ledger, config)
+        evidence = self._evidence(
+            sourceSha256=source_hash,
+            uploadSourceSha256=source_hash,
+            attachmentFilename="scanner-invoice.pdf",
+            attachmentSizeBytes=len(source_bytes),
+        )
+
+        verification = service.record_attachment_readback(
+            document_id,
+            source_bytes,
+            filename="scanner-invoice.pdf",
+            mime_type="application/pdf",
+            evidence=evidence,
+            actor="hai-browser",
+        )
+        order = service.work_order(document_id)
+        archive_attempt = service.archive_document(document_id)
+
+        self.assertTrue(verification["success"])
+        self.assertEqual(order["stage"], "completed")
+        self.assertTrue(order["archivePlan"]["evidenceVerified"])
+        self.assertEqual(order["archivePlan"]["retentionStatus"], "verified")
+        self.assertEqual(archive_attempt["status"], "not_applicable")
+        self.assertFalse(archive_attempt["success"])
+        self.assertEqual(archive_attempt["reasons"], [])
+        self.assertTrue(os.path.isfile(source_path))
+        with open(source_path, "rb") as handle:
+            self.assertEqual(handle.read(), source_bytes)
+        document = self.ledger.get_document(document_id)
+        self.assertEqual(document["review_items"], [])
+        self.assertEqual(
+            document["metadata"]["waveDeliveryLifecycle"]["status"],
+            "attachment_verified",
+        )
+
+    def test_gmail_scanner_work_orders_reject_untrusted_sender_and_escaped_path(self):
+        untrusted_id, _, _, _, config = self._register_gmail_scanner_document(
+            sender="attacker@example.com",
+        )
+        escaped_id, _, _, _, _ = self._register_gmail_scanner_document(
+            outside_download_root=True,
+        )
+        service = DriveWaveDeliveryService(self.ledger, config)
+
+        result = service.list_work_orders(limit=10)
+
+        listed_ids = {item["documentId"] for item in result["workOrders"]}
+        self.assertNotIn(untrusted_id, listed_ids)
+        self.assertNotIn(escaped_id, listed_ids)
+        self.assertEqual(
+            service.work_order(untrusted_id)["status"],
+            "outside_configured_source",
+        )
+        self.assertEqual(
+            service.record_attachment_readback(
+                escaped_id,
+                b"trusted scanner invoice",
+                filename="scanner-invoice.pdf",
+                mime_type="application/pdf",
+                evidence={},
+            )["status"],
+            "outside_configured_source",
+        )
 
     def test_work_order_never_queues_a_missing_local_source_for_upload(self):
         self.ledger.upsert_bookkeeping_record({

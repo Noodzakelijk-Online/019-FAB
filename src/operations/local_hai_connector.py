@@ -160,7 +160,7 @@ HAI_COMMANDS = (
     HaiCommand(
         "record_wave_attachment_verification",
         "Record Wave attachment attestation",
-        "Record transaction metadata for one configured Drive source; binary readback is still required before archival.",
+        "Record transaction metadata for one configured Drive or trusted Gmail scanner source; binary readback is still required before completion.",
         {
             "type": "object",
             "additionalProperties": False,
@@ -242,7 +242,7 @@ class LocalHaiConnector:
                 {
                     "resourceId": "wave_attachment_work_orders",
                     "label": "Wave attachment work orders",
-                    "description": "Evidence-bound Drive source, Wave field, attachment readback, and archive-gate handoff.",
+                    "description": "Evidence-bound Drive or trusted Gmail scanner source, Wave field, attachment readback, and retention-gate handoff.",
                     "method": "GET",
                     "path": "/api/drive-wave/work-orders",
                     "mode": "read_only_executor_handoff",
@@ -267,6 +267,7 @@ class LocalHaiConnector:
                 "restore_backups",
                 "change_access_control",
                 "delete_drive_sources",
+                "delete_or_mutate_gmail_sources",
             ],
             "externalSubmission": "not_executed",
         }

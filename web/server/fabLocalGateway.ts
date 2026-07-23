@@ -100,7 +100,7 @@ const READ_PATHS = {
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
   driveWaveStatus: "/api/drive-wave/status",
-  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=50",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=500",
   gmailAuthorization: "/api/connectors/gmail/authorization",
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",

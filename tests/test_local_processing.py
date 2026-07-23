@@ -3,7 +3,10 @@ import tempfile
 import unittest
 
 from src.operations.local_ledger import LocalOperationsLedger
-from src.operations.local_processing import LocalDocumentProcessor
+from src.operations.local_processing import (
+    LocalDocumentProcessor,
+    duplicate_link_cycles,
+)
 
 
 class StaticCategorizer:
@@ -782,7 +785,7 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["total_amount"], 1.98)
             self.assertEqual(
                 document["metadata"]["processing"]["storedOcrReassessment"]["version"],
-                "financial_extraction_v3",
+                "financial_extraction_v4",
             )
             open_reasons = {
                 item["reason"]
@@ -791,6 +794,76 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             }
             self.assertEqual(
                 open_reasons,
+                {"low_confidence_categorization", "manual_review_category"},
+            )
+
+    def test_reprocess_review_queue_recovers_header_vendor_without_rerunning_ocr(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "action-ocr.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "action-ocr-review",
+                "originalFilename": "action-ocr.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": "AAGTION\n1385 Arnhem\n12-07-2023\nTOTAAL 12,00",
+                "vendorName": "AAGTION",
+                "category": "Manual Review",
+                "transactionDate": "2023-07-12",
+                "totalAmount": 12.0,
+            })
+            for reason in (
+                "validation_failed",
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Machine review gate.",
+                })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+                processor_pipeline=RaisingPipeline(),
+            ).reprocess_review_queue(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["requested"], 1)
+            self.assertEqual(summary["resolvedReviewItems"], 1)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["vendor_name"], "Action")
+            self.assertEqual(
+                document["metadata"]["processing"]["fieldConfidences"]["vendor_name"],
+                0.85,
+            )
+            self.assertEqual(
+                document["metadata"]["processing"]["fieldEvidence"]["vendor_name"]["source"],
+                "receipt_header_vendor_pattern",
+            )
+            vendor_field = next(
+                field
+                for field in document["extracted_fields"]
+                if field["field_name"] == "vendor_name"
+            )
+            self.assertEqual(vendor_field["confidence_score"], 0.85)
+            self.assertEqual(
+                vendor_field["provenance"]["evidence"]["source"],
+                "receipt_header_vendor_pattern",
+            )
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in document["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                },
                 {"low_confidence_categorization", "manual_review_category"},
             )
 
@@ -877,13 +950,131 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(result["status"], "needs_review")
             self.assertIn("duplicate_candidate", result["reviewReasons"])
             document = ledger.get_document(duplicate_id)
-            self.assertEqual(document["duplicate_of_document_id"], original_id)
+            self.assertIsNone(document["duplicate_of_document_id"])
             self.assertEqual(document["processing_status"], "needs_review")
             candidates = ledger.list_duplicate_candidates(status="pending", document_id=duplicate_id)
             self.assertEqual(len(candidates), 1)
             self.assertEqual(candidates[0]["candidate_document_id"], original_id)
             self.assertGreaterEqual(candidates[0]["confidence_score"], 0.9)
             self.assertEqual(ledger.list_review_items(status="pending")[0]["reason"], "duplicate_candidate")
+
+    def test_duplicate_cycle_repair_clears_links_and_preserves_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            paths = []
+            document_ids = []
+            for index in range(3):
+                path = os.path.join(temp_dir, f"scan-{index}.pdf")
+                with open(path, "wb") as handle:
+                    handle.write(f"retained evidence {index}".encode("ascii"))
+                paths.append(path)
+                document_ids.append(ledger.register_document({
+                    "source": "gmail",
+                    "sourceDocumentId": f"cycle-{index}",
+                    "originalFilename": f"scan-{index}.pdf",
+                    "storagePath": path,
+                    "documentType": "receipt",
+                    "processingStatus": "needs_review",
+                }))
+            for index, document_id in enumerate(document_ids):
+                candidate_id = document_ids[(index + 1) % len(document_ids)]
+                ledger.update_document(document_id, {
+                    "duplicateOfDocumentId": candidate_id,
+                })
+                ledger.record_duplicate_candidate({
+                    "documentId": document_id,
+                    "candidateDocumentId": candidate_id,
+                    "matchType": "legacy_fuzzy_document_match",
+                    "confidenceScore": 0.95,
+                    "status": "pending",
+                })
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "duplicate_candidate",
+                    "details": "Compare retained source documents.",
+                })
+            source_state = {}
+            for path in paths:
+                with open(path, "rb") as handle:
+                    source_state[path] = (handle.read(), os.stat(path).st_mtime_ns)
+
+            self.assertEqual(duplicate_link_cycles(ledger), [sorted(document_ids)])
+            summary = LocalDocumentProcessor(ledger).repair_duplicate_cycles(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["cyclesFound"], 1)
+            self.assertEqual(summary["cyclesRepaired"], 1)
+            self.assertEqual(summary["documentsCleared"], 3)
+            self.assertEqual(summary["reviewItemsCreated"], 0)
+            self.assertEqual(duplicate_link_cycles(ledger), [])
+            self.assertEqual(
+                len(ledger.list_duplicate_candidates(status="pending")),
+                3,
+            )
+            self.assertEqual(
+                len(ledger.list_review_items(status="pending")),
+                3,
+            )
+            for document_id in document_ids:
+                document = ledger.get_document(document_id)
+                self.assertIsNone(document["duplicate_of_document_id"])
+                self.assertEqual(document["processing_status"], "needs_review")
+            for path, (contents, modified_at) in source_state.items():
+                with open(path, "rb") as handle:
+                    self.assertEqual(handle.read(), contents)
+                self.assertEqual(os.stat(path).st_mtime_ns, modified_at)
+            audit_actions = {
+                event["action"] for event in ledger.list_audit_events(limit=20)
+            }
+            self.assertIn("local_processing.duplicate_cycle_repaired", audit_actions)
+            self.assertIn(
+                "local_processing.duplicate_cycle_repair_completed",
+                audit_actions,
+            )
+
+    def test_duplicate_matching_never_uses_an_existing_duplicate_as_canonical(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            current_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "current-document",
+                "originalFilename": "current.pdf",
+                "documentType": "receipt",
+                "vendorName": "Praxis",
+                "transactionDate": "2023-07-07",
+                "totalAmount": -25.0,
+                "processingStatus": "needs_review",
+            })
+            reverse_duplicate_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "reverse-duplicate",
+                "originalFilename": "reverse.pdf",
+                "documentType": "receipt",
+                "vendorName": "Praxis",
+                "transactionDate": "2023-07-07",
+                "totalAmount": -25.0,
+                "duplicateOfDocumentId": current_id,
+                "processingStatus": "needs_review",
+            })
+
+            current = ledger.get_document(current_id)
+            result = LocalDocumentProcessor(ledger)._duplicate_match(
+                current,
+                {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2023-07-07",
+                    "total_amount": -25.0,
+                },
+                {"ocr_text": "Praxis\n07-07-2023\nTerugbetaling 25,00"},
+            )
+
+            self.assertFalse(result["is_duplicate"])
+            self.assertEqual(
+                ledger.get_document(reverse_duplicate_id)["duplicate_of_document_id"],
+                current_id,
+            )
 
     def test_retry_failed_reprocesses_document_and_resolves_failure_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -987,6 +1178,29 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 "reason": "validation_failed",
                 "details": "VAT evidence requires review.",
             })
+            duplicate_guarded_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "duplicate-praxis-review",
+                "originalFilename": "duplicate-praxis.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+                "duplicate_candidate",
+            ):
+                ledger.create_review_item({
+                    "documentId": duplicate_guarded_id,
+                    "reason": reason,
+                    "details": "Duplicate evidence requires review.",
+                })
 
             summary = LocalDocumentProcessor(
                 ledger,
@@ -998,6 +1212,9 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(summary["stillNeedsReview"], 1)
             self.assertEqual(summary["readyDocuments"], 1)
             self.assertEqual(summary["externalSubmission"], "not_executed")
+            duplicate_guarded = ledger.get_document(duplicate_guarded_id)
+            self.assertEqual(duplicate_guarded["category"], "Manual Review")
+            self.assertEqual(duplicate_guarded["processing_status"], "needs_review")
 
             guarded = ledger.get_document(guarded_id)
             ready = ledger.get_document(ready_id)

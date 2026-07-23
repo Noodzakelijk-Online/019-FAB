@@ -19,6 +19,11 @@ import pickle
 
 from src.document_fetchers.base import BaseFetcher
 
+HP_EPRINT_SENDER = "eprintcenter@hp8.us"
+HP_EPRINT_PROFILE_ID = "hp_eprint_v1"
+CUSTOM_SCANNER_PROFILE_ID = "custom_scanner_v1"
+
+
 class GmailFetcher(BaseFetcher):
     """Fetches documents (attachments) from Gmail based on specified criteria."""
 
@@ -74,6 +79,7 @@ class GmailFetcher(BaseFetcher):
 
         scanner_mode = _as_bool(self.config.get("gmail_scanner_mode"))
         trusted_senders = _string_list(self.config.get("gmail_trusted_senders"))
+        scanner_profile_id = _scanner_profile_id(trusted_senders)
         if scanner_mode and not trusted_senders:
             error = ValueError("Gmail scanner mode requires at least one trusted sender.")
             self._fail_run(error)
@@ -211,8 +217,9 @@ class GmailFetcher(BaseFetcher):
                             'thread_id': msg.get('threadId'),
                             'attachment_id': stable_attachment_id,
                             'label_ids': list(msg.get('labelIds') or []),
-                            'scanner_profile': 'hp_eprint' if scanner_mode else None,
+                            'scanner_profile': scanner_profile_id if scanner_mode else None,
                             'scanner_policy_verified': scanner_mode,
+                            'delivery_path': 'gmail_to_fab_direct' if scanner_mode else None,
                         }
                     })
             if first_error:
@@ -273,6 +280,14 @@ def _scanner_query(trusted_senders: List[str]) -> str:
     if len(trusted_senders) > 1:
         sender_query = f"{{{sender_query}}}"
     return f"label:all {sender_query} has:attachment filename:pdf"
+
+
+def _scanner_profile_id(trusted_senders: List[str]) -> str:
+    return (
+        HP_EPRINT_PROFILE_ID
+        if trusted_senders == [HP_EPRINT_SENDER]
+        else CUSTOM_SCANNER_PROFILE_ID
+    )
 
 
 def _pdf_candidate(filename: str, mime_type: Any) -> bool:

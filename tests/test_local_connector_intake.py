@@ -345,6 +345,15 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertFalse(gmail["canSync"])
             self.assertEqual(gmail["scannerProfile"]["trustedSenders"], ["eprintcenter@hp8.us"])
             self.assertEqual(gmail["scannerProfile"]["documentPolicy"], "pdf_only_magic_verified")
+            self.assertEqual(gmail["scannerProfile"]["profileId"], "hp_eprint_v1")
+            self.assertEqual(
+                gmail["scannerProfile"]["deliveryPath"],
+                "gmail_to_fab_direct",
+            )
+            self.assertEqual(
+                gmail["scannerProfile"]["sourceProvenance"]["auditedCommit"],
+                "e3078d92c214aa3b17d98a8687f16e73f52f71ba",
+            )
 
     def test_gmail_scanner_plan_requires_a_trusted_sender_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:

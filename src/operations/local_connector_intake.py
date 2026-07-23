@@ -7,7 +7,12 @@ from uuid import uuid4
 
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
-from src.document_fetchers.gmail_fetcher import GmailFetcher
+from src.document_fetchers.gmail_fetcher import (
+    CUSTOM_SCANNER_PROFILE_ID,
+    HP_EPRINT_PROFILE_ID,
+    HP_EPRINT_SENDER,
+    GmailFetcher,
+)
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_ledger import LocalOperationsLedger
@@ -712,8 +717,14 @@ class LocalConnectorIntakeService:
 
     def _gmail_scanner_profile(self) -> Dict[str, Any]:
         trusted_senders = _list_config_value(self.config.get("gmail_trusted_senders"))
+        is_hp_eprint = trusted_senders == [HP_EPRINT_SENDER]
         return {
             "enabled": _configured_bool(self.config, "gmail_scanner_mode", default=False),
+            "profileId": (
+                HP_EPRINT_PROFILE_ID
+                if is_hp_eprint
+                else CUSTOM_SCANNER_PROFILE_ID
+            ),
             "trustedSenders": trusted_senders,
             "query": str(
                 self.config.get("gmail_query")
@@ -722,6 +733,16 @@ class LocalConnectorIntakeService:
             ),
             "documentPolicy": "pdf_only_magic_verified",
             "originalRetention": "email_unchanged",
+            "deliveryPath": "gmail_to_fab_direct",
+            "sourceProvenance": (
+                {
+                    "repository": "Noodzakelijk-Online/025-Scan-to-folder-automation",
+                    "auditedCommit": "e3078d92c214aa3b17d98a8687f16e73f52f71ba",
+                    "legacyTransport": "gmail_to_google_drive_apps_script",
+                }
+                if is_hp_eprint
+                else None
+            ),
         }
 
     def _source_identifier(self, source: str) -> str:

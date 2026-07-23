@@ -1,18 +1,18 @@
-# Verified Google Drive to Wave delivery
+# Verified source-to-Wave delivery
 
-FAB treats the Google Drive file as the source of record and Wave as the
-downstream accounting surface. A matching transaction or receipt icon alone is
-not enough to archive a source document.
+FAB treats retained Google Drive files and trusted Gmail scanner attachments as
+source evidence, with Wave as the downstream accounting surface. A matching
+transaction or receipt icon alone is not enough to complete delivery or archive
+a source document.
 
 ## Lifecycle
 
 1. The Google Drive connector downloads direct children of the configured
-   intake folder, either through native OAuth or the authenticated binary relay
-   at `POST /api/connectors/google-drive/relay`. FAB requires the configured
-   folder ID and records the provider file ID, size, and a locally computed
-   SHA-256 digest in the operations ledger. Repeating the same provider ID and
-   bytes is idempotent; changed bytes create a revision and never overwrite the
-   earlier local copy.
+   intake folder. The read-only Gmail scanner connector accepts only PDF
+   attachments from explicitly trusted senders, records the Gmail message and
+   attachment IDs, and confines every local copy to the configured download
+   root. Both paths compute a local SHA-256 digest and retain source provenance
+   in the operations ledger.
 2. FAB processes and validates the document, resolves duplicates and review
    items, and prepares or finds the matching Wave transaction.
 3. A browser or HAI executor uploads the exact local source file to Wave and
@@ -23,17 +23,22 @@ not enough to archive a source document.
    readback hash and size itself. Metadata attestation through
    `attachment-evidence` or `record_wave_attachment_verification` can record
    progress but can never unlock archival.
-5. The worker runs a move-only archive pass under a per-document lease. It
+5. A verified Gmail scanner work order becomes complete while the source email
+   remains unchanged and the local evidence remains retained. No Gmail label,
+   message, or attachment mutation is performed.
+6. For Drive sources only, the worker runs a move-only archive pass under a
+   per-document lease. It
    downloads the current Drive source again, requires recent Wave readback
    evidence, verifies its SHA-256 and complete provider identity, and re-runs
    every archive gate immediately before moving the same provider file ID.
-6. FAB reads the file back after the move and requires the same SHA-256, file
+7. FAB reads the Drive file back after the move and requires the same SHA-256, file
    ID, filename, MIME type, size, and archive parent. A failed postcondition
    triggers a move-only rollback to the intake folder and never marks the
    lifecycle archived.
 
-Any failed gate leaves the source in the intake folder and creates a review
-item. FAB never deletes a Drive source in this workflow.
+Any failed Drive gate leaves the source in the intake folder. Any failed Gmail
+gate leaves both the email and local evidence unchanged. FAB never deletes a
+source in this workflow.
 
 ## Required Wave evidence
 
@@ -55,11 +60,13 @@ item. FAB never deletes a Drive source in this workflow.
 
 The FAB bookkeeping record must exist, target `waveapps_business`, be outside
 all review states, and have reached an archivable record status. Source hash,
-provider file ID, filename, MIME type, and size are mandatory rather than
-best-effort metadata. Older records that lack these values remain in intake
-until FAB re-ingests or repairs their evidence. The intake and archive folder
-IDs must be different; FAB blocks the workflow before any Drive update when
-they are equal.
+provider identity, filename, MIME type, and size are mandatory rather than
+best-effort metadata. Older records that lack these values remain pending until
+FAB re-ingests or repairs their evidence. For Gmail scanner sources, the trusted
+sender, scanner policy marker, Gmail message ID, attachment ID, and download-root
+confinement are mandatory. For Drive sources, the intake and archive folder IDs
+must be different; FAB blocks the workflow before any Drive update when they are
+equal.
 
 The Wave receipt surface currently accepts PDF, JPG/JPEG, PNG, GIF, TIFF/TIF,
 BMP, and HEIC files up to 6 MB. FAB marks incompatible work orders before an
@@ -97,9 +104,9 @@ The HAI manifest advertises three bounded resources and two related commands:
 - `google_drive_binary_relay` accepts exact Drive bytes and provider metadata
   from an authenticated connector without requiring the local process to own a
   Drive OAuth token.
-- `wave_attachment_work_orders` returns the exact local source path,
-  provider file ID, source hash, expected Wave fields and line items, evidence
-  template, and current archive blockers without changing either system.
+- `wave_attachment_work_orders` returns the exact local source path, provider
+  identity, source hash, expected Wave fields and line items, evidence template,
+  and current verification or archive blockers without changing either system.
 - `wave_attachment_binary_readback` accepts the file downloaded back from Wave
   and computes the archival evidence inside FAB.
 - `record_wave_attachment_verification` records metadata attestation only and
@@ -110,10 +117,11 @@ The HAI manifest advertises three bounded resources and two related commands:
 Neither command can delete a source file, bypass unresolved reviews, reuse
 legacy v1 evidence, or run two archive moves for the same document at once.
 Successful fresh evidence resolves only an earlier `drive_wave_archive_blocked`
-review; unrelated review items continue to block archival. The current work
-order contract is `fab-drive-wave-work-order-v2`.
+review; unrelated review items continue to block delivery. The current work
+order contract is `fab-source-wave-work-order-v3`. The compatibility endpoint
+remains `/api/drive-wave/work-orders`.
 
-The operator dashboard reads the same work-order endpoint. An empty queue is
-not represented as completed delivery when Drive authorization is missing; the
-connector state remains `needs_authorization` until the configured folder can
-be read with the persisted token.
+The operator dashboard reads the same work-order endpoint. Gmail delivery can
+continue independently of Drive archive authorization, but missing Drive
+authorization remains visible until the configured folder can be read with the
+persisted token.

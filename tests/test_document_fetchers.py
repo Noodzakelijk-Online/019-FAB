@@ -163,6 +163,11 @@ class TestDocumentFetchers(unittest.TestCase):
         self.assertEqual(len(documents), 1)
         self.assertEqual(documents[0]["metadata"]["sender_address"], "eprintcenter@hp8.us")
         self.assertTrue(documents[0]["metadata"]["scanner_policy_verified"])
+        self.assertEqual(documents[0]["metadata"]["scanner_profile"], "hp_eprint_v1")
+        self.assertEqual(
+            documents[0]["metadata"]["delivery_path"],
+            "gmail_to_fab_direct",
+        )
         self.assertEqual(documents[0]["mime_type"], "application/pdf")
         self.assertEqual(fetcher.last_run["rejected"]["untrusted_sender"], 1)
         self.assertEqual(fetcher.last_run["rejected"]["invalid_pdf"], 1)

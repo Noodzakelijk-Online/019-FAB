@@ -116,10 +116,22 @@ class FinancialFieldExtractor:
         (r"\bziggo\b", "Ziggo"),
         (r"\bvisser\s+assen\b", "Visser Assen"),
     )
+    VENDOR_HEADER_PATTERNS = (
+        (
+            r"^\W*(?:aaction|aagtion|aagction|agtion)\W*$",
+            "Action",
+            0.85,
+        ),
+        (r"^\W*albert\s+heijn\b", None, 0.9),
+        (r"^\W*sun\s+wah\s+supermarket\b", "Sun Wah Supermarket", 0.9),
+        (r"^\W*so\s*low\b", "SoLow", 0.9),
+        (r"^\W*2\s*switch\b", "2Switch", 0.9),
+        (r"^\W*mantel\b", "Mantel", 0.9),
+    )
 
     def extract(self, text: str) -> Dict[str, Any]:
         text = text or ""
-        vendor_name, vendor_confidence = self._extract_vendor(text)
+        vendor_name, vendor_confidence, vendor_evidence = self._extract_vendor(text)
         date_value, date_confidence = self._extract_date(text)
         total_amount, currency, amount_confidence = self._extract_total_amount(text)
         vat_amount, vat_confidence = self._extract_vat_amount(text, total_amount)
@@ -163,6 +175,9 @@ class FinancialFieldExtractor:
         return {
             "extracted_data": extracted_data,
             "field_confidences": field_confidences,
+            "field_evidence": {
+                "vendor_name": vendor_evidence,
+            } if vendor_name else {},
         }
 
     def extract_line_items(self, text: str) -> List[Dict[str, Any]]:
@@ -187,7 +202,7 @@ class FinancialFieldExtractor:
                 line_items.append({"description": description, "total": amount})
         return line_items[:100]
 
-    def _extract_vendor(self, text: str) -> Tuple[Optional[str], float]:
+    def _extract_vendor(self, text: str) -> Tuple[Optional[str], float, Dict[str, Any]]:
         explicit = re.search(
             r"\b(?:receipt|invoice)\s+from\s+(?P<vendor>[^\r\n]{2,120})",
             text,
@@ -197,21 +212,51 @@ class FinancialFieldExtractor:
             explicit_vendor = explicit.group("vendor").strip(" .:-")
             for pattern, vendor in self.KNOWN_VENDOR_PATTERNS:
                 if re.search(pattern, explicit_vendor, flags=re.IGNORECASE):
-                    return vendor, 0.95
-            return explicit_vendor, 0.95
+                    return vendor, 0.95, {
+                        "source": "explicit_receipt_vendor",
+                        "matchedText": explicit_vendor,
+                        "canonicalized": vendor != explicit_vendor,
+                    }
+            return explicit_vendor, 0.95, {
+                "source": "explicit_receipt_vendor",
+                "matchedText": explicit_vendor,
+                "canonicalized": False,
+            }
 
         for pattern, vendor in self.KNOWN_VENDOR_PATTERNS:
             if re.search(pattern, text, flags=re.IGNORECASE):
-                return vendor, 0.9
+                return vendor, 0.9, {
+                    "source": "known_vendor_pattern",
+                    "canonicalized": True,
+                }
 
-        for line in text.splitlines():
-            cleaned = line.strip()
+        nonempty_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip()
+        ]
+        header_lines = nonempty_lines[:6]
+        for cleaned in header_lines:
+            for pattern, vendor, confidence in self.VENDOR_HEADER_PATTERNS:
+                if re.search(pattern, cleaned, flags=re.IGNORECASE):
+                    resolved_vendor = vendor or cleaned[:120]
+                    return resolved_vendor, confidence, {
+                        "source": "receipt_header_vendor_pattern",
+                        "matchedHeader": cleaned[:120],
+                        "canonicalized": resolved_vendor != cleaned[:120],
+                    }
+
+        for cleaned in nonempty_lines:
             if len(cleaned) < 3:
                 continue
             if self._looks_like_noise(cleaned):
                 continue
-            return cleaned[:120], 0.65
-        return None, 0.0
+            return cleaned[:120], 0.65, {
+                "source": "first_non_noise_header_line",
+                "matchedHeader": cleaned[:120],
+                "canonicalized": False,
+            }
+        return None, 0.0, {}
 
     def _extract_date(self, text: str) -> Tuple[Optional[str], float]:
         candidates: List[Tuple[str, float, int]] = []

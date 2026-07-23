@@ -39,6 +39,8 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
   const relayReady = delivery.status.relayIntakeReady === true;
   const resourceAvailable = resource?.state === "live" || resource?.state === "stale";
   const readyToArchive = resourceAvailable ? count(delivery.summary.readyToArchive) : null;
+  const completed = resourceAvailable ? count(delivery.summary.completed) : null;
+  const verifiedOrReady = readyToArchive === null || completed === null ? null : readyToArchive + completed;
   const needsVerification = resourceAvailable ? count(delivery.summary.needsAttachmentVerification) + count(delivery.summary.needsFreshReadback) : null;
   const blocked = resourceAvailable ? count(delivery.summary.sourceUnavailable) + count(delivery.summary.sourceIncompatible) + count(delivery.summary.needsProcessing) + count(delivery.summary.blockedByReview) + count(delivery.summary.needsWaveTransaction) : null;
   const state = panelState(resource, delivery.workOrders.length);
@@ -48,7 +50,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
       <div className="fab-section-heading">
         <div>
           <span>{copy("Verified document handoff", "Geverifieerde documentoverdracht")}</span>
-          <h2>{copy("Drive to Wave delivery", "Drive naar Wave levering")}</h2>
+          <h2>{copy("Source to Wave delivery", "Bron naar Wave levering")}</h2>
         </div>
         <div className="fab-section-statuses">
           <FabDataStatus resource={resource} state={state} />
@@ -63,7 +65,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
         <DeliveryMetric icon={CloudUpload} label={copy("Work orders", "Opdrachten")} value={delivery.count} tone="info" />
         <DeliveryMetric icon={FileClock} label={copy("Needs proof", "Bewijs nodig")} value={needsVerification} tone={needsVerification ? "warn" : "neutral"} />
         <DeliveryMetric icon={ShieldCheck} label={copy("Policy blocked", "Beleid blokkeert")} value={blocked} tone={blocked ? "bad" : "neutral"} />
-        <DeliveryMetric icon={Archive} label={copy("Ready to archive", "Klaar voor archief")} value={readyToArchive} tone={readyToArchive ? "good" : "neutral"} />
+        <DeliveryMetric icon={Archive} label={copy("Verified or archive-ready", "Geverifieerd of archiefklaar")} value={verifiedOrReady} tone={verifiedOrReady ? "good" : "neutral"} />
       </div>
 
       {connectorStatus === "needs_authorization" && (
@@ -84,7 +86,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                 <th>{copy("Source file", "Bronbestand")}</th>
                 <th>{copy("Required action", "Vereiste actie")}</th>
                 <th>{copy("Wave target", "Wave-doel")}</th>
-                <th>{copy("Archive gate", "Archiefcontrole")}</th>
+                <th>{copy("Retention gate", "Bewaarcontrole")}</th>
                 <th><span className="sr-only">{copy("Inspect", "Bekijken")}</span></th>
               </tr>
             </thead>
@@ -98,11 +100,14 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                   : count(asRecord(order.reviews).blocking);
                 const stage = text(order.stage, "needs_processing");
                 const documentId = text(order.documentId, "");
+                const sourceProvider = text(source.provider, "google_drive");
+                const isGmailScanner = sourceProvider === "gmail";
+                const gmailVerified = isGmailScanner && archivePlan.evidenceVerified === true;
                 return (
                   <tr key={text(order.workOrderId, documentId)}>
                     <td data-label={copy("Source file", "Bronbestand")}>
                       <strong>{text(source.filename, copy("Unnamed document", "Naamloos document"))}</strong>
-                      <span>{text(source.mimeType, "-")} | {text(source.sha256, "-").slice(0, 12)}</span>
+                      <span>{humanize(sourceProvider)} | {text(source.mimeType, "-")} | {text(source.sha256, "-").slice(0, 12)}</span>
                     </td>
                     <td data-label={copy("Required action", "Vereiste actie")}>
                       <span className={`fab-status-chip tone-${statusTone(stage)}`}>{humanize(stage)}</span>
@@ -112,9 +117,25 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                       <strong>{text(wave.externalTransactionId, copy("Transaction not bound", "Transactie niet gekoppeld"))}</strong>
                       <span>{text(wave.targetSystem, "waveapps_business")}</span>
                     </td>
-                    <td data-label={copy("Archive gate", "Archiefcontrole")}>
-                      <strong>{archivePlan.canArchive === true ? copy("All checks passed", "Alle controles geslaagd") : copy("Source retained", "Bron behouden")}</strong>
-                      <span>{archivePlan.canArchive === true ? copy("Move-only worker may proceed", "Verplaatsingsworker mag doorgaan") : `${blockerCount} ${copy("blocking checks", "blokkerende controles")}`}</span>
+                    <td data-label={copy("Retention gate", "Bewaarcontrole")}>
+                      <strong>
+                        {gmailVerified
+                          ? copy("Verified; email unchanged", "Geverifieerd; e-mail ongewijzigd")
+                          : isGmailScanner
+                            ? copy("Email and evidence retained", "E-mail en bewijs behouden")
+                            : archivePlan.canArchive === true
+                              ? copy("All checks passed", "Alle controles geslaagd")
+                              : copy("Source retained", "Bron behouden")}
+                      </strong>
+                      <span>
+                        {gmailVerified
+                          ? copy("No source mutation or deletion", "Geen bronwijziging of verwijdering")
+                          : isGmailScanner
+                            ? `${blockerCount} ${copy("verification checks open", "verificatiecontroles open")}`
+                            : archivePlan.canArchive === true
+                              ? copy("Move-only worker may proceed", "Verplaatsingsworker mag doorgaan")
+                              : `${blockerCount} ${copy("blocking checks", "blokkerende controles")}`}
+                      </span>
                     </td>
                     <td>
                       <a className="fab-icon-button" href={`${localApiEndpoint}/api/drive-wave/documents/${documentId}/work-order`} target="_blank" rel="noreferrer" aria-label={`${copy("Inspect work order", "Bekijk opdracht")} ${documentId}`} title={copy("Inspect work order", "Bekijk opdracht")}>
@@ -134,8 +155,8 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
       {resource?.state === "live" && !visibleOrders.length && (
         <div className="fab-empty-state compact">
           <FileCheck2 aria-hidden="true" />
-          <strong>{delivery.workOrders.length ? copy("No matching delivery work orders", "Geen overeenkomende leveringsopdrachten") : copy("No Drive documents queued", "Geen Drive-documenten in de wachtrij")}</strong>
-          <span>{delivery.workOrders.length ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : relayReady ? copy("The Drive relay will create one evidence-bound work order per accepted source file.", "De Drive-relay maakt per geaccepteerd bronbestand een bewijsgebonden opdracht.") : copy("Authorized Drive intake will create one evidence-bound work order per source file.", "Geautoriseerde Drive-inname maakt per bronbestand een bewijsgebonden opdracht.")}</span>
+          <strong>{delivery.workOrders.length ? copy("No matching delivery work orders", "Geen overeenkomende leveringsopdrachten") : copy("No source documents queued", "Geen brondocumenten in de wachtrij")}</strong>
+          <span>{delivery.workOrders.length ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : copy("Trusted Gmail scanner and authorized Drive intake create one evidence-bound work order per accepted source file.", "Vertrouwde Gmail-scanner- en geautoriseerde Drive-inname maken per geaccepteerd bronbestand een bewijsgebonden opdracht.")}</span>
         </div>
       )}
     </section>

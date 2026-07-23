@@ -46,7 +46,7 @@ PROCESSING_REVIEW_REASONS = {
     "validation_failed",
 }
 OCR_RECOVERY_VERSION = "illumination_normalization_v1"
-STORED_OCR_REASSESSMENT_VERSION = "financial_extraction_v3"
+STORED_OCR_REASSESSMENT_VERSION = "financial_extraction_v4"
 STORED_OCR_REASSESSMENT_REASONS = {
     "document_type_conflict",
     "low_confidence_categorization",
@@ -85,13 +85,16 @@ def trusted_category_suggestion_candidates(
             and classification.get("reviewRequired") is True
         ):
             continue
+        open_reviews = ledger.list_review_items(
+            status=("pending", "in_review"),
+            document_id=int(document["id"]),
+            limit=100,
+        )
+        if any(item.get("reason") == "duplicate_candidate" for item in open_reviews):
+            continue
         category_reviews = [
             item
-            for item in ledger.list_review_items(
-                status=("pending", "in_review"),
-                document_id=int(document["id"]),
-                limit=100,
-            )
+            for item in open_reviews
             if item.get("status") in {"pending", "in_review"}
             and item.get("reason") in {
                 "low_confidence_categorization",
@@ -108,6 +111,40 @@ def trusted_category_suggestion_candidates(
                 "reviewItems": category_reviews,
             })
     return candidates
+
+
+def duplicate_link_cycles(
+    ledger: LocalOperationsLedger,
+    limit: int = 5000,
+) -> list:
+    """Return stable document-id groups whose confirmed-duplicate links form cycles."""
+    documents = ledger.list_documents(limit=max(1, min(_safe_int(limit) or 5000, 5000)))
+    document_ids = {int(document["id"]) for document in documents}
+    links = {
+        int(document["id"]): int(document["duplicate_of_document_id"])
+        for document in documents
+        if document.get("duplicate_of_document_id") is not None
+        and int(document["duplicate_of_document_id"]) in document_ids
+    }
+    cycles = []
+    seen_cycles = set()
+    completed = set()
+    for start in sorted(links):
+        path = []
+        positions = {}
+        current = start
+        while current in links and current not in completed:
+            if current in positions:
+                members = tuple(sorted(path[positions[current]:]))
+                if members and members not in seen_cycles:
+                    seen_cycles.add(members)
+                    cycles.append(list(members))
+                break
+            positions[current] = len(path)
+            path.append(current)
+            current = links[current]
+        completed.update(path)
+    return sorted(cycles, key=lambda members: (members[0], len(members), members))
 
 
 class LocalDocumentProcessor:
@@ -139,6 +176,7 @@ class LocalDocumentProcessor:
         )
 
     def process_imported(self, limit: int = 25) -> Dict[str, Any]:
+        duplicate_cycle_repair = self.repair_duplicate_cycles()
         trusted_category_automation = self.apply_trusted_category_suggestions(limit=limit)
         documents = self.ledger.list_documents(status="imported", limit=limit)
         summary: Dict[str, Any] = {
@@ -148,6 +186,7 @@ class LocalDocumentProcessor:
             "failed": 0,
             "skipped": 0,
             "documents": [],
+            "duplicateCycleRepair": duplicate_cycle_repair,
             "trustedCategoryAutomation": trusted_category_automation,
         }
         for document in documents:
@@ -167,6 +206,7 @@ class LocalDocumentProcessor:
         summary["updatedRecords"] = (
             summary["processed"]
             + summary["needsReview"]
+            + duplicate_cycle_repair["documentsCleared"]
             + trusted_category_automation["updatedDocuments"]
         )
 
@@ -179,9 +219,107 @@ class LocalDocumentProcessor:
                 "needsReview": summary["needsReview"],
                 "failed": summary["failed"],
                 "skipped": summary["skipped"],
+                "duplicateCyclesRepaired": duplicate_cycle_repair["cyclesRepaired"],
                 "trustedCategoriesApplied": trusted_category_automation["updatedDocuments"],
             },
         })
+        return summary
+
+    def repair_duplicate_cycles(
+        self,
+        *,
+        actor: str = "fab_local_processing",
+        create_backup: bool = True,
+    ) -> Dict[str, Any]:
+        """Remove cyclic confirmed links while preserving every duplicate review gate."""
+        cycles = duplicate_link_cycles(self.ledger)
+        summary = {
+            "cyclesFound": len(cycles),
+            "cyclesRepaired": 0,
+            "documentsCleared": 0,
+            "reviewItemsCreated": 0,
+            "cycleDocumentIds": cycles,
+            "externalSubmission": "not_executed",
+            "sourceFilesModified": False,
+        }
+        if cycles and create_backup:
+            backup = LocalBackupService(self.ledger, self.config).create_backup(
+                note="Automatic pre-repair backup before clearing duplicate-link cycles"
+            )
+            if not backup.get("success"):
+                raise RuntimeError(
+                    "Duplicate-link cycle repair requires a successful ledger backup."
+                )
+            manifest = backup.get("manifest") or {}
+            if not manifest.get("ledgerSha256") or not manifest.get("ledgerBytes"):
+                raise RuntimeError(
+                    "Duplicate-link cycle repair requires a checksum-bound ledger backup."
+                )
+            summary["backup"] = {
+                "status": backup.get("status"),
+                "backupFilename": backup.get("backupFilename"),
+                "ledgerSha256": manifest.get("ledgerSha256"),
+                "ledgerBytes": manifest.get("ledgerBytes"),
+            }
+
+        for cycle in cycles:
+            before_links = {}
+            cycle_review_items_created = 0
+            for document_id in cycle:
+                document = self.ledger.get_document(document_id)
+                if not document:
+                    continue
+                before_links[str(document_id)] = document.get("duplicate_of_document_id")
+                existing_duplicate_reviews = [
+                    item
+                    for item in document.get("review_items") or []
+                    if item.get("status") in {"pending", "in_review"}
+                    and item.get("reason") == "duplicate_candidate"
+                ]
+                self.ledger.clear_document_duplicate(document_id)
+                self.ledger.update_document(document_id, {
+                    "processingStatus": "needs_review",
+                })
+                if not existing_duplicate_reviews:
+                    self._queue_review(
+                        document,
+                        "duplicate_candidate",
+                        (
+                            "Cyclic duplicate links were cleared; compare the retained "
+                            "source documents before confirming a canonical record."
+                        ),
+                        corrected_data={
+                            "cycleDocumentIds": cycle,
+                            "actor": actor,
+                        },
+                    )
+                    cycle_review_items_created += 1
+                    summary["reviewItemsCreated"] += 1
+                LocalBookkeepingRecordService(
+                    self.ledger,
+                    self.config,
+                ).upsert_from_document(document_id)
+                summary["documentsCleared"] += 1
+            summary["cyclesRepaired"] += 1
+            self.ledger.record_audit_event({
+                "action": "local_processing.duplicate_cycle_repaired",
+                "entityType": "bookkeeping_document",
+                "entityId": str(cycle[0]),
+                "details": {
+                    "actor": actor,
+                    "cycleDocumentIds": cycle,
+                    "previousLinks": before_links,
+                    "reviewItemsCreated": cycle_review_items_created,
+                    "externalSubmission": "not_executed",
+                    "sourceFilesModified": False,
+                },
+            })
+        if cycles:
+            self.ledger.record_audit_event({
+                "action": "local_processing.duplicate_cycle_repair_completed",
+                "entityType": "bookkeeping_document",
+                "details": dict(summary),
+            })
         return summary
 
     def trusted_category_suggestion_candidates(self, limit: int = 500) -> list:
@@ -972,20 +1110,21 @@ class LocalDocumentProcessor:
 
         review_reasons = self._review_reasons(processed_data, validation, category, confidence_score)
         duplicate_candidate_id = None
-        duplicate_of_document_id = None
+        duplicate_candidate_document_id = None
+        duplicate_of_document_id = document.get("duplicate_of_document_id")
         duplicate_fingerprint = duplicate_match.get("duplicate_fingerprint")
         if duplicate_match.get("is_duplicate"):
-            duplicate_of_document_id = duplicate_match.get("matched_document_id")
+            duplicate_candidate_document_id = duplicate_match.get("matched_document_id")
             duplicate_fingerprint = duplicate_match.get("duplicate_fingerprint")
             duplicate_candidate_id = self.ledger.record_duplicate_candidate({
                 "documentId": document_id,
-                "candidateDocumentId": duplicate_of_document_id,
+                "candidateDocumentId": duplicate_candidate_document_id,
                 "matchType": duplicate_match.get("reason") or "fuzzy_document_match",
                 "confidenceScore": duplicate_match.get("confidence_score"),
                 "status": "pending",
                 "reason": "Duplicate evidence detected after OCR/extraction.",
                 "evidence": {
-                    "matchedDocumentId": duplicate_of_document_id,
+                    "matchedDocumentId": duplicate_candidate_document_id,
                     "confidenceScore": duplicate_match.get("confidence_score"),
                     "reason": duplicate_match.get("reason"),
                     "duplicateFingerprint": duplicate_fingerprint,
@@ -1008,6 +1147,8 @@ class LocalDocumentProcessor:
                     "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
                     "reviewReasons": review_reasons,
                     "validation": validation,
+                    "fieldConfidences": processed_data.get("field_confidences") or {},
+                    "fieldEvidence": processed_data.get("field_evidence") or {},
                     "duplicateMatch": duplicate_match if duplicate_match.get("is_duplicate") else None,
                     "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
                     "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
@@ -1071,7 +1212,7 @@ class LocalDocumentProcessor:
             if reason == "duplicate_candidate":
                 corrected_data = {
                     "duplicateCandidateId": duplicate_candidate_id,
-                    "duplicateOfDocumentId": duplicate_of_document_id,
+                    "candidateDocumentId": duplicate_candidate_document_id,
                     "duplicateFingerprint": duplicate_fingerprint,
                 }
             self._queue_review(
@@ -1093,6 +1234,7 @@ class LocalDocumentProcessor:
                 "reviewReasons": review_reasons,
                 "validation": validation,
                 "duplicateCandidateId": duplicate_candidate_id,
+                "duplicateCandidateDocumentId": duplicate_candidate_document_id,
                 "duplicateOfDocumentId": duplicate_of_document_id,
                 "bookkeepingRecordId": record_result.get("recordId"),
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
@@ -1142,6 +1284,8 @@ class LocalDocumentProcessor:
             _duplicate_comparison_document(item)
             for item in self.ledger.list_documents(limit=500)
             if int(item.get("id") or 0) != int(document["id"])
+            and not item.get("duplicate_of_document_id")
+            and str(item.get("processing_status") or "") not in {"duplicate", "failed"}
         ]
         result = self.duplicate_detector.is_duplicate(candidate, existing_documents)
         result["duplicate_fingerprint"] = candidate["duplicate_fingerprint"]
@@ -1201,6 +1345,7 @@ class LocalDocumentProcessor:
             "ocr_text": ocr_text,
             "extracted_data": extraction.get("extracted_data") or {},
             "field_confidences": extraction.get("field_confidences") or {},
+            "field_evidence": extraction.get("field_evidence") or {},
             "language": existing.get("language") or "unknown",
             "ocr_confidence": 1.0,
             "ocr_strategy": "stored_ocr_reassessment",
@@ -1564,6 +1709,16 @@ def _extracted_field_records(
         "ocrTextPresent": bool(str(processed_data.get("ocr_text") or "").strip()),
         "validationBlocking": bool(validation.get("blocking")),
     }
+    field_confidences = (
+        processed_data.get("field_confidences")
+        if isinstance(processed_data.get("field_confidences"), dict)
+        else {}
+    )
+    field_evidence = (
+        processed_data.get("field_evidence")
+        if isinstance(processed_data.get("field_evidence"), dict)
+        else {}
+    )
     records = []
     for field_name in (
         "vendor_name",
@@ -1576,14 +1731,20 @@ def _extracted_field_records(
         value = extracted_data.get(field_name)
         if value in (None, "", []):
             continue
+        provenance = {
+            **base_provenance,
+            "fieldSource": "extracted_data",
+        }
+        if isinstance(field_evidence.get(field_name), dict):
+            provenance["evidence"] = field_evidence[field_name]
         records.append({
             "fieldName": field_name,
             "value": value,
-            "confidenceScore": _field_confidence(field_name, value, confidence_score),
-            "provenance": {
-                **base_provenance,
-                "fieldSource": "extracted_data",
-            },
+            "confidenceScore": _safe_float(
+                field_confidences.get(field_name),
+                _field_confidence(field_name, value, confidence_score),
+            ),
+            "provenance": provenance,
         })
     if category:
         category_source = "categorizer"

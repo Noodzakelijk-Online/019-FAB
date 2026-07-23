@@ -18,6 +18,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_processing import (
     LocalDocumentProcessor,
+    duplicate_link_cycles,
     trusted_category_suggestion_candidates,
 )
 from src.operations.local_readiness import LocalReadinessService
@@ -176,17 +177,20 @@ class LocalAutonomousService:
                 (
                     counts["importedDocuments"] > 0
                     or counts["trustedCategorySuggestions"] > 0
+                    or counts["duplicateLinkCycles"] > 0
                 )
                 and not blocked,
-                "No imported documents or trusted category suggestions are waiting."
+                "No imported documents, trusted category suggestions, or duplicate-link repairs are waiting."
                 if (
                     counts["importedDocuments"] == 0
                     and counts["trustedCategorySuggestions"] == 0
+                    and counts["duplicateLinkCycles"] == 0
                 )
                 else None,
                 {
                     "candidateDocuments": counts["importedDocuments"],
                     "trustedCategorySuggestions": counts["trustedCategorySuggestions"],
+                    "duplicateLinkCycles": counts["duplicateLinkCycles"],
                     "limit": limit,
                     "externalSubmission": "not_executed",
                 },
@@ -951,6 +955,7 @@ class LocalAutonomousService:
         approved_export_attempts = self.ledger.list_export_attempts(status="approved", limit=500)
         return {
             "importedDocuments": len(self.ledger.list_documents(status=IMPORTED_DOCUMENT_STATUSES, limit=limit)),
+            "duplicateLinkCycles": len(duplicate_link_cycles(self.ledger)),
             "trustedCategorySuggestions": len(trusted_category_suggestions),
             "routableDocuments": len(routable_documents),
             "routableBookkeepingRecords": len(routable_records),

@@ -241,6 +241,64 @@ class TestLocalAutonomousService(unittest.TestCase):
                 [],
             )
 
+    def test_autonomy_repairs_legacy_duplicate_cycle_before_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            first_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "legacy-cycle-1",
+                "originalFilename": "scan-1.pdf",
+                "processingStatus": "needs_review",
+            })
+            second_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "legacy-cycle-2",
+                "originalFilename": "scan-2.pdf",
+                "processingStatus": "needs_review",
+            })
+            ledger.update_document(first_id, {"duplicateOfDocumentId": second_id})
+            ledger.update_document(second_id, {"duplicateOfDocumentId": first_id})
+            for document_id in (first_id, second_id):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "duplicate_candidate",
+                    "details": "Legacy duplicate review remains open.",
+                })
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_local_backup_dir": os.path.join(temp_dir, "backups")},
+                intake_paths=[],
+            )
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["duplicateLinkCycles"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(
+                processing["summary"]["duplicateCycleRepair"]["cyclesRepaired"],
+                1,
+            )
+            self.assertIsNone(ledger.get_document(first_id)["duplicate_of_document_id"])
+            self.assertIsNone(ledger.get_document(second_id)["duplicate_of_document_id"])
+            self.assertEqual(
+                len(ledger.list_review_items(status="pending")),
+                2,
+            )
+
     def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

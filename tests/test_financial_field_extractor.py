@@ -36,6 +36,26 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(confidences["transaction_date"], 0.0)
         self.assertEqual(confidences["total_amount"], 0.0)
 
+    def test_vendor_fallback_still_scans_beyond_the_strong_header_window(self):
+        text = "\n".join([
+            "Invoice",
+            "Factuur",
+            "Receipt",
+            "Kassabon",
+            "Totaal 12,00",
+            "12-07-2023",
+            "Readable Vendor BV",
+        ])
+
+        result = FinancialFieldExtractor().extract(text)
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "Readable Vendor BV")
+        self.assertEqual(result["field_confidences"]["vendor_name"], 0.65)
+        self.assertEqual(
+            result["field_evidence"]["vendor_name"]["source"],
+            "first_non_noise_header_line",
+        )
+
     def test_extracts_split_stripe_receipt_fields(self):
         text = """
         Receipt from BrainForce Co.
@@ -159,6 +179,29 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(result["extracted_data"]["total_amount"], 1.98)
         self.assertGreaterEqual(result["field_confidences"]["vendor_name"], 0.9)
         self.assertGreaterEqual(result["field_confidences"]["transaction_date"], 0.8)
+
+    def test_recovers_strong_vendor_names_from_ocr_receipt_headers(self):
+        cases = (
+            ("AAGTION\n1385 Arnhem\nTotaal 12,00", "Action", 0.85),
+            ("Albert Heijn Oosterbeek\nTotaal 12,00", "Albert Heijn Oosterbeek", 0.9),
+            ("Sun Wah Supermarket\nVan Wesenbekestraat\nTotaal 12,00", "Sun Wah Supermarket", 0.9),
+            ("Solow Arnie\nJansstraat 28\nTotaal 12,00", "SoLow", 0.9),
+            ("GWITCH\n2Switch Arnhem\nTotaal 12,00", "2Switch", 0.9),
+            ("mantel A\\\nDatum: 8-7-2023\nTotaal 12,00", "Mantel", 0.9),
+        )
+
+        for text, vendor, minimum_confidence in cases:
+            with self.subTest(vendor=vendor):
+                result = FinancialFieldExtractor().extract(text)
+                self.assertEqual(result["extracted_data"]["vendor_name"], vendor)
+                self.assertGreaterEqual(
+                    result["field_confidences"]["vendor_name"],
+                    minimum_confidence,
+                )
+                self.assertEqual(
+                    result["field_evidence"]["vendor_name"]["source"],
+                    "receipt_header_vendor_pattern",
+                )
 
     def test_payable_total_wins_over_discount_amount(self):
         result = FinancialFieldExtractor().extract(
