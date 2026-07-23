@@ -8,6 +8,7 @@ from uuid import uuid4
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
 from src.document_fetchers.gmail_fetcher import GmailFetcher
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_ledger import LocalOperationsLedger
 
@@ -18,6 +19,7 @@ SOURCE_ALIASES = {
     "drive": "google_drive",
     "photos": "google_photos",
 }
+CONNECTOR_TARGET_SYSTEMS = {"waveapps_business", "waveapps_personal", "mijngeldzaken"}
 
 
 class LocalConnectorIntakeService:
@@ -171,6 +173,7 @@ class LocalConnectorIntakeService:
                 "configured": source_plan.get("configured"),
                 "enabled": source_plan.get("enabled"),
                 "canSync": source_plan.get("canSync"),
+                "targetSystem": source_plan.get("targetSystem"),
                 "externalSubmission": "not_executed",
             }
             workflow_step_id = self.ledger.create_workflow_step({
@@ -307,6 +310,7 @@ class LocalConnectorIntakeService:
                 "scannerProfile": plan.get("scannerProfile"),
                 "nextAction": plan.get("nextAction"),
                 "externalSubmission": "not_executed",
+                **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
             },
         })
         if not plan["canSync"]:
@@ -375,6 +379,7 @@ class LocalConnectorIntakeService:
             "revisions": 0,
             "alreadyRegistered": 0,
             "skipped": 0,
+            "targetBackfills": 0,
         }
         registered_documents = []
         registration_errors = []
@@ -383,9 +388,10 @@ class LocalConnectorIntakeService:
                 counters["skipped"] += 1
                 continue
             root = self._download_root(source, document)
+            routed_document = _with_default_target_system(document, plan.get("targetSystem"))
             try:
                 result = registrar.register_fetched_document(
-                    document,
+                    routed_document,
                     source_account_id=source_account_id,
                     root=root,
                 )
@@ -410,6 +416,18 @@ class LocalConnectorIntakeService:
                 elif result_status == "revision":
                     counters["revisions"] += 1
             registered_documents.append(result.get("document"))
+            registered_document = result.get("document") or {}
+            document_id = registered_document.get("id")
+            if registered_document.get("targetBackfilled"):
+                counters["targetBackfills"] += 1
+            if (
+                document_id
+                and registered_document.get("targetBackfilled")
+                and self.ledger.get_bookkeeping_record_by_document(int(document_id))
+            ):
+                LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(
+                    int(document_id)
+                )
 
         diagnostics = getattr(fetcher, "last_run", {})
         fetch_error = getattr(fetcher, "last_error", None) or getattr(fetcher, "auth_error", None)
@@ -439,6 +457,7 @@ class LocalConnectorIntakeService:
                 "error": error,
                 "lastSuccessfulSyncAt": _now() if status == "ready" else previous_metadata.get("lastSuccessfulSyncAt"),
                 "externalSubmission": "not_executed",
+                **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
             },
         })
         if errors:
@@ -516,6 +535,8 @@ class LocalConnectorIntakeService:
 
     def _source_plan(self, source: str) -> Dict[str, Any]:
         configured = self._configured(source)
+        target_system = _configured_target_system(self.config, source)
+        target_system_valid = target_system in CONNECTOR_TARGET_SYSTEMS if target_system else True
         enabled = _configured_bool(
             self.config,
             f"{source}_enabled",
@@ -560,6 +581,7 @@ class LocalConnectorIntakeService:
                     if status == "supervision_required"
                     else "Enable the supervised Google Photos Picker integration when needed."
                 ),
+                "targetSystem": target_system if target_system_valid else None,
             }
         if not enabled:
             status = "disabled"
@@ -567,6 +589,8 @@ class LocalConnectorIntakeService:
             status = "needs_configuration"
         elif source in {"gmail", "google_drive"} and self._reauthorization_required(source):
             status = "needs_authorization"
+        elif not target_system_valid:
+            status = "needs_configuration"
         elif not configured:
             status = "needs_configuration"
         else:
@@ -581,7 +605,12 @@ class LocalConnectorIntakeService:
             "status": status,
             "mode": "scanner_mailbox_read_only" if source == "gmail" and gmail_scanner_mode else "read_only_connector",
             "scannerProfile": self._gmail_scanner_profile() if source == "gmail" else None,
-            "nextAction": _next_action(source, status),
+            "nextAction": (
+                f"Set {source}.target_system to waveapps_business, waveapps_personal, or mijngeldzaken."
+                if not target_system_valid
+                else _next_action(source, status)
+            ),
+            "targetSystem": target_system if target_system_valid else None,
         }
 
     def _configured(self, source: str) -> bool:
@@ -677,6 +706,29 @@ def _normalize_sources(values: Optional[Iterable[str]]) -> list:
     return normalized
 
 
+def _configured_target_system(config: Dict[str, Any], source: str) -> str:
+    nested = config.get(source) if isinstance(config.get(source), dict) else {}
+    value = config.get(f"{source}_target_system") or nested.get("target_system") or ""
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _with_default_target_system(document: Dict[str, Any], target_system: Any) -> Dict[str, Any]:
+    result = dict(document)
+    metadata = dict(result.get("metadata") or {}) if isinstance(result.get("metadata"), dict) else {}
+    existing = str(
+        result.get("targetSystem")
+        or result.get("target_system")
+        or metadata.get("targetSystem")
+        or metadata.get("target_system")
+        or ""
+    ).strip()
+    if not existing and str(target_system or "").strip():
+        metadata["targetSystem"] = str(target_system).strip()
+        result["targetSystem"] = str(target_system).strip()
+    result["metadata"] = metadata
+    return result
+
+
 def _list_config_value(value: Any) -> list:
     if isinstance(value, (list, tuple, set)):
         values = value
@@ -698,6 +750,7 @@ def _empty_summary() -> Dict[str, int]:
         "revisions": 0,
         "alreadyRegistered": 0,
         "skipped": 0,
+        "targetBackfills": 0,
         "failedSources": 0,
     }
 
@@ -706,7 +759,9 @@ def _summarize(results: list) -> Dict[str, int]:
     summary = _empty_summary()
     summary["sources"] = len(results)
     for item in results:
-        for key in ("seen", "registered", "duplicates", "revisions", "alreadyRegistered", "skipped"):
+        for key in (
+            "seen", "registered", "duplicates", "revisions", "alreadyRegistered", "skipped", "targetBackfills"
+        ):
             summary[key] += int(item.get(key) or 0)
         if item.get("status") in {"failed", "partial"}:
             summary["failedSources"] += 1
@@ -733,6 +788,7 @@ def _compact_connector_step_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "revisions",
         "alreadyRegistered",
         "skipped",
+        "targetBackfills",
         "nextAction",
         "externalSubmission",
     )

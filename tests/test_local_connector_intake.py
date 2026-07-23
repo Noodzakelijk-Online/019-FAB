@@ -6,6 +6,7 @@ from src.operations.local_connector_intake import (
     CONNECTOR_INTAKE_LEASE_NAME,
     LocalConnectorIntakeService,
 )
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
 
 
@@ -90,6 +91,69 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(steps[0]["metadata"]["result"]["alreadyRegistered"], 1)
             self.assertEqual(first["externalSubmission"], "not_executed")
             self.assertTrue(first["runtimeLease"]["released"])
+
+    def test_connector_target_backfills_ambiguous_existing_record_without_overriding_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_path = os.path.join(temp_dir, "business.pdf")
+            second_path = os.path.join(temp_dir, "personal.pdf")
+            for path, content in ((first_path, b"business"), (second_path, b"personal")):
+                with open(path, "wb") as handle:
+                    handle.write(content)
+            documents = [{
+                "id": "gmail-business-1",
+                "original_filename": "business.pdf",
+                "local_path": first_path,
+            }]
+            ledger, service = self._service(temp_dir, documents)
+
+            service.sync(["gmail"], actor="test")
+            ledger.update_document(1, {
+                "processingStatus": "reviewed",
+                "vendorName": "Example Vendor",
+                "category": "Office",
+                "transactionDate": "2026-07-01",
+                "totalAmount": 12.5,
+                "confidenceScore": 1.0,
+            })
+            LocalBookkeepingRecordService(ledger).upsert_from_document(1)
+            self.assertEqual(
+                ledger.get_bookkeeping_record_by_document(1)["target_system"],
+                "waveapps",
+            )
+
+            service.config["gmail_target_system"] = "waveapps_business"
+            second = service.sync(["gmail"], actor="test")
+
+            self.assertEqual(second["summary"]["alreadyRegistered"], 1)
+            self.assertEqual(second["summary"]["targetBackfills"], 1)
+            self.assertEqual(
+                ledger.get_document(1)["metadata"]["targetSystem"],
+                "waveapps_business",
+            )
+            self.assertEqual(
+                ledger.get_bookkeeping_record_by_document(1)["target_system"],
+                "waveapps_business",
+            )
+            source = ledger.list_source_accounts(source_type="gmail")[0]
+            self.assertEqual(source["metadata"]["targetSystem"], "waveapps_business")
+            self.assertIn(
+                "local_intake.target_system_backfilled",
+                [event["action"] for event in ledger.list_audit_events(limit=20)],
+            )
+
+            documents.append({
+                "id": "gmail-personal-1",
+                "original_filename": "personal.pdf",
+                "local_path": second_path,
+                "metadata": {"targetSystem": "waveapps_personal"},
+            })
+            third = service.sync(["gmail"], actor="test")
+            personal = next(
+                document for document in ledger.list_documents()
+                if document["source_document_id"] == "gmail-personal-1"
+            )
+            self.assertEqual(personal["metadata"]["targetSystem"], "waveapps_personal")
+            self.assertEqual(third["summary"]["targetBackfills"], 0)
 
     def test_sync_does_not_overlap_an_active_connector_cycle(self):
         with tempfile.TemporaryDirectory() as temp_dir:

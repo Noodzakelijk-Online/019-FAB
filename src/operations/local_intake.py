@@ -185,6 +185,7 @@ class LocalFolderIntake:
 
         source_document = dict(source_document or {})
         source_metadata = source_document.get("metadata") if isinstance(source_document.get("metadata"), dict) else {}
+        target_system = _source_document_target_system(source_document, source_metadata)
         mime_type = (
             source_document.get("mime_type")
             or source_metadata.get("mime_type")
@@ -231,8 +232,29 @@ class LocalFolderIntake:
             revision_of_document_id = None
 
         if existing and revision_of_document_id is None:
+            update_payload: Dict[str, Any] = {}
+            target_backfilled = False
             if source_account_id and not existing.get("source_account_id"):
-                self.ledger.update_document(int(existing["id"]), {"sourceAccountId": source_account_id})
+                update_payload["sourceAccountId"] = source_account_id
+            if target_system and not _stored_document_target_system(existing):
+                existing_metadata = dict(existing.get("metadata") or {})
+                existing_metadata["targetSystem"] = target_system
+                update_payload["metadata"] = existing_metadata
+                target_backfilled = True
+            if update_payload:
+                self.ledger.update_document(int(existing["id"]), update_payload)
+            if target_backfilled:
+                self.ledger.record_audit_event({
+                    "action": "local_intake.target_system_backfilled",
+                    "entityType": "bookkeeping_document",
+                    "entityId": str(existing["id"]),
+                    "details": {
+                        "source": self.source,
+                        "sourceAccountId": source_account_id or existing.get("source_account_id"),
+                        "targetSystem": target_system,
+                        "externalSubmission": "not_executed",
+                    },
+                })
             return {
                 "status": "already_registered",
                 "document": {
@@ -241,6 +263,8 @@ class LocalFolderIntake:
                     "sourceAccountId": source_account_id or existing.get("source_account_id"),
                     "sourceDocumentId": source_id,
                     "status": existing["processing_status"],
+                    "targetSystem": target_system or _stored_document_target_system(existing),
+                    "targetBackfilled": target_backfilled,
                 },
             }
 
@@ -254,6 +278,28 @@ class LocalFolderIntake:
             relative_path = os.path.relpath(path, root)
         except ValueError:
             relative_path = original_filename
+        document_metadata = {
+            "contentSha256": content_hash,
+            "folder": root,
+            "relativePath": relative_path,
+            "sizeBytes": stat.st_size,
+            "modifiedAt": modified_at,
+            "intakeSource": self.source,
+            "sourceAccountId": source_account_id,
+            "sourceIdentifier": root,
+            "providerMetadata": source_metadata,
+            "providerTimestamp": source_document.get("timestamp"),
+            "sourceRevision": (
+                {
+                    "revisionOfDocumentId": revision_of_document_id,
+                    "baseSourceDocumentId": source_document_id(identity_document),
+                }
+                if revision_of_document_id
+                else None
+            ),
+        }
+        if target_system:
+            document_metadata["targetSystem"] = target_system
         payload = {
             "sourceAccountId": source_account_id,
             "source": self.source,
@@ -266,26 +312,7 @@ class LocalFolderIntake:
             "duplicateFingerprint": content_hash,
             "contentSha256": content_hash,
             "duplicateOfDocumentId": duplicate_of_document_id,
-            "metadata": {
-                "contentSha256": content_hash,
-                "folder": root,
-                "relativePath": relative_path,
-                "sizeBytes": stat.st_size,
-                "modifiedAt": modified_at,
-                "intakeSource": self.source,
-                "sourceAccountId": source_account_id,
-                "sourceIdentifier": root,
-                "providerMetadata": source_metadata,
-                "providerTimestamp": source_document.get("timestamp"),
-                "sourceRevision": (
-                    {
-                        "revisionOfDocumentId": revision_of_document_id,
-                        "baseSourceDocumentId": source_document_id(identity_document),
-                    }
-                    if revision_of_document_id
-                    else None
-                ),
-            },
+            "metadata": document_metadata,
         }
         document_id = self.ledger.register_document(payload)
 
@@ -373,6 +400,8 @@ class LocalFolderIntake:
                 "sourceDocumentId": source_id,
                 "status": processing_status,
                 "duplicateOfDocumentId": duplicate_of_document_id,
+                "targetSystem": target_system,
+                "targetBackfilled": False,
             },
         }
 
@@ -419,6 +448,30 @@ def _document_content_hash(document: Dict[str, Any]) -> str:
         except OSError:
             return ""
     return ""
+
+
+def _source_document_target_system(
+    source_document: Dict[str, Any],
+    source_metadata: Dict[str, Any],
+) -> str:
+    return str(
+        source_document.get("targetSystem")
+        or source_document.get("target_system")
+        or source_metadata.get("targetSystem")
+        or source_metadata.get("target_system")
+        or ""
+    ).strip()
+
+
+def _stored_document_target_system(document: Dict[str, Any]) -> str:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    return str(
+        metadata.get("targetSystem")
+        or metadata.get("target_system")
+        or extracted.get("target_system")
+        or ""
+    ).strip()
 
 
 def _document_type(path: str, mime_type: str) -> str:
