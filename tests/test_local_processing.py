@@ -97,6 +97,59 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["bookkeeping_record"]["export_status"], "ready")
             self.assertEqual(ledger.list_audit_events()[0]["action"], "local_processing.document_processed")
 
+    def test_new_document_uses_trusted_exact_vendor_category_during_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "praxis.txt")
+            with open(receipt_path, "w", encoding="utf-8") as handle:
+                handle.write("Vendor: Praxis\nDate: 2026-06-28\nTOTAAL EUR 42.50\n")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "praxis-new",
+                "originalFilename": "praxis.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "imported",
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(
+                    category="Manual Review",
+                    confidence_score=0.1,
+                ),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            self.assertEqual(result["status"], "processed")
+            self.assertEqual(result["category"], "Construction Materials & Tools")
+            self.assertEqual(result["reviewReasons"], [])
+            self.assertEqual(
+                result["appliedTrustedCategorySuggestion"]["automationPolicy"],
+                "builtin_exact_vendor_taxonomy_v1",
+            )
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["category"], "Construction Materials & Tools")
+            self.assertGreaterEqual(document["confidence_score"], 0.95)
+            self.assertEqual(
+                document["metadata"]["processing"]["appliedTrustedCategorySuggestion"]["source"],
+                "fab_builtin_vendor_taxonomy_v1",
+            )
+            category_field = next(
+                field
+                for field in document["extracted_fields"]
+                if field["field_name"] == "category"
+            )
+            self.assertEqual(
+                category_field["provenance"]["fieldSource"],
+                "trusted_category_automation",
+            )
+            self.assertEqual(
+                category_field["provenance"]["policy"],
+                "builtin_exact_vendor_taxonomy_v1",
+            )
+
     def test_vendor_invoice_type_is_persisted_and_routes_as_bill_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             invoice_path = os.path.join(temp_dir, "invoice.txt")
@@ -880,6 +933,117 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertIn("local_processing.retry_started", audit_actions)
             self.assertIn("local_processing.processing_failed_review_resolved", audit_actions)
             self.assertIn("local_processing.retry_failed_completed", audit_actions)
+
+    def test_trusted_category_automation_resolves_only_category_gates(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            guarded_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "praxis-review",
+                "originalFilename": "praxis.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            ready_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "tmobile-review",
+                "originalFilename": "tmobile.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-27",
+                "totalAmount": 35.0,
+                "confidenceScore": 0.1,
+                "metadata": {
+                    "processing": {
+                        "documentTypeClassification": {
+                            "documentType": "unknown",
+                            "postingEligible": False,
+                            "reviewRequired": False,
+                        },
+                    },
+                },
+            })
+            for document_id in (guarded_id, ready_id):
+                for reason in (
+                    "low_confidence_categorization",
+                    "manual_review_category",
+                ):
+                    ledger.create_review_item({
+                        "documentId": document_id,
+                        "reason": reason,
+                        "details": "Category requires review.",
+                    })
+            ledger.create_review_item({
+                "documentId": guarded_id,
+                "reason": "validation_failed",
+                "details": "VAT evidence requires review.",
+            })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+            ).apply_trusted_category_suggestions()
+
+            self.assertEqual(summary["candidates"], 2)
+            self.assertEqual(summary["updatedDocuments"], 2)
+            self.assertEqual(summary["resolvedReviewItems"], 4)
+            self.assertEqual(summary["stillNeedsReview"], 1)
+            self.assertEqual(summary["readyDocuments"], 1)
+            self.assertEqual(summary["externalSubmission"], "not_executed")
+
+            guarded = ledger.get_document(guarded_id)
+            ready = ledger.get_document(ready_id)
+            self.assertEqual(guarded["category"], "Construction Materials & Tools")
+            self.assertEqual(guarded["processing_status"], "needs_review")
+            self.assertEqual(
+                guarded["metadata"]["processing"]["reviewReasons"],
+                ["validation_failed"],
+            )
+            self.assertEqual(ready["category"], "Telecommunications")
+            self.assertEqual(ready["processing_status"], "processed")
+            self.assertGreaterEqual(ready["confidence_score"], 0.95)
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in guarded["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                },
+                {"validation_failed"},
+            )
+            self.assertEqual(
+                [
+                    item
+                    for item in ready["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                ],
+                [],
+            )
+            category_field = next(
+                field
+                for field in ready["extracted_fields"]
+                if field["field_name"] == "category"
+            )
+            self.assertEqual(category_field["field_value"], "Telecommunications")
+            self.assertEqual(
+                category_field["provenance"]["policy"],
+                "builtin_exact_vendor_taxonomy_v1",
+            )
+            audit_actions = {
+                event["action"] for event in ledger.list_audit_events(limit=20)
+            }
+            self.assertIn("local_processing.trusted_category_applied", audit_actions)
+            self.assertIn(
+                "local_processing.trusted_category_batch_completed",
+                audit_actions,
+            )
 
 
 if __name__ == "__main__":

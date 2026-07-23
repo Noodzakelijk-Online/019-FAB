@@ -209,6 +209,8 @@ Settings for document categorization.
 *   `categorization_rules`: Path to a JSON file defining rule-based categorization rules. (e.g., `config/categorization_rules.json`)
 *   `default_fallback_category`: The category to assign if no other categorization method yields a confident result. (e.g., `Manual Review`)
 *   `ml_confidence_threshold`: Minimum confidence score for ML categorizer to accept a prediction (0.0 to 1.0).
+*   `fab_auto_apply_trusted_category_suggestions`: Defaults to `true`. Applies only FAB's fixed, exact-normalized-vendor taxonomy automatically; it does not accept fuzzy or model-generated categories and never closes validation, duplicate, sensitive-document, credit-note, posting-approval, attachment, or archive gates.
+*   `fab_trusted_category_suggestion_min_confidence`: Defaults to `0.95` and cannot weaken the built-in 0.95 policy floor.
 *   `ml_model_path`: Path to the trained ML categorization model. (e.g., `models/ml_categorizer_model.joblib`)
 *   `ml_vectorizer_path`: Path to the TF-IDF vectorizer used by the ML model. (e.g., `models/tfidf_vectorizer.joblib`)
 

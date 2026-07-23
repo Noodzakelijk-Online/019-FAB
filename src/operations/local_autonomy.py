@@ -16,7 +16,10 @@ from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
-from src.operations.local_processing import LocalDocumentProcessor
+from src.operations.local_processing import (
+    LocalDocumentProcessor,
+    trusted_category_suggestion_candidates,
+)
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
 from src.operations.local_targets import resolve_document_target_system
@@ -166,13 +169,27 @@ class LocalAutonomousService:
             ),
             _action(
                 "process_imported",
-                "Process imported documents through OCR, extraction, validation, and review gates",
+                "Process imported documents and apply trusted exact-vendor category policy",
                 "extract_validate",
                 "low",
                 "safe_auto",
-                counts["importedDocuments"] > 0 and not blocked,
-                "No imported documents are waiting." if counts["importedDocuments"] == 0 else None,
-                {"candidateDocuments": counts["importedDocuments"], "limit": limit},
+                (
+                    counts["importedDocuments"] > 0
+                    or counts["trustedCategorySuggestions"] > 0
+                )
+                and not blocked,
+                "No imported documents or trusted category suggestions are waiting."
+                if (
+                    counts["importedDocuments"] == 0
+                    and counts["trustedCategorySuggestions"] == 0
+                )
+                else None,
+                {
+                    "candidateDocuments": counts["importedDocuments"],
+                    "trustedCategorySuggestions": counts["trustedCategorySuggestions"],
+                    "limit": limit,
+                    "externalSubmission": "not_executed",
+                },
             ),
             _action(
                 "prepare_wave_drafts",
@@ -914,6 +931,11 @@ class LocalAutonomousService:
 
     def _counts(self, limit: int) -> Dict[str, Any]:
         metrics = self.ledger.dashboard_metrics()
+        trusted_category_suggestions = trusted_category_suggestion_candidates(
+            self.ledger,
+            self.config,
+            limit=limit,
+        )
         routable_documents = self.ledger.list_documents(status=ROUTABLE_DOCUMENT_STATUSES, limit=limit)
         routable_records = [
             record for record in self.ledger.list_bookkeeping_records(
@@ -929,6 +951,7 @@ class LocalAutonomousService:
         approved_export_attempts = self.ledger.list_export_attempts(status="approved", limit=500)
         return {
             "importedDocuments": len(self.ledger.list_documents(status=IMPORTED_DOCUMENT_STATUSES, limit=limit)),
+            "trustedCategorySuggestions": len(trusted_category_suggestions),
             "routableDocuments": len(routable_documents),
             "routableBookkeepingRecords": len(routable_records),
             "routableTargets": _merge_breakdowns(
@@ -1684,7 +1707,11 @@ def _registered_documents(executed: List[Dict[str, Any]]) -> bool:
 
 def _processed_documents(executed: List[Dict[str, Any]]) -> bool:
     for action in executed:
-        if action.get("id") == "process_imported" and (action.get("summary") or {}).get("processed", 0) > 0:
+        if action.get("id") != "process_imported":
+            continue
+        summary = action.get("summary") or {}
+        trusted = summary.get("trustedCategoryAutomation") or {}
+        if summary.get("processed", 0) > 0 or trusted.get("readyDocuments", 0) > 0:
             return True
     return False
 

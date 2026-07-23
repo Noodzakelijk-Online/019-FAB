@@ -13,6 +13,9 @@ from src.document_processors.financial_field_extractor import FinancialFieldExtr
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
+from src.operations.local_category_suggestions import (
+    trusted_category_automation_candidate,
+)
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_targets import resolve_document_target_system
 from src.validation.validation_manager import ValidationManager
@@ -52,6 +55,61 @@ STORED_OCR_REASSESSMENT_REASONS = {
 }
 
 
+def trusted_category_suggestion_candidates(
+    ledger: LocalOperationsLedger,
+    config: Optional[Dict[str, Any]] = None,
+    limit: int = 500,
+) -> list:
+    """Find exact built-in vendor matches that still have category review gates."""
+    config = config or {}
+    bounded_limit = max(1, min(_safe_int(limit) or 500, 5000))
+    candidates = []
+    for document in ledger.list_documents(limit=5000):
+        if len(candidates) >= bounded_limit:
+            break
+        if (
+            document.get("duplicate_of_document_id")
+            or str(document.get("processing_status") or "") in {"duplicate", "failed"}
+            or is_non_posting_document_type(document.get("document_type"))
+        ):
+            continue
+        metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+        processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+        classification = (
+            processing.get("documentTypeClassification")
+            if isinstance(processing.get("documentTypeClassification"), dict)
+            else {}
+        )
+        if (
+            classification.get("postingEligible") is False
+            and classification.get("reviewRequired") is True
+        ):
+            continue
+        category_reviews = [
+            item
+            for item in ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=int(document["id"]),
+                limit=100,
+            )
+            if item.get("status") in {"pending", "in_review"}
+            and item.get("reason") in {
+                "low_confidence_categorization",
+                "manual_review_category",
+            }
+        ]
+        if not category_reviews:
+            continue
+        suggestion = trusted_category_automation_candidate(document, config)
+        if suggestion:
+            candidates.append({
+                "document": document,
+                "suggestion": suggestion,
+                "reviewItems": category_reviews,
+            })
+    return candidates
+
+
 class LocalDocumentProcessor:
     """Run local ledger documents through FAB's processing interfaces."""
 
@@ -81,6 +139,7 @@ class LocalDocumentProcessor:
         )
 
     def process_imported(self, limit: int = 25) -> Dict[str, Any]:
+        trusted_category_automation = self.apply_trusted_category_suggestions(limit=limit)
         documents = self.ledger.list_documents(status="imported", limit=limit)
         summary: Dict[str, Any] = {
             "requested": len(documents),
@@ -89,6 +148,7 @@ class LocalDocumentProcessor:
             "failed": 0,
             "skipped": 0,
             "documents": [],
+            "trustedCategoryAutomation": trusted_category_automation,
         }
         for document in documents:
             result = self.process_document(int(document["id"]))
@@ -104,6 +164,11 @@ class LocalDocumentProcessor:
             summary["documents"].append(result)
 
         summary["documentTypeBackfill"] = self.backfill_document_types(limit=500)
+        summary["updatedRecords"] = (
+            summary["processed"]
+            + summary["needsReview"]
+            + trusted_category_automation["updatedDocuments"]
+        )
 
         self.ledger.record_audit_event({
             "action": "local_processing.batch_completed",
@@ -114,9 +179,175 @@ class LocalDocumentProcessor:
                 "needsReview": summary["needsReview"],
                 "failed": summary["failed"],
                 "skipped": summary["skipped"],
+                "trustedCategoriesApplied": trusted_category_automation["updatedDocuments"],
             },
         })
         return summary
+
+    def trusted_category_suggestion_candidates(self, limit: int = 500) -> list:
+        return trusted_category_suggestion_candidates(
+            self.ledger,
+            self.config,
+            limit=limit,
+        )
+
+    def apply_trusted_category_suggestions(self, limit: int = 500) -> Dict[str, Any]:
+        """Apply exact built-in vendor taxonomy matches without closing other gates."""
+        candidates = self.trusted_category_suggestion_candidates(limit=limit)
+        summary = {
+            "candidates": len(candidates),
+            "updatedDocuments": 0,
+            "resolvedReviewItems": 0,
+            "stillNeedsReview": 0,
+            "readyDocuments": 0,
+            "documentIds": [],
+            "externalSubmission": "not_executed",
+        }
+        for candidate in candidates:
+            document = candidate["document"]
+            suggestion = candidate["suggestion"]
+            document_id = int(document["id"])
+            category = str(suggestion["category"])
+            confidence_score = float(suggestion["confidenceScore"])
+            metadata = dict(document.get("metadata") or {})
+            processing = dict(metadata.get("processing") or {})
+            open_reviews = self.ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+                limit=100,
+            )
+            remaining_reasons = [
+                str(item.get("reason") or "")
+                for item in open_reviews
+                if item.get("reason") not in {
+                    "low_confidence_categorization",
+                    "manual_review_category",
+                }
+            ]
+            automation_evidence = {
+                "policy": suggestion["automationPolicy"],
+                "source": suggestion["source"],
+                "matchPolicy": suggestion["matchPolicy"],
+                "matchedVendor": suggestion["matchedVendor"],
+                "category": category,
+                "confidenceScore": confidence_score,
+                "threshold": suggestion["automationThreshold"],
+                "rationale": suggestion["rationale"],
+                "appliedAt": _now(),
+                "externalSubmission": "not_executed",
+            }
+            processing.update({
+                "category": category,
+                "confidenceScore": confidence_score,
+                "reviewReasons": _dedupe(remaining_reasons),
+                "trustedCategoryAutomation": automation_evidence,
+            })
+            metadata["processing"] = processing
+            self.ledger.update_document(document_id, {
+                "category": category,
+                "confidenceScore": confidence_score,
+                "metadata": metadata,
+            })
+            self._replace_trusted_category_extracted_field(
+                document_id,
+                category,
+                confidence_score,
+                automation_evidence,
+            )
+            resolved_ids = []
+            for review_item in candidate["reviewItems"]:
+                review_item_id = int(review_item["id"])
+                self.ledger.resolve_review_item(
+                    review_item_id,
+                    status="resolved",
+                    resolution=(
+                        "Resolved by FAB's trusted exact-vendor category policy; "
+                        "all non-category review and downstream approval gates remain active."
+                    ),
+                    corrected_data={
+                        "automation": automation_evidence,
+                        "category": category,
+                    },
+                )
+                resolved_ids.append(review_item_id)
+
+            remaining_reviews = self.ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+                limit=100,
+            )
+            processing_status = "needs_review" if remaining_reviews else "processed"
+            self.ledger.update_document(document_id, {"processingStatus": processing_status})
+            record = LocalBookkeepingRecordService(
+                self.ledger,
+                self.config,
+            ).upsert_from_document(document_id)
+            self.ledger.record_audit_event({
+                "action": "local_processing.trusted_category_applied",
+                "entityType": "bookkeeping_document",
+                "entityId": str(document_id),
+                "details": {
+                    "previousCategory": document.get("category"),
+                    "category": category,
+                    "confidenceScore": confidence_score,
+                    "policy": suggestion["automationPolicy"],
+                    "resolvedReviewItemIds": resolved_ids,
+                    "remainingReviewItemIds": [
+                        int(item["id"]) for item in remaining_reviews
+                    ],
+                    "processingStatus": processing_status,
+                    "bookkeepingRecordId": record.get("recordId"),
+                    "externalSubmission": "not_executed",
+                },
+            })
+            summary["updatedDocuments"] += 1
+            summary["resolvedReviewItems"] += len(resolved_ids)
+            summary["stillNeedsReview"] += int(bool(remaining_reviews))
+            summary["readyDocuments"] += int(not remaining_reviews)
+            summary["documentIds"].append(document_id)
+        if candidates:
+            self.ledger.record_audit_event({
+                "action": "local_processing.trusted_category_batch_completed",
+                "entityType": "bookkeeping_document",
+                "details": dict(summary),
+            })
+        return summary
+
+    def _replace_trusted_category_extracted_field(
+        self,
+        document_id: int,
+        category: str,
+        confidence_score: float,
+        automation_evidence: Dict[str, Any],
+    ) -> None:
+        fields = [
+            {
+                "fieldName": field.get("field_name"),
+                "value": field.get("field_value"),
+                "confidenceScore": field.get("confidence_score"),
+                "source": field.get("source"),
+                "provenance": field.get("provenance") or {},
+            }
+            for field in self.ledger.list_extracted_fields(document_id=document_id, limit=500)
+            if field.get("source") == "local_processing"
+            and field.get("field_name") != "category"
+        ]
+        fields.append({
+            "fieldName": "category",
+            "value": category,
+            "confidenceScore": confidence_score,
+            "source": "local_processing",
+            "provenance": {
+                "stage": "trusted_category_automation",
+                "fieldSource": automation_evidence["source"],
+                "policy": automation_evidence["policy"],
+                "matchPolicy": automation_evidence["matchPolicy"],
+                "matchedVendor": automation_evidence["matchedVendor"],
+                "threshold": automation_evidence["threshold"],
+                "rationale": automation_evidence["rationale"],
+            },
+        })
+        self.ledger.replace_extracted_fields(document_id, fields)
 
     def reprocess_incomplete(
         self,
@@ -696,6 +927,24 @@ class LocalDocumentProcessor:
                         "targetSystem": applied_rule["target_system"],
                         "status": applied_rule["status"],
                     }
+                elif trusted_suggestion := trusted_category_automation_candidate(
+                    {
+                        **document,
+                        "vendor_name": (
+                            extracted_data.get("vendor_name")
+                            or document.get("vendor_name")
+                        ),
+                        "category": category,
+                        "extracted_data": extracted_data,
+                    },
+                    self.config,
+                ):
+                    category = trusted_suggestion["category"]
+                    confidence_score = max(
+                        confidence_score or 0.0,
+                        _safe_float(trusted_suggestion.get("confidenceScore"), 0.0),
+                    )
+                    processed_data["applied_trusted_category_suggestion"] = trusted_suggestion
                 validation = self.validator.validate_receipt(processed_data)
             processed_data["category"] = category
             processed_data["confidence_score"] = confidence_score
@@ -761,6 +1010,7 @@ class LocalDocumentProcessor:
                     "validation": validation,
                     "duplicateMatch": duplicate_match if duplicate_match.get("is_duplicate") else None,
                     "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+                    "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
                     "documentTypeClassification": document_type_classification,
                 }
             },
@@ -806,6 +1056,9 @@ class LocalDocumentProcessor:
                 confidence_score=confidence_score,
                 validation=validation,
                 applied_rule=processed_data.get("applied_vendor_category_rule"),
+                applied_trusted_suggestion=processed_data.get(
+                    "applied_trusted_category_suggestion"
+                ),
             ),
         )
         resolved_review_item_ids = self._resolve_inactive_processing_reviews(
@@ -843,6 +1096,7 @@ class LocalDocumentProcessor:
                 "duplicateOfDocumentId": duplicate_of_document_id,
                 "bookkeepingRecordId": record_result.get("recordId"),
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+                "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
                 "documentTypeClassification": document_type_classification,
                 "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
                 "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
@@ -858,6 +1112,7 @@ class LocalDocumentProcessor:
             "reviewReasons": review_reasons,
             "validation": validation,
             "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
+            "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
             "documentType": semantic_document_type,
             "documentTypeClassification": document_type_classification,
             "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
@@ -1294,6 +1549,7 @@ def _extracted_field_records(
     confidence_score: float,
     validation: Dict[str, Any],
     applied_rule: Optional[Dict[str, Any]] = None,
+    applied_trusted_suggestion: Optional[Dict[str, Any]] = None,
 ) -> list:
     extraction_source = (
         "local_text_regex"
@@ -1330,15 +1586,28 @@ def _extracted_field_records(
             },
         })
     if category:
+        category_source = "categorizer"
+        if applied_rule:
+            category_source = "approved_vendor_rule"
+        elif applied_trusted_suggestion:
+            category_source = "trusted_category_automation"
         category_provenance = {
             **base_provenance,
-            "fieldSource": "approved_vendor_rule" if applied_rule else "categorizer",
+            "fieldSource": category_source,
         }
         if applied_rule:
             category_provenance.update({
                 "ruleId": applied_rule.get("ruleId"),
                 "vendorName": applied_rule.get("vendorName"),
                 "targetSystem": applied_rule.get("targetSystem"),
+            })
+        elif applied_trusted_suggestion:
+            category_provenance.update({
+                "policy": applied_trusted_suggestion.get("automationPolicy"),
+                "source": applied_trusted_suggestion.get("source"),
+                "matchPolicy": applied_trusted_suggestion.get("matchPolicy"),
+                "matchedVendor": applied_trusted_suggestion.get("matchedVendor"),
+                "threshold": applied_trusted_suggestion.get("automationThreshold"),
             })
         records.append({
             "fieldName": "category",

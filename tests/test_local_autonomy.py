@@ -180,6 +180,67 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(result["status"], "dry_run")
             self.assertIsNone(ledger.get_runtime_lease("local_autonomous_cycle"))
 
+    def test_autonomy_applies_waiting_trusted_category_without_new_intake(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-waiting",
+                "originalFilename": "praxis.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Category requires review.",
+                })
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["importedDocuments"], 0)
+            self.assertEqual(plan["counts"]["trustedCategorySuggestions"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(
+                processing["summary"]["trustedCategoryAutomation"]["readyDocuments"],
+                1,
+            )
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["category"], "Construction Materials & Tools")
+            self.assertNotEqual(document["processing_status"], "needs_review")
+            self.assertEqual(
+                ledger.list_review_items(
+                    status=("pending", "in_review"),
+                    document_id=document_id,
+                ),
+                [],
+            )
+
     def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

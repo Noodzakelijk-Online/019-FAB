@@ -7,6 +7,12 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 
+TRUSTED_CATEGORY_AUTOMATION_POLICY = "builtin_exact_vendor_taxonomy_v1"
+TRUSTED_CATEGORY_AUTOMATION_SOURCE = "fab_builtin_vendor_taxonomy_v1"
+TRUSTED_CATEGORY_AUTOMATION_MATCH_POLICY = "exact_normalized_vendor"
+DEFAULT_TRUSTED_CATEGORY_AUTOMATION_CONFIDENCE = 0.95
+
+
 _VENDOR_RULES = (
     {
         "category": "Telecommunications",
@@ -89,11 +95,50 @@ def suggest_category_intent(document: Dict[str, Any]) -> Optional[Dict[str, Any]
     return {
         "category": matched["category"],
         "confidenceScore": 0.97,
-        "source": "fab_builtin_vendor_taxonomy_v1",
+        "source": TRUSTED_CATEGORY_AUTOMATION_SOURCE,
         "rationale": matched["rationale"],
-        "matchPolicy": "exact_normalized_vendor",
+        "matchPolicy": TRUSTED_CATEGORY_AUTOMATION_MATCH_POLICY,
         "matchedVendor": vendor_name,
         "requiresApproval": True,
+    }
+
+
+def trusted_category_automation_candidate(
+    document: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return the suggestion only when the bounded local automation policy accepts it."""
+    config = config or {}
+    if not _configured_bool(
+        config,
+        "fab_auto_apply_trusted_category_suggestions",
+        "operations_auto_apply_trusted_category_suggestions",
+        default=True,
+    ):
+        return None
+    suggestion = suggest_category_intent(document)
+    if not suggestion:
+        return None
+    threshold = _configured_float(
+        config,
+        "fab_trusted_category_suggestion_min_confidence",
+        "operations_trusted_category_suggestion_min_confidence",
+        default=DEFAULT_TRUSTED_CATEGORY_AUTOMATION_CONFIDENCE,
+        minimum=DEFAULT_TRUSTED_CATEGORY_AUTOMATION_CONFIDENCE,
+        maximum=1.0,
+    )
+    if (
+        suggestion.get("source") != TRUSTED_CATEGORY_AUTOMATION_SOURCE
+        or suggestion.get("matchPolicy") != TRUSTED_CATEGORY_AUTOMATION_MATCH_POLICY
+        or float(suggestion.get("confidenceScore") or 0.0) < threshold
+    ):
+        return None
+    return {
+        **suggestion,
+        "requiresApproval": False,
+        "approvalMode": "trusted_bounded_policy",
+        "automationPolicy": TRUSTED_CATEGORY_AUTOMATION_POLICY,
+        "automationThreshold": threshold,
     }
 
 
@@ -111,3 +156,37 @@ _VENDOR_INDEX = {
     for rule in _VENDOR_RULES
     for alias in rule["aliases"]
 }
+
+
+def _configured_bool(
+    config: Dict[str, Any],
+    *keys: str,
+    default: bool,
+) -> bool:
+    for key in keys:
+        if key not in config:
+            continue
+        value = config.get(key)
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return default
+
+
+def _configured_float(
+    config: Dict[str, Any],
+    *keys: str,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value: Any = default
+    for key in keys:
+        if key in config:
+            value = config.get(key)
+            break
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
