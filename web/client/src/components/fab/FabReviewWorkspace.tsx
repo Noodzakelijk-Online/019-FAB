@@ -327,7 +327,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
-              <div className="fab-subsection-heading"><div><span>{copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
+              <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
               {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value as ReviewDocumentType })}>{DOCUMENT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{humanize(option)}</option>)}</select><small>{copy(`Classifier suggestion: ${humanize(text(document.classifiedDocumentType, "unknown"))}`, `Classificatievoorstel: ${humanize(text(document.classifiedDocumentType, "unknown"))}`)}</small></label>}
               {!selectedNonPosting && <>
                 <label><span>{copy("Vendor", "Leverancier")}</span><input value={form.vendorName} onChange={(event) => setForm({ ...form, vendorName: event.target.value })} required /></label>
