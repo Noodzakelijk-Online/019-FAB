@@ -8,6 +8,7 @@ from src.data_entry.waveapps_account_discovery import (
     resolve_wave_target_config,
 )
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_categories import fab_category_intents
 from src.security.local_secret_store import (
     LocalSecretStore,
     LocalSecretStoreError,
@@ -55,9 +56,37 @@ class LocalWaveSetupService:
         }
         mapped_expense_count = len(mapped_expense_ids & available_expense_ids)
         available_expense_count = len(available_expense_ids)
+        category_intents = fab_category_intents(
+            ledger,
+            effective,
+            target_system=target_system,
+        )
+        configured_category_accounts = {
+            str(row.get("category") or ""): str(row.get("accountId") or "")
+            for row in mapping.get("categoryAccounts") or []
+        }
+        verified_category_accounts = {
+            str(row.get("category") or ""): row.get("verified") is True
+            for row in mapping.get("categoryAccounts") or []
+        }
+        for intent in category_intents:
+            category = str(intent["category"])
+            intent["accountId"] = configured_category_accounts.get(category) or None
+            intent["mapped"] = verified_category_accounts.get(category, False)
+        in_use_intents = [intent for intent in category_intents if intent["inUse"]]
+        mapped_in_use_intents = [intent for intent in in_use_intents if intent["mapped"]]
+        category_coverage_complete = (
+            len(mapped_in_use_intents) == len(in_use_intents)
+            and bool(mapping.get("categoryAccounts"))
+        )
         token_configured = bool(target.get("access_token"))
         business_id = str(target.get("business_id") or "")
-        ready = token_configured and bool(business_id) and bool(mapping.get("verified"))
+        ready = (
+            token_configured
+            and bool(business_id)
+            and bool(mapping.get("verified"))
+            and category_coverage_complete
+        )
         if ready:
             status = "ready"
         elif not token_configured:
@@ -81,11 +110,16 @@ class LocalWaveSetupService:
             "mappingCoverage": {
                 "mappedExpenseAccounts": mapped_expense_count,
                 "availableExpenseAccounts": available_expense_count,
-                "percentage": round((mapped_expense_count / available_expense_count) * 100, 1)
-                if available_expense_count else 0.0,
-                "complete": bool(available_expense_count)
-                and mapped_expense_count == available_expense_count,
+                "requiredCategoryIntents": len(in_use_intents),
+                "mappedCategoryIntents": len(mapped_in_use_intents),
+                "unmappedInUseCategories": [
+                    intent["category"] for intent in in_use_intents if not intent["mapped"]
+                ],
+                "percentage": round((len(mapped_in_use_intents) / len(in_use_intents)) * 100, 1)
+                if in_use_intents else (100.0 if mapping.get("categoryAccounts") else 0.0),
+                "complete": category_coverage_complete,
             },
+            "categoryIntents": category_intents,
             "accounts": accounts,
             "accountOptions": {
                 "anchor": anchor_accounts,

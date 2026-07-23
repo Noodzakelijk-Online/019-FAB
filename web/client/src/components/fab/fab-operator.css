@@ -678,6 +678,21 @@ html.fab-operator-active body {
 .fab-wave-category-list > label strong { overflow-wrap: anywhere; color: var(--fab-ink); font-size: 12px; }
 .fab-wave-category-list > label small { color: var(--fab-muted); font-size: 10px; font-weight: 500; line-height: 1.35; }
 .fab-wave-category-list .fab-inline-error { margin: 10px; }
+.fab-wave-category-list > .fab-wave-category-row {
+  display: grid;
+  grid-template-columns: minmax(180px, .9fr) minmax(220px, 1.1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 62px;
+  margin: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--fab-line);
+}
+.fab-wave-category-list > .fab-wave-category-row:last-child { border-bottom: 0; }
+.fab-wave-category-row > span { display: grid; gap: 2px; min-width: 0; }
+.fab-wave-category-row strong { overflow-wrap: anywhere; color: var(--fab-ink); font-size: 12px; }
+.fab-wave-category-row small { color: var(--fab-muted); font-size: 10px; font-weight: 500; line-height: 1.35; }
+.fab-wave-category-row select { width: 100%; min-width: 0; }
 .fab-wave-disconnect { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid var(--fab-line); }
 .fab-wave-disconnect > button { width: max-content; color: var(--fab-red); border-color: #d7a3a0; }
 
@@ -823,6 +838,7 @@ html.fab-operator-active body {
   .fab-wave-token-guide > a { width: max-content; white-space: normal; }
   .fab-wave-form { grid-template-columns: 1fr; }
   .fab-wave-form > .fab-primary-button { width: 100%; }
+  .fab-wave-category-list > .fab-wave-category-row { grid-template-columns: 1fr; gap: 7px; }
   .fab-wave-disconnect > button { width: 100%; }
 }
 

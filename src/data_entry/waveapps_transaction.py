@@ -105,7 +105,6 @@ def _expense_line_items(
         account_id = (
             category_account_ids.get(fallback_mapped_category)
             or category_account_ids.get(fallback_category)
-            or default_category_account_id
         )
         if not account_id:
             return [], ["categoryAccountId"]
@@ -128,7 +127,6 @@ def _expense_line_items(
             category_account_ids.get(mapped_category)
             or category_account_ids.get(line_category)
             or category_account_ids.get(account_label)
-            or default_category_account_id
         )
         line_amount = _amount(item.get("amount"))
         if not account_id:

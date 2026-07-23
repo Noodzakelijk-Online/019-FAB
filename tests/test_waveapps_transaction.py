@@ -53,6 +53,19 @@ class TestWaveappsTransactionInput(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["missingFields"], ["categoryAccountId", "transactionDate", "totalAmount"])
 
+    def test_default_account_cannot_hide_an_unmapped_category(self):
+        result = build_expense_transaction_input(
+            self._document(),
+            business_id="business-1",
+            anchor_account_id="anchor-1",
+            category_mapping={},
+            category_account_ids={"Office Supplies": "expense-1"},
+            default_category_account_id="fallback-expense",
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["missingFields"], ["categoryAccountId"])
+
     def test_preserves_balanced_multi_category_line_items(self):
         document = self._document(extracted_data={
             "description": "Office order",

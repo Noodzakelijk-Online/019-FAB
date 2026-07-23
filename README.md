@@ -241,12 +241,16 @@ intake folder, and never prints or stores the token in the ledger.
 
 Configure Wave from the **Connections** section of the operator dashboard.
 Open **Wave - Noodzakelijk Online**, store the user-owned API token and business
-ID, run the read-only business validation, then map the funding and default
-expense accounts returned by Wave. FAB encrypts these local settings and, on
-Windows, protects the encryption key with DPAPI for the current user. The token
-is never returned to the browser, ledger, audit log, or API status response.
-Environment variables remain supported and take precedence over dashboard
-settings.
+ID, run the read-only business validation, then map each in-use FAB category
+intent to an expense account returned by Wave. Reviewers can classify and teach
+FAB before Wave is connected because the intent is local; posting remains
+blocked until the intent has an explicit, live-verified Wave account ID. A
+default expense account can be retained for supervised drafts, but autonomous
+posting never uses it to hide a missing mapping. FAB encrypts these local
+settings and, on Windows, protects the encryption key with DPAPI for the current
+user. The token is never returned to the browser, ledger, audit log, or API
+status response. Environment variables remain supported and take precedence
+over dashboard settings.
 
 For manual startup or development:
 

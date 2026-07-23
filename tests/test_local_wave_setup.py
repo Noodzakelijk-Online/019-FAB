@@ -53,6 +53,11 @@ class TestLocalWaveSetupService(unittest.TestCase):
         self.assertEqual(mapped["accountOptions"]["anchor"][0]["id"], "anchor-1")
         self.assertEqual(mapped["accountOptions"]["expense"][0]["id"], "expense-1")
         self.assertEqual(mapped["mappingCoverage"]["percentage"], 100.0)
+        office_intent = next(
+            row for row in mapped["categoryIntents"]
+            if row["category"] == "Office Expenses"
+        )
+        self.assertTrue(office_intent["mapped"])
         events = self.ledger.list_audit_events(limit=10)
         rendered = json.dumps(events)
         self.assertNotIn("private-wave-token", rendered)
@@ -93,6 +98,39 @@ class TestLocalWaveSetupService(unittest.TestCase):
         self.assertEqual(result["status"], "needs_mapping")
         self.assertFalse(result["ready"])
         self.assertIn("categoryAccountIds", result["mapping"]["requiredMissing"])
+
+    def test_unmapped_in_use_category_keeps_connection_out_of_ready_state(self):
+        self.service.save(
+            self.ledger,
+            {"accessToken": "token", "businessId": "business-1"},
+            actor="operator",
+        )
+        self._record_discovery()
+        self.ledger.register_document({
+            "source": "scanner",
+            "sourceDocumentId": "office-document",
+            "originalFilename": "office.pdf",
+            "processingStatus": "reviewed",
+            "documentType": "receipt",
+            "category": "Office Supplies",
+            "targetSystem": "waveapps_business",
+        })
+
+        result = self.service.save(
+            self.ledger,
+            {
+                "anchorAccountId": "anchor-1",
+                "categoryAccountIds": {"Other Business Expense": "expense-1"},
+            },
+            actor="operator",
+        )
+
+        self.assertEqual(result["status"], "needs_mapping")
+        self.assertFalse(result["ready"])
+        self.assertEqual(
+            result["mappingCoverage"]["unmappedInUseCategories"],
+            ["Office Supplies"],
+        )
 
     def test_clear_token_disconnects_without_removing_nonsecret_mapping(self):
         self.service.save(

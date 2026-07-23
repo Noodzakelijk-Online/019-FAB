@@ -68,6 +68,7 @@ export function FabWaveSetupDrawer({
   const accountOptions = record(setup.accountOptions);
   const anchorOptions = records(accountOptions.anchor);
   const expenseOptions = records(accountOptions.expense);
+  const categoryIntents = records(setup.categoryIntents);
   const tokenConfigured = bool(setup.accessTokenConfigured);
   const validated = records(setup.accounts).length > 0 && Boolean(setup.lastValidatedAt);
   const mappingVerified = bool(mapping.verified);
@@ -86,11 +87,15 @@ export function FabWaveSetupDrawer({
     .map((account) => `${text(account.name)}:${text(account.id)}`)
     .sort()
     .join("|");
+  const categoryIntentsKey = categoryIntents
+    .map((intent) => `${text(intent.category)}:${bool(intent.inUse)}:${text(intent.accountId)}`)
+    .sort()
+    .join("|");
   const selectedCategoryCount = Object.keys(categoryAccountIds).length;
-  const allExpenseCategoriesSelected = expenseOptions.length > 0 && expenseOptions.every((account) => {
-    const name = text(account.name);
-    return Boolean(name) && categoryAccountIds[name] === text(account.id);
-  });
+  const requiredCategoryCount = categoryIntents.filter((intent) => bool(intent.inUse)).length;
+  const mappedRequiredCategoryCount = categoryIntents.filter((intent) => (
+    bool(intent.inUse) && Boolean(categoryAccountIds[text(intent.category)])
+  )).length;
 
   useEffect(() => {
     if (!open) return;
@@ -103,12 +108,10 @@ export function FabWaveSetupDrawer({
       const accountId = text(row.accountId);
       return category && accountId ? [[category, accountId]] : [];
     }));
-    setCategoryAccountIds(Object.keys(configuredCategories).length
-      ? configuredCategories
-      : expenseCategoryMap(expenseOptions));
+    setCategoryAccountIds(configuredCategories);
     setConfirmDisconnect(false);
     setError("");
-  }, [open, setup.businessId, anchorMapping.accountId, defaultMapping.accountId, configuredCategoryKey, expenseOptionsKey]);
+  }, [open, setup.businessId, anchorMapping.accountId, defaultMapping.accountId, configuredCategoryKey, expenseOptionsKey, categoryIntentsKey]);
 
   useEffect(() => {
     if (!open) return;
@@ -170,8 +173,8 @@ export function FabWaveSetupDrawer({
   }
 
   async function saveMapping() {
-    if (!anchorAccountId || !defaultCategoryAccountId || selectedCategoryCount === 0) {
-      setError(copy("Select a funding account, a fallback expense account, and at least one explicit expense category.", "Selecteer een betaalrekening, een standaardkostenrekening en minimaal een expliciete kostencategorie."));
+    if (!anchorAccountId || selectedCategoryCount === 0) {
+      setError(copy("Select a funding account and map at least one FAB category intent.", "Selecteer een betaalrekening en wijs minimaal een FAB-categorie-intentie toe."));
       return;
     }
     setError("");
@@ -187,14 +190,12 @@ export function FabWaveSetupDrawer({
     }
   }
 
-  function toggleExpenseCategory(account: FabRecord) {
-    const category = text(account.name);
-    const accountId = text(account.id);
-    if (!category || !accountId) return;
+  function setCategoryAccount(category: string, accountId: string) {
+    if (!category) return;
     setCategoryAccountIds((current) => {
       const next = { ...current };
-      if (next[category] === accountId) delete next[category];
-      else next[category] = accountId;
+      if (accountId) next[category] = accountId;
+      else delete next[category];
       return next;
     });
   }
@@ -229,7 +230,7 @@ export function FabWaveSetupDrawer({
           <div className="fab-drive-setup-progress">
             <SetupStep complete={tokenConfigured && Boolean(text(setup.businessId))} icon={KeyRound} title={copy("Secure API connection", "Beveiligde API-koppeling")} detail={tokenConfigured ? copy("Token stored without browser exposure", "Token opgeslagen zonder browserweergave") : copy("Token and business ID required", "Token en bedrijfs-ID vereist")} />
             <SetupStep complete={validated} icon={Building2} title={copy("Business validation", "Bedrijfsvalidatie")} detail={validated ? `${records(setup.accounts).length} ${copy("accounts loaded", "rekeningen geladen")}` : copy("Live account read required", "Actuele rekeningcontrole vereist")} />
-            <SetupStep complete={mappingVerified} icon={Landmark} title={copy("Posting account mapping", "Toewijzing boekingsrekeningen")} detail={mappingVerified ? `${configuredCategoryMappings.length} ${copy("explicit categories verified", "expliciete categorieen gevalideerd")}` : copy("Funding, fallback, and explicit expense categories required", "Betaalrekening, standaardrekening en expliciete kostencategorieen vereist")} />
+            <SetupStep complete={mappingVerified} icon={Landmark} title={copy("Posting account mapping", "Toewijzing boekingsrekeningen")} detail={mappingVerified ? `${configuredCategoryMappings.length} ${copy("explicit category intents verified", "expliciete categorie-intenties gevalideerd")}` : copy("Funding account and explicit FAB intent mappings required", "Betaalrekening en expliciete FAB-intentietoewijzingen vereist")} />
           </div>
 
           <section className="fab-drive-credential-panel">
@@ -262,23 +263,27 @@ export function FabWaveSetupDrawer({
             <div className="fab-subsection-heading"><div><span>{copy("Step 3", "Stap 3")}</span><h3>{copy("Map verified posting accounts", "Gevalideerde boekingsrekeningen toewijzen")}</h3></div></div>
             <form className="fab-wave-form" onSubmit={(event) => { event.preventDefault(); void saveMapping(); }}>
               <label><span>{copy("Funding account", "Betaalrekening")}</span><select value={anchorAccountId} onChange={(event) => setAnchorAccountId(event.target.value)} disabled={busy || !validated}><option value="">{copy("Select a verified Wave account", "Selecteer een gevalideerde Wave-rekening")}</option>{anchorOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}</select></label>
-              <label><span>{copy("Default expense account", "Standaardkostenrekening")}</span><select value={defaultCategoryAccountId} onChange={(event) => setDefaultCategoryAccountId(event.target.value)} disabled={busy || !validated}><option value="">{copy("Select a verified Wave account", "Selecteer een gevalideerde Wave-rekening")}</option>{expenseOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}</select></label>
+              <label><span>{copy("Draft fallback account (optional)", "Standaardrekening voor concepten (optioneel)")}</span><select value={defaultCategoryAccountId} onChange={(event) => setDefaultCategoryAccountId(event.target.value)} disabled={busy || !validated}><option value="">{copy("No fallback", "Geen standaardrekening")}</option>{expenseOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}</select><small>{copy("Autonomous posting never uses this fallback for an unmapped category.", "Autonoom boeken gebruikt deze standaardrekening nooit voor een niet-toegewezen categorie.")}</small></label>
               <div className="fab-wave-category-map">
                 <div className="fab-wave-category-map-heading">
-                  <div><strong>{copy("Explicit expense categories", "Expliciete kostencategorieen")}</strong><small>{selectedCategoryCount} / {expenseOptions.length} {copy("selected from Wave", "geselecteerd uit Wave")}</small></div>
-                  <button className="fab-secondary-button compact" type="button" disabled={busy || !validated || expenseOptions.length === 0} onClick={() => setCategoryAccountIds(allExpenseCategoriesSelected ? {} : expenseCategoryMap(expenseOptions))}>{allExpenseCategoriesSelected ? copy("Clear", "Wissen") : copy("Select all", "Alles selecteren")}</button>
+                  <div><strong>{copy("FAB intent to Wave account", "FAB-intentie naar Wave-rekening")}</strong><small>{selectedCategoryCount} {copy("mapped", "toegewezen")} | {mappedRequiredCategoryCount} / {requiredCategoryCount} {copy("currently in use", "momenteel in gebruik")}</small></div>
                 </div>
                 <div className="fab-wave-category-list">
-                  {expenseOptions.map((account) => {
-                    const category = text(account.name);
-                    const accountId = text(account.id);
-                    const checked = Boolean(category) && categoryAccountIds[category] === accountId;
-                    return <label className="fab-review-checkbox" key={accountId || category}><input type="checkbox" checked={checked} onChange={() => toggleExpenseCategory(account)} disabled={busy || !validated} /><span><strong>{category || accountId}</strong><small>{copy("Use this exact Wave account as a FAB review and posting category", "Gebruik deze exacte Wave-rekening als FAB-controle- en boekingscategorie")}</small></span></label>;
+                  {categoryIntents.map((intent) => {
+                    const category = text(intent.category);
+                    const inUse = bool(intent.inUse);
+                    return <label className="fab-wave-category-row" key={category}>
+                      <span><strong>{category}</strong><small>{inUse ? copy(`${text(intent.documentCount, "0")} document(s) or approved rules use this intent`, `${text(intent.documentCount, "0")} document(en) of goedgekeurde regels gebruiken deze intentie`) : copy("Available for review and future learning", "Beschikbaar voor controle en toekomstig leren")}</small></span>
+                      <select value={categoryAccountIds[category] || ""} onChange={(event) => setCategoryAccount(category, event.target.value)} disabled={busy || !validated}>
+                        <option value="">{copy("Not mapped", "Niet toegewezen")}</option>
+                        {expenseOptions.map((account) => <option key={text(account.id)} value={text(account.id)}>{accountLabel(account)}</option>)}
+                      </select>
+                    </label>;
                   })}
                   {validated && expenseOptions.length === 0 && <p className="fab-inline-error">{copy("Wave returned no expense accounts. Add an expense account in Wave and validate again.", "Wave heeft geen kostenrekeningen teruggegeven. Voeg een kostenrekening toe in Wave en valideer opnieuw.")}</p>}
                 </div>
               </div>
-              <button className="fab-primary-button" type="submit" disabled={!connected || busy || !validated || !anchorAccountId || !defaultCategoryAccountId || selectedCategoryCount === 0}>{busy ? <Loader2 className="is-spinning" aria-hidden="true" /> : <Landmark aria-hidden="true" />} {copy("Save verified mapping", "Gevalideerde toewijzing opslaan")}</button>
+              <button className="fab-primary-button" type="submit" disabled={!connected || busy || !validated || !anchorAccountId || selectedCategoryCount === 0}>{busy ? <Loader2 className="is-spinning" aria-hidden="true" /> : <Landmark aria-hidden="true" />} {copy("Save verified mapping", "Gevalideerde toewijzing opslaan")}</button>
             </form>
           </section>
 
@@ -321,14 +326,6 @@ function accountLabel(account: FabRecord): string {
   const subtype = record(account.subtype);
   const detail = text(subtype.name, text(subtype.value));
   return detail ? `${text(account.name, text(account.id))} - ${detail}` : text(account.name, text(account.id));
-}
-
-function expenseCategoryMap(accounts: FabRecord[]): Record<string, string> {
-  return Object.fromEntries(accounts.flatMap((account) => {
-    const category = text(account.name);
-    const accountId = text(account.id);
-    return category && accountId ? [[category, accountId]] : [];
-  }));
 }
 
 function errorMessage(cause: unknown, fallback: string): string {

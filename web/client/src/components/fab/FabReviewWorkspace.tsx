@@ -357,7 +357,12 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
                   <label><span>{copy("Amount", "Bedrag")}</span><input type="number" min="0" step="0.01" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} required /></label>
                   <label><span>{copy("VAT", "Btw")}</span><input type="number" min="0" step="0.01" value={form.vatAmount} onChange={(event) => setForm({ ...form, vatAmount: event.target.value })} /></label>
                 </div>
-                <label><span>{copy("Wave category", "Wave-categorie")}</span><input list="fab-review-categories" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder={copy("Enter the exact Wave category", "Voer de exacte Wave-categorie in")} required /><datalist id="fab-review-categories">{categoryOptions.map((category) => <option key={category} value={category} />)}</datalist></label>
+                <label>
+                  <span>{copy("FAB category intent", "FAB-categorie-intentie")}</span>
+                  <input list="fab-review-categories" value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder={copy("Choose or enter a bookkeeping category", "Kies of voer een boekhoudcategorie in")} required />
+                  <datalist id="fab-review-categories">{categoryOptions.map((category) => <option key={category} value={category} />)}</datalist>
+                  <small>{copy("FAB learns this decision now. The exact Wave ledger account is mapped separately and must be verified before posting.", "FAB leert deze beslissing nu. De exacte Wave-grootboekrekening wordt apart toegewezen en moet voor het boeken zijn geverifieerd.")}</small>
+                </label>
                 <label><span>{copy("Destination", "Bestemming")}</span><select value={form.targetSystem} onChange={(event) => setForm({ ...form, targetSystem: event.target.value as ReviewForm["targetSystem"] })}><option value="waveapps_business">Wave - Noodzakelijk Online</option><option value="waveapps_personal">Wave - Personal</option><option value="mijngeldzaken">MijnGeldzaken</option></select></label>
               </>}
               <label><span>{copy("Decision note", "Beslisnotitie")}</span><textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })} rows={3} required /></label>

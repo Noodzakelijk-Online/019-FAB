@@ -25,6 +25,7 @@ from src.operations.local_bookkeeping_records import (
 )
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
+from src.operations.local_categories import fab_category_options
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.drive_relay_intake import DriveRelayIntakeService
@@ -7556,30 +7557,7 @@ def _compact_review_document(
 
 
 def _review_category_options(ledger: LocalOperationsLedger, config: Dict[str, Any]) -> list:
-    categories = set()
-    for rule in ledger.list_vendor_category_rules(limit=500):
-        category = str(rule.get("category") or "").strip()
-        if category and category.lower() not in {"manual review", "uncategorized"}:
-            categories.add(category)
-    for document in ledger.list_documents(limit=500):
-        category = str(document.get("category") or "").strip()
-        if category and category.lower() not in {"manual review", "uncategorized"}:
-            categories.add(category)
-    for key in (
-        "waveapps_business_category_mapping",
-        "waveapps_business_category_account_ids",
-        "waveapps_personal_category_mapping",
-        "waveapps_personal_category_account_ids",
-    ):
-        value = _config_value(config, key)
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError:
-                value = {}
-        if isinstance(value, dict):
-            categories.update(str(category).strip() for category in value if str(category).strip())
-    return sorted(categories, key=str.casefold)
+    return fab_category_options(ledger, config)
 
 
 def _wave_discovery_http_status(result: Dict[str, Any]) -> int:
