@@ -3769,6 +3769,220 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_document_delivery_context(
+        self,
+        document_ids: Sequence[int],
+        evidence_action: str,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Load the fields needed to build source delivery work orders in one snapshot."""
+        bounded_ids = []
+        seen_ids = set()
+        for value in document_ids:
+            document_id = self._optional_int(value)
+            if document_id is None or document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            bounded_ids.append(document_id)
+            if len(bounded_ids) >= 500:
+                break
+        if not bounded_ids:
+            return {}
+
+        placeholders = ", ".join("?" for _ in bounded_ids)
+        context = {
+            document_id: {
+                "review_items": [],
+                "bookkeeping_record": None,
+                "export_attempts": [],
+                "evidence_event": None,
+            }
+            for document_id in bounded_ids
+        }
+        with self._connection() as connection:
+            review_rows = connection.execute(
+                f"""
+                SELECT * FROM review_items
+                WHERE document_id IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                bounded_ids,
+            ).fetchall()
+            record_rows = connection.execute(
+                f"""
+                SELECT * FROM bookkeeping_records
+                WHERE document_id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                bounded_ids,
+            ).fetchall()
+            export_rows = connection.execute(
+                f"""
+                SELECT * FROM export_attempts
+                WHERE document_id IN ({placeholders})
+                ORDER BY updated_at DESC, id DESC
+                """,
+                bounded_ids,
+            ).fetchall()
+            evidence_rows = connection.execute(
+                f"""
+                SELECT * FROM audit_events
+                WHERE action = ?
+                  AND entity_type = 'bookkeeping_document'
+                  AND entity_id IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                [str(evidence_action), *[str(document_id) for document_id in bounded_ids]],
+            ).fetchall()
+
+            records_by_id = {}
+            for row in record_rows:
+                record = self._row_to_dict(row)
+                record["line_items"] = []
+                record["line_item_count"] = 0
+                records_by_id[int(record["id"])] = record
+                document_id = int(record["document_id"])
+                if context[document_id]["bookkeeping_record"] is None:
+                    context[document_id]["bookkeeping_record"] = record
+
+            if records_by_id:
+                record_ids = list(records_by_id)
+                record_placeholders = ", ".join("?" for _ in record_ids)
+                line_rows = connection.execute(
+                    f"""
+                    SELECT * FROM bookkeeping_record_line_items
+                    WHERE bookkeeping_record_id IN ({record_placeholders})
+                    ORDER BY bookkeeping_record_id ASC, line_index ASC, id ASC
+                    """,
+                    record_ids,
+                ).fetchall()
+                for row in line_rows:
+                    line_item = self._row_to_dict(row)
+                    record = records_by_id.get(int(line_item["bookkeeping_record_id"]))
+                    if record is not None:
+                        record["line_items"].append(line_item)
+                        record["line_item_count"] += 1
+
+        for row in review_rows:
+            review = self._row_to_dict(row)
+            document_id = int(review["document_id"])
+            context[document_id]["review_items"].append(review)
+        for row in export_rows:
+            export = self._row_to_dict(row)
+            document_id = int(export["document_id"])
+            if len(context[document_id]["export_attempts"]) < 10:
+                context[document_id]["export_attempts"].append(export)
+        for row in evidence_rows:
+            evidence = self._row_to_dict(row)
+            document_id = int(evidence["entity_id"])
+            if context[document_id]["evidence_event"] is None:
+                context[document_id]["evidence_event"] = evidence
+        return context
+
+    def get_review_work_item_context(
+        self,
+        document_ids: Sequence[int],
+    ) -> Dict[str, Any]:
+        """Load compact review documents, records, and duplicate links in bounded batches."""
+        source_ids = []
+        seen_ids = set()
+        for value in document_ids:
+            document_id = self._optional_int(value)
+            if document_id is None or document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            source_ids.append(document_id)
+            if len(source_ids) >= 500:
+                break
+        if not source_ids:
+            return {
+                "documents": {},
+                "bookkeeping_records": {},
+                "duplicate_candidates": {},
+            }
+
+        duplicate_rows_by_id = {}
+        with self._connection() as connection:
+            for chunk_start in range(0, len(source_ids), 250):
+                chunk = source_ids[chunk_start:chunk_start + 250]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM duplicate_candidates
+                    WHERE document_id IN ({placeholders})
+                       OR candidate_document_id IN ({placeholders})
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                    [*chunk, *chunk],
+                ).fetchall()
+                for row in rows:
+                    duplicate_rows_by_id[int(row["id"])] = row
+
+            related_ids = set(source_ids)
+            for row in duplicate_rows_by_id.values():
+                related_ids.add(int(row["document_id"]))
+                related_ids.add(int(row["candidate_document_id"]))
+
+            document_rows = []
+            ordered_related_ids = sorted(related_ids)
+            for chunk_start in range(0, len(ordered_related_ids), 500):
+                chunk = ordered_related_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                document_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT * FROM bookkeeping_documents
+                        WHERE id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+
+            record_rows = []
+            for chunk_start in range(0, len(source_ids), 500):
+                chunk = source_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                record_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT * FROM bookkeeping_records
+                        WHERE document_id IN ({placeholders})
+                        ORDER BY id ASC
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+
+        documents = {
+            int(row["id"]): self._row_to_dict(row)
+            for row in document_rows
+        }
+        bookkeeping_records = {}
+        for row in record_rows:
+            record = self._row_to_dict(row)
+            bookkeeping_records.setdefault(int(record["document_id"]), record)
+        duplicate_candidates = {document_id: [] for document_id in source_ids}
+        for row in duplicate_rows_by_id.values():
+            candidate = self._row_to_dict(row)
+            for document_id in (
+                int(candidate["document_id"]),
+                int(candidate["candidate_document_id"]),
+            ):
+                if document_id in duplicate_candidates:
+                    duplicate_candidates[document_id].append(candidate)
+        for candidates in duplicate_candidates.values():
+            candidates.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    int(item.get("id") or 0),
+                ),
+                reverse=True,
+            )
+        return {
+            "documents": documents,
+            "bookkeeping_records": bookkeeping_records,
+            "duplicate_candidates": duplicate_candidates,
+        }
+
     def get_document_by_source(self, source: str, source_document_id: str) -> Optional[Dict[str, Any]]:
         if not source_document_id:
             return None

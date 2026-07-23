@@ -96,14 +96,17 @@ class DriveWaveDeliveryService:
         }
 
     def list_candidates(self, limit: int = 100) -> Dict[str, Any]:
-        documents = [
-            document
-            for document in self.ledger.list_documents(limit=500)
-            if self._is_configured_source(document)
-        ][:_bounded_candidate_limit(limit)]
+        documents = self._candidate_documents(limit)
+        contexts = self._delivery_contexts(documents)
         candidates = []
         for document in documents:
-            plan = self.plan_archive(int(document["id"]))
+            context = contexts[int(document["id"])]
+            plan = self._plan_archive_for_document(
+                context["document"],
+                context["record"],
+                context["exports"],
+                context["evidence_event"],
+            )
             candidates.append({
                 "documentId": document["id"],
                 "sourceDocumentId": document.get("source_document_id"),
@@ -122,10 +125,11 @@ class DriveWaveDeliveryService:
         }
 
     def list_work_orders(self, limit: int = 100) -> Dict[str, Any]:
-        candidates = self.list_candidates(limit=limit)["candidates"]
+        documents = self._candidate_documents(limit)
+        contexts = self._delivery_contexts(documents)
         work_orders = [
-            self._work_order(int(candidate["documentId"]))
-            for candidate in candidates
+            self._work_order(int(document["id"]), context=contexts[int(document["id"])])
+            for document in documents
         ]
         summary = {
             "sourceUnavailable": _count_stage(work_orders, "source_file_unavailable"),
@@ -181,12 +185,73 @@ class DriveWaveDeliveryService:
                 "documentId": int(document_id),
                 "externalSubmission": "not_executed",
             }
-        return self._work_order(int(document_id))
+        return self._work_order(
+            int(document_id),
+            context=self._context_from_loaded_document(document),
+        )
 
-    def _work_order(self, document_id: int) -> Dict[str, Any]:
-        document = self.ledger.get_document(int(document_id)) or {}
-        record = self.ledger.get_bookkeeping_record_by_document(int(document_id))
-        exports = self.ledger.list_export_attempts(document_id=int(document_id), limit=10)
+    def _candidate_documents(self, limit: int) -> list[Dict[str, Any]]:
+        return [
+            document
+            for document in self.ledger.list_documents(limit=500)
+            if self._is_configured_source(document)
+        ][:_bounded_candidate_limit(limit)]
+
+    def _delivery_contexts(
+        self,
+        documents: list[Dict[str, Any]],
+    ) -> Dict[int, Dict[str, Any]]:
+        loaded = self.ledger.get_document_delivery_context(
+            [int(document["id"]) for document in documents],
+            EVIDENCE_ACTION,
+        )
+        contexts = {}
+        for document in documents:
+            document_id = int(document["id"])
+            related = loaded.get(document_id) or {}
+            hydrated_document = dict(document)
+            hydrated_document["review_items"] = list(related.get("review_items") or [])
+            contexts[document_id] = {
+                "document": hydrated_document,
+                "record": related.get("bookkeeping_record"),
+                "exports": list(related.get("export_attempts") or []),
+                "evidence_event": related.get("evidence_event"),
+            }
+        return contexts
+
+    @staticmethod
+    def _context_from_loaded_document(document: Dict[str, Any]) -> Dict[str, Any]:
+        evidence_event = max(
+            [
+                item
+                for item in document.get("audit_events") or []
+                if str(item.get("action") or "") == EVIDENCE_ACTION
+            ],
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                int(item.get("id") or 0),
+            ),
+            default=None,
+        )
+        return {
+            "document": document,
+            "record": document.get("bookkeeping_record"),
+            "exports": list(document.get("export_attempts") or [])[:10],
+            "evidence_event": evidence_event,
+        }
+
+    def _work_order(
+        self,
+        document_id: int,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if context is None:
+            document = self.ledger.get_document(int(document_id)) or {}
+            context = self._context_from_loaded_document(document)
+        document = context["document"]
+        record = context.get("record")
+        exports = list(context.get("exports") or [])[:10]
         latest_export = exports[0] if exports else None
         terminal_export = next(
             (
@@ -197,13 +262,14 @@ class DriveWaveDeliveryService:
             ),
             None,
         )
-        evidence_event = self.ledger.find_audit_event(
-            EVIDENCE_ACTION,
-            "bookkeeping_document",
-            str(document_id),
-        )
+        evidence_event = context.get("evidence_event")
         evidence = (evidence_event or {}).get("details") or {}
-        plan = self.plan_archive(int(document_id))
+        plan = self._plan_archive_for_document(
+            document,
+            record,
+            exports,
+            evidence_event,
+        )
         expected_fields = _expected_wave_fields(document, record)
         missing_expected_fields = [
             field for field in REQUIRED_FIELD_MATCHES
@@ -512,8 +578,28 @@ class DriveWaveDeliveryService:
         document = self.ledger.get_document(int(document_id))
         if not document:
             return {"status": "blocked", "canArchive": False, "reasons": ["document_not_found"]}
+        context = self._context_from_loaded_document(document)
+        return self._plan_archive_for_document(
+            context["document"],
+            context["record"],
+            context["exports"],
+            context["evidence_event"],
+        )
+
+    def _plan_archive_for_document(
+        self,
+        document: Dict[str, Any],
+        record: Optional[Dict[str, Any]],
+        exports: list[Dict[str, Any]],
+        evidence_event: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         if _source_provider(document) == "gmail":
-            return self._plan_gmail_retention(document)
+            return self._plan_gmail_retention(
+                document,
+                record,
+                exports,
+                evidence_event,
+            )
         metadata = document.get("metadata") or {}
         lifecycle = metadata.get("driveWaveLifecycle") if isinstance(metadata.get("driveWaveLifecycle"), dict) else {}
         if lifecycle.get("status") == "archived":
@@ -525,8 +611,12 @@ class DriveWaveDeliveryService:
                 "externalTransactionId": lifecycle.get("externalTransactionId"),
             }
 
-        reasons = self._document_reasons(document)
-        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(document)
+        reasons = self._document_reasons(document, record)
+        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(
+            document,
+            exports,
+            evidence_event,
+        )
         reasons.extend(evidence_reasons)
 
         reasons = sorted(set(reasons))
@@ -742,12 +832,22 @@ class DriveWaveDeliveryService:
             "externalSubmission": "executed" if results else "not_executed",
         }
 
-    def _plan_gmail_retention(self, document: Dict[str, Any]) -> Dict[str, Any]:
+    def _plan_gmail_retention(
+        self,
+        document: Dict[str, Any],
+        record: Optional[Dict[str, Any]],
+        exports: list[Dict[str, Any]],
+        evidence_event: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         document_id = int(document["id"])
-        reasons = self._common_delivery_reasons(document)
+        reasons = self._common_delivery_reasons(document, record)
         if not self._is_gmail_scanner_source(document):
             reasons.append("gmail_scanner_source_not_trusted")
-        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(document)
+        evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(
+            document,
+            exports,
+            evidence_event,
+        )
         reasons.extend(evidence_reasons)
         reasons = sorted(set(reasons))
         return {
@@ -771,13 +871,9 @@ class DriveWaveDeliveryService:
     def _wave_evidence_plan(
         self,
         document: Dict[str, Any],
+        exports: list[Dict[str, Any]],
+        evidence_event: Optional[Dict[str, Any]],
     ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], list[str]]:
-        document_id = int(document["id"])
-        evidence_event = self.ledger.find_audit_event(
-            EVIDENCE_ACTION,
-            "bookkeeping_document",
-            str(document_id),
-        )
         evidence = (evidence_event or {}).get("details") or {}
         reasons = []
         if not evidence:
@@ -790,10 +886,9 @@ class DriveWaveDeliveryService:
             self._evidence_max_age_seconds(),
         ):
             reasons.append("wave_attachment_verification_stale")
-        exports = self.ledger.list_export_attempts(document_id=document_id, limit=5)
         terminal_exports = [
             item
-            for item in exports
+            for item in exports[:5]
             if str(item.get("status") or "").lower() in TERMINAL_EXPORT_STATUSES
         ]
         if terminal_exports:
@@ -816,7 +911,11 @@ class DriveWaveDeliveryService:
                 reasons.append("wave_transaction_id_mismatch")
         return evidence_event, evidence, reasons
 
-    def _common_delivery_reasons(self, document: Dict[str, Any]) -> list[str]:
+    def _common_delivery_reasons(
+        self,
+        document: Dict[str, Any],
+        record: Optional[Dict[str, Any]],
+    ) -> list[str]:
         reasons = []
         if not self._business_id():
             reasons.append("wave_business_not_configured")
@@ -836,7 +935,6 @@ class DriveWaveDeliveryService:
             reasons.append("source_sha256_missing")
         reasons.extend(_wave_upload_reasons(document))
 
-        record = self.ledger.get_bookkeeping_record_by_document(int(document["id"]))
         if not record:
             reasons.append("bookkeeping_record_missing")
         else:
@@ -848,8 +946,12 @@ class DriveWaveDeliveryService:
                 reasons.append("bookkeeping_record_not_ready")
         return reasons
 
-    def _document_reasons(self, document: Dict[str, Any]) -> list[str]:
-        reasons = self._common_delivery_reasons(document)
+    def _document_reasons(
+        self,
+        document: Dict[str, Any],
+        record: Optional[Dict[str, Any]],
+    ) -> list[str]:
+        reasons = self._common_delivery_reasons(document, record)
         if not self._archive_enabled():
             reasons.append("drive_archive_disabled")
         if document.get("source") != "google_drive":

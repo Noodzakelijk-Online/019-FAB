@@ -349,6 +349,46 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(audit.status_code, 200)
             self.assertEqual(audit.get_json()["auditEvents"][0]["action"], "local_review.review_item.resolve")
 
+    def test_review_queue_uses_batched_document_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "batched-review",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "totalAmount": 12.1,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            with (
+                patch.object(
+                    LocalOperationsLedger,
+                    "get_document",
+                    side_effect=AssertionError("per-document review lookup"),
+                ),
+                patch.object(
+                    LocalOperationsLedger,
+                    "get_bookkeeping_record_by_document",
+                    side_effect=AssertionError("per-document record lookup"),
+                ),
+            ):
+                response = client.get("/api/review?status=open")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["summary"]["documents"], 1)
+            self.assertEqual(payload["workItems"][0]["documentId"], document_id)
+            self.assertEqual(payload["workItems"][0]["document"]["vendorName"], "Vendor")
+
     def test_review_summary_separates_non_posting_evidence_from_posting_blocks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

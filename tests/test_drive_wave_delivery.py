@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from src.operations.drive_wave_delivery import DriveWaveDeliveryService
 from src.operations.local_api import create_app
@@ -345,6 +346,40 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             f"/api/drive-wave/documents/{self.document_id}/attachment-readback",
         )
         self.assertNotIn("ocr_text", str(order))
+
+    def test_list_work_orders_uses_batched_delivery_context(self):
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        with (
+            patch.object(
+                self.ledger,
+                "get_document",
+                side_effect=AssertionError("per-document detail lookup"),
+            ),
+            patch.object(
+                self.ledger,
+                "get_bookkeeping_record_by_document",
+                side_effect=AssertionError("per-document record lookup"),
+            ),
+            patch.object(
+                self.ledger,
+                "list_export_attempts",
+                side_effect=AssertionError("per-document export lookup"),
+            ),
+            patch.object(
+                self.ledger,
+                "find_audit_event",
+                side_effect=AssertionError("per-document evidence lookup"),
+            ),
+        ):
+            result = service.list_work_orders(limit=10)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["workOrders"][0]["documentId"], self.document_id)
+        self.assertEqual(
+            result["workOrders"][0]["wave"]["expectedFields"]["amount"],
+            121.0,
+        )
 
     def test_trusted_gmail_scanner_source_gets_evidence_bound_wave_work_order(self):
         document_id, source_path, source_bytes, source_hash, config = (

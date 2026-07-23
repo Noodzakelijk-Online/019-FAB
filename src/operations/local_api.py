@@ -7450,29 +7450,35 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
         key = f"document:{document_id}" if document_id is not None else f"review:{item.get('id')}"
         grouped.setdefault(key, []).append(item)
 
+    document_ids = [
+        int(group[0]["document_id"])
+        for group in grouped.values()
+        if group[0].get("document_id") is not None
+    ]
+    review_context = ledger.get_review_work_item_context(document_ids)
+    documents = review_context["documents"]
+    bookkeeping_records = review_context["bookkeeping_records"]
+    duplicate_links = review_context["duplicate_candidates"]
+
     work_items = []
     for group in grouped.values():
         group = sorted(group, key=lambda item: int(item.get("id") or 0), reverse=True)
         document_id = group[0].get("document_id")
-        document = ledger.get_document(int(document_id)) if document_id is not None else None
-        bookkeeping_record = (
-            ledger.get_bookkeeping_record_by_document(int(document_id))
-            if document_id is not None
-            else None
-        )
+        document = documents.get(int(document_id)) if document_id is not None else None
+        bookkeeping_record = bookkeeping_records.get(int(document_id)) if document_id is not None else None
         compact_document = (
             _compact_review_document(document, bookkeeping_record)
             if document
             else None
         )
         duplicate_candidates = []
-        for candidate in (document or {}).get("duplicate_candidates") or []:
+        for candidate in duplicate_links.get(int(document_id), []) if document_id is not None else []:
             if candidate.get("status") not in {"pending", "in_review"}:
                 continue
             other_id = candidate.get("candidate_document_id")
             if int(candidate.get("document_id") or 0) != int(document_id or 0):
                 other_id = candidate.get("document_id")
-            other_document = ledger.get_document(int(other_id)) if other_id is not None else None
+            other_document = documents.get(int(other_id)) if other_id is not None else None
             duplicate_candidates.append({
                 "id": candidate.get("id"),
                 "candidateDocumentId": other_id,
