@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$webRoot = Join-Path $root "web"
 $runtimePath = Join-Path $root "data\fab-runtime.json"
 $workerRuntimePath = Join-Path $root "data\fab-worker-runtime.json"
 
@@ -41,6 +42,157 @@ function Get-FabProcessId {
         return $null
     }
     return [int]$process.ProcessId
+}
+
+function Test-FabDashboardProcess {
+    param(
+        [AllowNull()][object]$Process,
+        [Parameter(Mandatory = $true)][string]$ExpectedWebRoot
+    )
+
+    if (-not $Process -or -not $Process.CommandLine) {
+        return $false
+    }
+
+    $name = ([string]$Process.Name).ToLowerInvariant()
+    if ($name -notin @("node.exe", "cmd.exe")) {
+        return $false
+    }
+
+    $command = ([string]$Process.CommandLine).Replace("\", "/").ToLowerInvariant()
+    $webRootMarker = [System.IO.Path]::GetFullPath($ExpectedWebRoot).Replace("\", "/").TrimEnd("/").ToLowerInvariant()
+    if ($command.Contains($webRootMarker)) {
+        return (
+            $command.Contains("server/dev.ts") -or
+            $command.Contains("dist/index.js") -or
+            $command.Contains("tsx") -or
+            $command.Contains("pnpm") -or
+            $command.Contains("npm-cli.js")
+        )
+    }
+
+    return (
+        $command -match "npm(\.cmd|-cli\.js).*(run )?dev" -or
+        $command -match "pnpm(\.cmd|\.mjs)?.*(--dir .*)?dev"
+    )
+}
+
+function Get-FabDashboardProcessId {
+    param(
+        [AllowNull()][object]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedWebRoot
+    )
+
+    if (-not $ProcessId) {
+        return $null
+    }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    $command = if ($process -and $process.CommandLine) { ([string]$process.CommandLine).Replace("\", "/").ToLowerInvariant() } else { "" }
+    $webRootMarker = [System.IO.Path]::GetFullPath($ExpectedWebRoot).Replace("\", "/").TrimEnd("/").ToLowerInvariant()
+    if (-not $command.Contains($webRootMarker)) {
+        return $null
+    }
+    if (-not (Test-FabDashboardProcess -Process $process -ExpectedWebRoot $ExpectedWebRoot)) {
+        return $null
+    }
+    return [int]$process.ProcessId
+}
+
+function Get-FabDashboardProcessRoot {
+    param(
+        [Parameter(Mandatory = $true)][int]$ListenerProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedWebRoot
+    )
+
+    $currentId = $ListenerProcessId
+    $highestOwnedId = $ListenerProcessId
+    for ($depth = 0; $depth -lt 8; $depth++) {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        if (-not (Test-FabDashboardProcess -Process $current -ExpectedWebRoot $ExpectedWebRoot)) {
+            break
+        }
+        $highestOwnedId = [int]$current.ProcessId
+        if (-not $current.ParentProcessId) {
+            break
+        }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($current.ParentProcessId)" -ErrorAction SilentlyContinue
+        if (-not (Test-FabDashboardProcess -Process $parent -ExpectedWebRoot $ExpectedWebRoot)) {
+            break
+        }
+        $currentId = [int]$parent.ProcessId
+    }
+    return $highestOwnedId
+}
+
+function Test-FabProcessAncestor {
+    param(
+        [Parameter(Mandatory = $true)][int]$AncestorProcessId,
+        [Parameter(Mandatory = $true)][int]$DescendantProcessId
+    )
+
+    $currentId = $DescendantProcessId
+    for ($depth = 0; $depth -lt 12 -and $currentId; $depth++) {
+        if ($currentId -eq $AncestorProcessId) {
+            return $true
+        }
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        if (-not $process -or -not $process.ParentProcessId) {
+            break
+        }
+        $currentId = [int]$process.ParentProcessId
+    }
+    return $false
+}
+
+function Get-FabListenerProcessId {
+    param([Parameter(Mandatory = $true)][string]$Url)
+
+    try {
+        $uri = [System.Uri]$Url
+        if ($uri.Host -notin @("127.0.0.1", "localhost", "::1")) {
+            return $null
+        }
+        $listener = Get-NetTCPConnection -State Listen -LocalPort $uri.Port -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+            Select-Object -First 1
+        if ($listener) {
+            return [int]$listener.OwningProcess
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Find-RunningFabDashboardProcessIds {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedWebRoot
+    )
+
+    $matches = [System.Collections.Generic.List[int]]::new()
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "node.exe" -and
+            (Test-FabDashboardProcess -Process $_ -ExpectedWebRoot $ExpectedWebRoot)
+        }
+    foreach ($process in $processes) {
+        $listeners = Get-NetTCPConnection -State Listen -OwningProcess $process.ProcessId -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+            Sort-Object LocalPort -Unique
+        foreach ($listener in $listeners) {
+            $identityUrl = "http://127.0.0.1:$($listener.LocalPort)/api/fab/runtime"
+            if (Test-FabEndpoint -Url $identityUrl -ExpectedService "fab-operator-dashboard" -ExpectedInstanceRoot $ExpectedRoot) {
+                $rootProcessId = Get-FabDashboardProcessRoot -ListenerProcessId ([int]$process.ProcessId) -ExpectedWebRoot $ExpectedWebRoot
+                if (-not $matches.Contains($rootProcessId)) {
+                    $matches.Add($rootProcessId)
+                }
+                break
+            }
+        }
+    }
+    return @($matches)
 }
 
 function Test-FabEndpoint {
@@ -178,6 +330,41 @@ function Stop-FabProcessTree {
     Write-Host "Stopped $Name."
 }
 
+function Stop-FabDashboardProcessTree {
+    param(
+        [AllowNull()][object]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedWebRoot
+    )
+
+    if (-not $ProcessId) {
+        return
+    }
+    $rootProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if (-not $rootProcess) {
+        return
+    }
+    if (-not (Test-FabDashboardProcess -Process $rootProcess -ExpectedWebRoot $ExpectedWebRoot)) {
+        Write-Warning "Refusing to stop PID $ProcessId because it no longer matches the FAB dashboard."
+        return
+    }
+
+    $processIds = [System.Collections.Generic.List[int]]::new()
+    $pending = [System.Collections.Generic.Queue[int]]::new()
+    $pending.Enqueue([int]$ProcessId)
+    while ($pending.Count -gt 0) {
+        $currentId = $pending.Dequeue()
+        $processIds.Add($currentId)
+        Get-CimInstance Win32_Process -Filter "ParentProcessId = $currentId" -ErrorAction SilentlyContinue | ForEach-Object {
+            $pending.Enqueue([int]$_.ProcessId)
+        }
+    }
+
+    for ($index = $processIds.Count - 1; $index -ge 0; $index--) {
+        Stop-Process -Id $processIds[$index] -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "Stopped FAB dashboard."
+}
+
 $runtime = $null
 if (Test-Path -LiteralPath $runtimePath) {
     try {
@@ -201,6 +388,7 @@ $apiToken = [string]$apiToken
 $apiPid = $null
 $workerPid = $null
 $webPid = $null
+$webPids = [System.Collections.Generic.List[int]]::new()
 if ($runtime) {
     $runtimeOwned = $false
     try {
@@ -214,7 +402,6 @@ if ($runtime) {
     }
     $apiPid = Get-FabProcessId -ProcessId $runtime.apiPid -CommandMarker "src.operations.local_api"
     $workerPid = Get-FabProcessId -ProcessId $runtime.workerPid -CommandMarker "src.run_worker"
-    $webPid = Get-FabProcessId -ProcessId $runtime.webPid -CommandMarker "pnpm"
     if (
         -not $runtime.apiUrl -or
         -not (Test-FabEndpoint -Url $runtime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root -AllowLegacyInstance:$runtimeOwned)
@@ -222,9 +409,24 @@ if ($runtime) {
         $apiPid = $null
     }
     if (
-        $webPid -and $runtime.webIdentityUrl -and
-        -not (Test-FabEndpoint -Url $runtime.webIdentityUrl -ExpectedService "fab-operator-dashboard" -ExpectedInstanceRoot $root -AllowLegacyInstance:$runtimeOwned)
+        $runtime.webIdentityUrl -and
+        (Test-FabEndpoint -Url $runtime.webIdentityUrl -ExpectedService "fab-operator-dashboard" -ExpectedInstanceRoot $root -AllowLegacyInstance:$runtimeOwned)
     ) {
+        $webListenerPid = Get-FabListenerProcessId -Url $runtime.webIdentityUrl
+        if ($webListenerPid) {
+            $savedWebPid = Get-FabDashboardProcessId -ProcessId $runtime.webPid -ExpectedWebRoot $webRoot
+            if ($savedWebPid -and (Test-FabProcessAncestor -AncestorProcessId $savedWebPid -DescendantProcessId $webListenerPid)) {
+                $webPid = $savedWebPid
+            }
+            else {
+                if ($savedWebPid -and -not $webPids.Contains([int]$savedWebPid)) {
+                    $webPids.Add([int]$savedWebPid)
+                }
+                $webPid = Get-FabDashboardProcessRoot -ListenerProcessId $webListenerPid -ExpectedWebRoot $webRoot
+            }
+        }
+    }
+    else {
         $webPid = $null
     }
 }
@@ -237,6 +439,14 @@ foreach ($discoveredApiPid in @(Find-RunningFabApiProcessIds -ExpectedRoot $root
         $apiPids.Add([int]$discoveredApiPid)
     }
 }
+if ($webPid) {
+    $webPids.Add([int]$webPid)
+}
+foreach ($discoveredWebPid in @(Find-RunningFabDashboardProcessIds -ExpectedRoot $root -ExpectedWebRoot $webRoot)) {
+    if (-not $webPids.Contains([int]$discoveredWebPid)) {
+        $webPids.Add([int]$discoveredWebPid)
+    }
+}
 $managedWorkerPid = Get-FabWorkerRuntimeProcessId -Path $workerRuntimePath -ExpectedRoot $root
 if ($managedWorkerPid) {
     $workerPid = $managedWorkerPid
@@ -245,11 +455,13 @@ elseif (Test-Path -LiteralPath $workerRuntimePath) {
     $workerPid = $null
 }
 
-if (-not $runtime -and $apiPids.Count -eq 0 -and -not $workerPid) {
+if (-not $runtime -and $apiPids.Count -eq 0 -and $webPids.Count -eq 0 -and -not $workerPid) {
     Write-Host "No owned FAB services were found. The managed services are already stopped."
 }
 
-Stop-FabProcessTree -ProcessId $webPid -CommandMarker "pnpm" -Name "FAB dashboard"
+foreach ($ownedWebPid in $webPids) {
+    Stop-FabDashboardProcessTree -ProcessId $ownedWebPid -ExpectedWebRoot $webRoot
+}
 Stop-FabProcessTree -ProcessId $workerPid -CommandMarker "src.run_worker" -Name "FAB autonomous worker"
 foreach ($ownedApiPid in $apiPids) {
     Stop-FabProcessTree -ProcessId $ownedApiPid -CommandMarker "src.operations.local_api" -Name "FAB ledger API"

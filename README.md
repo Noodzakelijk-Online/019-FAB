@@ -222,7 +222,9 @@ On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
 the ignored local configuration files when needed, installs missing dashboard
 and Python runtime dependencies, provisions Tesseract plus Dutch/English OCR
 data and Poppler PDF tools when `winget` is available, starts the ledger API,
-autonomous worker, and dashboard on loopback, then opens the control room.
+autonomous worker, and a current production build of the dashboard on loopback,
+then opens the control room. Use `.\Start-FAB.ps1 -Development` only when
+actively changing dashboard source code.
 Double-click `Stop-FAB.cmd` to stop only processes whose service identity and
 project root match this FAB checkout. Runtime logs are written under `logs/`.
 
@@ -230,8 +232,11 @@ The launcher verifies FAB-specific service identity instead of trusting an
 occupied port. If another application uses `3000` or `5001`, FAB selects a
 free loopback port, records the actual URLs in `data/fab-runtime.json`, and
 opens the correct dashboard. It also repairs stale PID metadata by
-rediscovering the matching API and singleton worker, so repeated starts do not
-create duplicate bookkeeping loops or move the dashboard to another port.
+rediscovering the matching API, dashboard listener and singleton worker. The
+dashboard process tree is adopted only after its runtime identity, checkout and
+local API endpoint match, so repeated starts do not create duplicate
+bookkeeping loops or move the dashboard to another port. `Stop-FAB.cmd`
+performs the same discovery when runtime metadata is stale or missing.
 
 For Google Drive intake and verified move-only archival, place a Google OAuth
 desktop client JSON at `credentials/drive_credentials.json`, then double-click
