@@ -62,6 +62,26 @@ class TestDuplicateDetector(unittest.TestCase):
         self.assertTrue(result["is_duplicate"])
         self.assertEqual(result["reason"], "exact_fingerprint_match")
 
+    def test_credit_note_is_not_a_duplicate_of_the_original_invoice(self):
+        common = {
+            "vendor_name": "Vendor BV",
+            "transaction_date": "2026-06-01",
+            "total_amount": 123.45,
+        }
+        result = self.detector.is_duplicate(
+            {
+                "document_type": "credit_note",
+                "extracted_data": {**common, "document_type": "credit_note"},
+            },
+            [{
+                "id": "invoice-1",
+                "document_type": "vendor_invoice",
+                "extracted_data": {**common, "document_type": "vendor_invoice"},
+            }],
+        )
+
+        self.assertFalse(result["is_duplicate"])
+
     def test_invoice_number_requires_corroborating_accounting_fields(self):
         result = self.detector.is_duplicate(
             {

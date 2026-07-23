@@ -790,11 +790,17 @@ def _evaluate_record(record: Dict[str, Any], basis: str) -> Dict[str, Any]:
 
 def _normalized_row(record: Dict[str, Any]) -> Dict[str, Any]:
     gross = _money(record.get("amount"))
-    vat = abs(_money(record.get("vat_amount")))
+    raw_vat = _money(record.get("vat_amount"))
     record_type = str(record.get("record_type") or "expense").lower()
     is_income = record_type in {"income", "revenue", "sales_invoice"}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    is_credit_note = str(metadata.get("documentType") or "").strip().lower() == "credit_note"
     absolute_gross = abs(gross)
-    net = max(Decimal("0"), absolute_gross - vat)
+    absolute_vat = abs(raw_vat)
+    reporting_direction = Decimal("-1") if is_credit_note else Decimal("1")
+    reporting_gross = absolute_gross * reporting_direction
+    reporting_vat = absolute_vat * reporting_direction
+    reporting_net = (absolute_gross - absolute_vat) * reporting_direction
     return {
         "recordId": record.get("id"),
         "recordDate": record.get("record_date"),
@@ -805,10 +811,10 @@ def _normalized_row(record: Dict[str, Any]) -> Dict[str, Any]:
         "targetSystem": record.get("target_system"),
         "targetAccount": record.get("target_account"),
         "currency": str(record.get("currency") or "EUR").upper(),
-        "grossAmount": _number(absolute_gross),
+        "grossAmount": _number(reporting_gross),
         "signedAmount": _number(gross),
-        "vatAmount": _number(vat),
-        "netAmount": _number(net),
+        "vatAmount": _number(reporting_vat),
+        "netAmount": _number(reporting_net),
         "status": record.get("status"),
         "reconciliationStatus": record.get("reconciliation_status"),
         "reviewRequired": bool(record.get("review_required")),

@@ -230,15 +230,18 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     const financialIssues = records(document.financialFieldIssues);
     const invalidDate = financialIssues.some((issue) => text(issue.field, "") === "recordDate");
     const invalidVat = financialIssues.some((issue) => text(issue.field, "") === "vatAmount");
+    const documentType = normalizedDocumentType(document.documentType);
     setForm({
       vendorName: text(document.vendorName, ""),
       transactionDate: invalidDate ? "" : text(document.normalizedRecordDate, text(document.transactionDate, "")),
       totalAmount: numericText(document.totalAmount),
-      vatAmount: invalidVat ? "" : numericText(document.normalizedVatAmount ?? document.vatAmount),
+      vatAmount: invalidVat
+        ? ""
+        : numericText(documentType === "credit_note" ? document.vatAmount : document.normalizedVatAmount ?? document.vatAmount),
       category: text(document.category, "") === "Manual Review"
         ? text(categorySuggestion.category, "")
         : text(document.category, ""),
-      documentType: normalizedDocumentType(document.documentType),
+      documentType,
       targetSystem: text(document.targetSystem, "waveapps_business") as ReviewForm["targetSystem"],
       resolution: text(categorySuggestion.category, "")
         ? copy(
@@ -279,6 +282,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const isBusy = resolvingReviewId !== null;
   const typeDecisionRequired = reviewItems.some((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")));
   const selectedNonPosting = NON_POSTING_DOCUMENT_TYPES.has(form.documentType);
+  const selectedCreditNote = form.documentType === "credit_note";
   const detailReviewSupportsBatch = VENDOR_CATEGORY_REASONS.has(text(detailReview?.reason, ""));
   const matchingVendorDocuments = detailReviewSupportsBatch ? workItems.filter((candidate) => {
     if (text(candidate.id, "") === text(item.id, "")) return false;
@@ -416,10 +420,11 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
               <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
               {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value as ReviewDocumentType })}>{DOCUMENT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{humanize(option)}</option>)}</select><small>{copy(`Classifier suggestion: ${humanize(text(document.classifiedDocumentType, "unknown"))}`, `Classificatievoorstel: ${humanize(text(document.classifiedDocumentType, "unknown"))}`)}</small></label>}
               {!selectedNonPosting && <>
+                {selectedCreditNote && <div className="fab-financial-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>{copy("Expense reversal", "Kostenboeking terugdraaien")}</strong><span>{copy("FAB will post this credit note as a Wave deposit that decreases the selected expense account. Verify the positive source amount below; FAB stores the ledger reversal with a negative sign.", "FAB boekt deze creditnota als een Wave-storting die de gekozen kostenrekening verlaagt. Controleer hieronder het positieve bronbedrag; FAB bewaart de terugboeking negatief in het grootboek.")}</span></div></div>}
                 <label><span>{copy("Vendor", "Leverancier")}</span><input value={form.vendorName} onChange={(event) => setForm({ ...form, vendorName: event.target.value })} required /></label>
                 <div className="fab-review-field-row">
                   <label><span>{copy("Transaction date", "Transactiedatum")}</span><input type="date" value={form.transactionDate} onChange={(event) => setForm({ ...form, transactionDate: event.target.value })} required /></label>
-                  <label><span>{copy("Amount", "Bedrag")}</span><input type="number" min="0" step="0.01" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} required /></label>
+                  <label><span>{selectedCreditNote ? copy("Credit amount", "Creditbedrag") : copy("Amount", "Bedrag")}</span><input type="number" min="0" step="0.01" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} required /></label>
                   <label><span>{copy("VAT", "Btw")}</span><input type="number" min="0" step="0.01" value={form.vatAmount} onChange={(event) => setForm({ ...form, vatAmount: event.target.value })} /></label>
                 </div>
                 <label>
@@ -433,7 +438,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
               <label><span>{copy("Decision note", "Beslisnotitie")}</span><textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })} rows={3} required /></label>
               {!selectedNonPosting && <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span><strong>{copy("Teach FAB this exact vendor/category rule", "Leer FAB deze exacte leverancier/categorieregel")}</strong><small>{copy("Your approved source-backed decision becomes reusable for future exact-vendor matches.", "Uw goedgekeurde, brongestuurde beslissing wordt herbruikbaar voor toekomstige exacte leveranciersmatches.")}</small></span></label>}
               {!selectedNonPosting && matchingVendorDocuments > 0 && <label className="fab-review-checkbox fab-review-batch"><input type="checkbox" checked={form.applyToMatchingVendor} onChange={(event) => setForm({ ...form, applyToMatchingVendor: event.target.checked })} /><span><strong>{copy(`Apply this category to ${matchingVendorDocuments} other exact vendor match${matchingVendorDocuments === 1 ? "" : "es"}`, `Pas deze categorie toe op ${matchingVendorDocuments} andere exacte leveranciersmatch${matchingVendorDocuments === 1 ? "" : "es"}`)}</strong><small>{copy("Dates and amounts stay unchanged. Duplicate and missing-field reviews remain open.", "Datums en bedragen blijven ongewijzigd. Controles voor duplicaten en ontbrekende velden blijven open.")}</small></span></label>}
-              <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
+              <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : selectedCreditNote ? copy("Approve credit reversal", "Creditboeking goedkeuren") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
             </form>
           )}
 
@@ -472,10 +477,10 @@ function emptyForm(): ReviewForm {
 }
 
 const VENDOR_CATEGORY_REASONS = new Set(["manual_review_category", "low_confidence_categorization"]);
-const TYPE_REVIEW_REASONS = new Set(["document_type_conflict", "non_posting_document_type"]);
+const TYPE_REVIEW_REASONS = new Set(["credit_note_posting_review", "document_type_conflict", "non_posting_document_type"]);
 const DOCUMENT_TYPE_OPTIONS = ["receipt", "vendor_invoice", "credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"] as const;
 type ReviewDocumentType = typeof DOCUMENT_TYPE_OPTIONS[number];
-const NON_POSTING_DOCUMENT_TYPES = new Set<ReviewDocumentType>(["credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]);
+const NON_POSTING_DOCUMENT_TYPES = new Set<ReviewDocumentType>(["order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]);
 
 function normalizedDocumentType(value: unknown): ReviewDocumentType {
   const normalized = text(value, "receipt") as ReviewDocumentType;

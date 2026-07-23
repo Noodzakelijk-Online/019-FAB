@@ -133,6 +133,47 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 "document_type_classifier",
             )
 
+    def test_credit_note_is_reviewed_as_a_signed_expense_reversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credit_path = os.path.join(temp_dir, "credit-note.txt")
+            with open(credit_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "CREDITNOTA\nVendor: Test Vendor\nDate: 2026-06-28\n"
+                    "Total: EUR 42.50\nVAT: EUR 7.38\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "scanner-credit-1",
+                "originalFilename": "credit-note.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": credit_path,
+                "documentType": "pdf",
+                "processingStatus": "imported",
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            document = ledger.get_document(document_id)
+            record = document["bookkeeping_record"]
+            self.assertEqual(result["status"], "needs_review")
+            self.assertIn("credit_note_posting_review", result["reviewReasons"])
+            self.assertNotIn("non_posting_document_type", result["reviewReasons"])
+            self.assertEqual(document["document_type"], "credit_note")
+            self.assertEqual(document["category"], "Office Supplies")
+            self.assertEqual(document["total_amount"], 42.5)
+            self.assertEqual(record["record_type"], "expense")
+            self.assertEqual(record["amount"], -42.5)
+            self.assertEqual(record["vat_amount"], -7.38)
+            self.assertEqual(record["metadata"]["postingDirection"], "credit")
+            self.assertEqual(record["metadata"]["evidenceAmount"], 42.5)
+            self.assertTrue(record["review_required"])
+            self.assertEqual(record["export_status"], "blocked_by_review")
+
     def test_order_confirmation_is_never_auto_ready_to_post(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             confirmation_path = os.path.join(temp_dir, "confirmation.txt")
@@ -212,6 +253,61 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
             self.assertEqual(actions.count("local_processing.document_type_backfilled"), 1)
             self.assertEqual(actions.count("local_processing.document_type_backfill_completed"), 1)
+
+    def test_credit_note_backfill_replaces_stale_supporting_evidence_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "historic-credit-1",
+                "originalFilename": "historic-credit.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "credit_note",
+                "processingStatus": "needs_review",
+                "vendorName": "Historic Vendor",
+                "category": "Supporting Evidence",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 12.0,
+                "ocrText": "CREDITNOTA\nTotaal EUR 12,00",
+                "extractedData": {
+                    "document_type": "credit_note",
+                    "vendor_name": "Historic Vendor",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 12.0,
+                },
+                "metadata": {
+                    "processing": {
+                        "documentTypeClassification": {
+                            "documentType": "credit_note",
+                            "classifier": "deterministic_financial_document_type_v3",
+                            "postingEligible": False,
+                            "reviewRequired": True,
+                        },
+                        "reviewReasons": ["non_posting_document_type"],
+                    },
+                },
+            })
+            old_review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "non_posting_document_type",
+                "details": "Legacy classifier treated this credit note as evidence.",
+            })
+
+            result = LocalDocumentProcessor(ledger).backfill_document_types()
+
+            self.assertEqual(result["evaluated"], 1)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["category"], "Manual Review")
+            self.assertEqual(document["bookkeeping_record"]["amount"], -12.0)
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "expense")
+            open_reasons = {
+                item["reason"]
+                for item in document["review_items"]
+                if item["status"] in {"pending", "in_review"}
+            }
+            self.assertEqual(open_reasons, {"credit_note_posting_review"})
+            old_review = ledger.get_review_item(old_review_id)
+            self.assertEqual(old_review["status"], "resolved")
 
     def test_document_type_backfill_queues_non_posting_review_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:

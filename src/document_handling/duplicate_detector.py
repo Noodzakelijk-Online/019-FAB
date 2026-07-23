@@ -28,6 +28,7 @@ class DuplicateDetector:
 
     def build_fingerprint(self, document: Dict[str, Any]) -> str:
         extracted = document.get("extracted_data", document)
+        posting_polarity = self._posting_polarity(document)
         vendor = self._normalize(extracted.get("vendor_name") or document.get("vendor_name"))
         date = self._normalize(str(extracted.get("transaction_date") or extracted.get("date") or ""))
         amount = self._normalize_amount(extracted.get("total_amount") or extracted.get("amount"))
@@ -40,7 +41,15 @@ class DuplicateDetector:
         )
         filename = self._normalize(document.get("original_filename") or document.get("filename") or "")
 
-        fingerprint_source = "|".join([vendor, date, amount, tax, invoice_number, filename])
+        fingerprint_source = "|".join([
+            posting_polarity,
+            vendor,
+            date,
+            amount,
+            tax,
+            invoice_number,
+            filename,
+        ])
         return hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
 
     def is_duplicate(
@@ -51,6 +60,8 @@ class DuplicateDetector:
         new_fingerprint = self.build_fingerprint(document)
         new_evidence = self._identity_evidence(document)
         for existing in existing_documents:
+            if self._posting_polarity(document) != self._posting_polarity(existing):
+                continue
             existing_evidence = self._identity_evidence(existing)
             has_exact_evidence = self._supports_exact_match(new_evidence, existing_evidence)
             fingerprint_matches = (
@@ -175,6 +186,7 @@ class DuplicateDetector:
     def _identity_evidence(cls, document: Dict[str, Any]) -> Dict[str, str]:
         extracted = document.get("extracted_data", document)
         return {
+            "posting_polarity": cls._posting_polarity(document),
             "vendor": cls._normalize(extracted.get("vendor_name") or document.get("vendor_name")),
             "date": cls._normalize(extracted.get("transaction_date") or extracted.get("date")),
             "amount": cls._normalize_amount(extracted.get("total_amount") or extracted.get("amount")),
@@ -188,11 +200,15 @@ class DuplicateDetector:
 
     @staticmethod
     def _supports_exact_match(left: Dict[str, str], right: Dict[str, str]) -> bool:
+        if left["posting_polarity"] != right["posting_polarity"]:
+            return False
         shared = {key for key in left if left[key] and right[key]}
         return "invoice_number" in shared or {"vendor", "date", "amount"}.issubset(shared)
 
     @staticmethod
     def _exact_evidence_match(left: Dict[str, str], right: Dict[str, str]) -> bool:
+        if left["posting_polarity"] != right["posting_polarity"]:
+            return False
         if all(
             left[key] and left[key] == right[key]
             for key in ("vendor", "date", "amount")
@@ -212,6 +228,17 @@ class DuplicateDetector:
             if left[key] and left[key] == right[key]
         )
         return corroborating_matches >= 2
+
+    @classmethod
+    def _posting_polarity(cls, document: Dict[str, Any]) -> str:
+        extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+        document_type = cls._normalize(
+            document.get("document_type")
+            or document.get("type")
+            or extracted.get("document_type")
+            or extracted.get("type")
+        ).replace(" ", "_")
+        return "credit" if document_type == "credit_note" else "standard"
 
     @staticmethod
     def _parse_amount(value: Optional[Any]) -> Optional[Decimal]:

@@ -1203,19 +1203,25 @@ def _wave_line_item_from_record_line(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _bookkeeping_record_data(record: Dict[str, Any]) -> Dict[str, Any]:
-    amount = _positive_amount(record.get("amount"))
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    document_type = str(metadata.get("documentType") or "receipt").strip().lower()
+    amount = (
+        _negative_amount(record.get("amount"))
+        if document_type == "credit_note"
+        else _positive_amount(record.get("amount"))
+    )
     extracted = {
         "vendor_name": record.get("vendor_name"),
         "transaction_date": record.get("record_date"),
         "total_amount": amount,
         "currency": record.get("currency"),
         "description": record.get("description"),
-        "document_type": "receipt",
+        "document_type": document_type,
         "line_items": [_wave_line_item_from_record_line(item) for item in record.get("line_items") or []],
     }
     return {
         "id": record.get("id"),
-        "document_type": "receipt",
+        "document_type": document_type,
         "vendor_name": record.get("vendor_name"),
         "category": record.get("category"),
         "transaction_date": record.get("record_date"),
@@ -1455,6 +1461,15 @@ def _positive_amount(value: Any) -> Any:
         return None
     try:
         return abs(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _negative_amount(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return -abs(float(value))
     except (TypeError, ValueError):
         return value
 

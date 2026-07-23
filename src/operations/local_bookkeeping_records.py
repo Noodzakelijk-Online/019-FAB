@@ -387,14 +387,20 @@ class LocalBookkeepingRecordService:
         evidence_record_date = _first_present(document.get("transaction_date"), extracted.get("transaction_date"))
         record_date_assessment = assess_record_date(evidence_record_date)
         record_date = record_date_assessment["normalizedValue"] if record_date_assessment["valid"] else None
-        amount = _float(_first_present(document.get("total_amount"), extracted.get("total_amount"), extracted.get("amount")))
+        evidence_amount = _float(_first_present(
+            document.get("total_amount"),
+            extracted.get("total_amount"),
+            extracted.get("amount"),
+        ))
+        amount = _posting_amount(evidence_amount, document_type)
         evidence_vat_amount = _float(_first_present(document.get("vat_amount"), extracted.get("vat_amount")))
+        posting_vat_amount = _posting_amount(evidence_vat_amount, document_type)
         vat_assessment = assess_vat_amount(
-            evidence_vat_amount,
+            posting_vat_amount,
             amount,
             max_ratio=self.vat_max_total_ratio,
         )
-        vat_amount = evidence_vat_amount if vat_assessment["valid"] else None
+        vat_amount = posting_vat_amount if vat_assessment["valid"] else None
         financial_field_issues = []
         if not non_posting and not record_date_assessment["valid"]:
             financial_field_issues.append({
@@ -514,10 +520,15 @@ class LocalBookkeepingRecordService:
                 "originalFilename": document.get("original_filename"),
                 "documentType": document.get("document_type"),
                 "nonPostingDocumentType": non_posting,
-                "evidenceAmount": amount if non_posting else None,
+                "postingDirection": "credit" if document_type == "credit_note" else "standard",
+                "evidenceAmount": (
+                    evidence_amount
+                    if non_posting or evidence_amount != amount
+                    else None
+                ),
                 "evidenceVatAmount": (
                     evidence_vat_amount
-                    if non_posting or any(
+                    if non_posting or evidence_vat_amount != vat_amount or any(
                         issue.get("field") == "vatAmount" for issue in financial_field_issues
                     )
                     else None
@@ -703,6 +714,14 @@ def _record_type(document: Dict[str, Any], extracted: Dict[str, Any], amount: Op
     return "expense"
 
 
+def _posting_amount(value: Optional[float], document_type: str) -> Optional[float]:
+    if value is None:
+        return None
+    if document_type == "credit_note":
+        return -abs(value)
+    return value
+
+
 def _latest_routing_attempt(document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     attempts = document.get("routing_attempts") or []
     return attempts[0] if attempts else None
@@ -829,16 +848,38 @@ def _document_line_items_from_values(
     evidence_gross_total = round(evidence_line_total + evidence_tax_total, 2)
     document_total = _float(amount)
     tolerance = max(0.02, abs(document_total or 0.0) * 0.01)
-    amounts_reconcile = (
-        bool(normalized_with_amounts)
+    direct_reconciliation = (
+        document_total is None
+        or abs(evidence_line_total - document_total) <= tolerance
+        or abs(evidence_gross_total - document_total) <= tolerance
+    )
+    absolute_reconciliation = (
+        document_total is not None
         and (
-            document_total is None
-            or abs(evidence_line_total - document_total) <= tolerance
-            or abs(evidence_gross_total - document_total) <= tolerance
+            abs(abs(evidence_line_total) - abs(document_total)) <= tolerance
+            or abs(abs(evidence_gross_total) - abs(document_total)) <= tolerance
         )
     )
-    if amounts_reconcile:
+    if normalized_with_amounts and direct_reconciliation:
         return normalized_with_amounts
+    if normalized_with_amounts and absolute_reconciliation:
+        direction = -1.0 if document_total < 0 else 1.0
+        return [
+            {
+                **item,
+                "amount": round(abs(float(item["amount"])) * direction, 2),
+                "taxAmount": (
+                    round(abs(float(item["taxAmount"])) * direction, 2)
+                    if item.get("taxAmount") is not None
+                    else None
+                ),
+                "metadata": {
+                    **dict(item.get("metadata") or {}),
+                    "postingDirectionNormalized": True,
+                },
+            }
+            for item in normalized_with_amounts
+        ]
 
     fallback_financial_issues = [
         {

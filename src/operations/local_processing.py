@@ -32,6 +32,7 @@ SENSITIVE_REVIEW_TERMS = (
     "zorgtoeslag",
 )
 PROCESSING_REVIEW_REASONS = {
+    "credit_note_posting_review",
     "duplicate_candidate",
     "empty_ocr_text",
     "low_confidence_categorization",
@@ -389,6 +390,21 @@ class LocalDocumentProcessor:
                     "confidenceScore": 1.0,
                     "reviewReasons": _dedupe(active_review_reasons),
                 })
+            elif classification.get("reviewRequired"):
+                active_review_reasons.append("credit_note_posting_review")
+                processing["reviewReasons"] = _dedupe([
+                    *[
+                        reason
+                        for reason in list(processing.get("reviewReasons") or [])
+                        if reason != "non_posting_document_type"
+                    ],
+                    *active_review_reasons,
+                ])
+                if str(document.get("category") or "").strip().lower() == "supporting evidence":
+                    processing.update({
+                        "category": "Manual Review",
+                        "confidenceScore": 0.0,
+                    })
             metadata["processing"] = processing
             update_payload: Dict[str, Any] = {"metadata": metadata}
             applied_type = current_type
@@ -419,6 +435,18 @@ class LocalDocumentProcessor:
                     "confidenceScore": 1.0,
                     "extractedData": extracted_data,
                 })
+            elif (
+                classified_type == "credit_note"
+                and not conflict
+                and str(document.get("category") or "").strip().lower() == "supporting evidence"
+            ):
+                extracted_data = dict(document.get("extracted_data") or {})
+                extracted_data["document_type"] = classified_type
+                update_payload.update({
+                    "category": "Manual Review",
+                    "confidenceScore": 0.0,
+                    "extractedData": extracted_data,
+                })
 
             self.ledger.update_document(int(document["id"]), update_payload)
             if classified_type != "unknown" and not conflict:
@@ -432,15 +460,40 @@ class LocalDocumentProcessor:
                     )
 
             if classification.get("reviewRequired"):
+                review_reason = (
+                    "non_posting_document_type"
+                    if non_posting
+                    else "credit_note_posting_review"
+                )
                 before_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
                 self._queue_review(
                     document,
-                    "non_posting_document_type",
-                    _review_detail("non_posting_document_type", {}, "", 0.0),
+                    review_reason,
+                    _review_detail(review_reason, {}, "", 0.0),
                     corrected_data={"documentTypeClassification": classification},
                 )
                 after_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
                 summary["reviewQueued"] += int(after_count > before_count)
+                if not non_posting and not conflict:
+                    preserved_reasons = [
+                        str(item.get("reason") or "")
+                        for item in self.ledger.list_review_items(
+                            document_id=int(document["id"]),
+                            limit=100,
+                        )
+                        if item.get("status") in {"pending", "in_review"}
+                        and item.get("reason") != "non_posting_document_type"
+                    ]
+                    self._resolve_inactive_processing_reviews(
+                        int(document["id"]),
+                        preserved_reasons,
+                        actor="document_type_backfill",
+                    )
+                if not conflict:
+                    LocalBookkeepingRecordService(
+                        self.ledger,
+                        self.config,
+                    ).upsert_from_document(int(document["id"]))
             if conflict:
                 before_count = len(self.ledger.list_review_items(document_id=int(document["id"]), limit=100))
                 self._queue_review(
@@ -917,6 +970,8 @@ class LocalDocumentProcessor:
             if any(term in lowered_text for term in SENSITIVE_REVIEW_TERMS):
                 reasons.append("sensitive_government_document")
             return _dedupe(reasons)
+        if document_type_classification.get("reviewRequired"):
+            reasons.append("credit_note_posting_review")
         if validation.get("blocking"):
             reasons.append("validation_failed")
         if confidence_score < self.review_confidence_threshold:
@@ -1381,6 +1436,8 @@ def _review_detail(
         return "Government, benefits, DigiD, or sensitive administration terms were detected."
     if reason == "non_posting_document_type":
         return "This document type is supporting evidence, not an automatically postable receipt or vendor invoice."
+    if reason == "credit_note_posting_review":
+        return "Credit note detected. Verify the vendor, date, amount, VAT, and expense category before posting the reversal."
     if reason == "document_type_conflict":
         return "Stored and inferred document types conflict; review before routing."
     return "Review required."

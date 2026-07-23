@@ -42,6 +42,21 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertEqual(result["documentType"], "receipt")
         self.assertTrue(result["postingEligible"])
 
+    def test_credit_note_is_posting_eligible_but_requires_review(self):
+        result = self.classifier.classify(
+            "CREDITNOTA\nLeverancier BV\nTotaal EUR 42,50",
+            {"credit_note_number": "CN-0042"},
+        )
+
+        self.assertEqual(result["documentType"], "credit_note")
+        self.assertTrue(result["postingEligible"])
+        self.assertTrue(result["reviewRequired"])
+        self.assertFalse(is_non_posting_document_type(result["documentType"]))
+        self.assertEqual(
+            resolve_wave_action_for_document({"document_type": result["documentType"]}),
+            "transaction_add",
+        )
+
     def test_unrecognized_document_remains_unknown(self):
         result = self.classifier.classify("General correspondence", {})
 
@@ -58,7 +73,7 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertFalse(result["postingEligible"])
         self.assertTrue(result["reviewRequired"])
         self.assertTrue(is_non_posting_document_type(result["documentType"]))
-        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v3")
+        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v4")
 
     def test_government_benefits_letter_is_non_posting_supporting_evidence(self):
         result = self.classifier.classify(

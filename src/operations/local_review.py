@@ -342,7 +342,11 @@ class LocalReviewService:
             if _has_valid_required_fields(document):
                 reasons.add("validation_failed")
             if corrections.get("documentType"):
-                reasons.update({"document_type_conflict", "non_posting_document_type"})
+                reasons.update({
+                    "credit_note_posting_review",
+                    "document_type_conflict",
+                    "non_posting_document_type",
+                })
 
         resolved_ids = []
         for item in document.get("review_items") or []:

@@ -68,6 +68,38 @@ class TestWaveappsApiExecutor(unittest.TestCase):
         self.assertEqual(result["status"], "needs_review")
         self.assertEqual(result["review_reason"], "wave_target_ambiguous")
 
+    def test_credit_direction_survives_export_payload_reconstruction(self):
+        handler = _RecordingHandler()
+        executor = WaveappsApiExecutor(
+            self._config(),
+            handlers={"waveapps_business": handler},
+        )
+
+        result = executor.execute(
+            target_system="waveapps_business",
+            action_id="transaction_add",
+            payload={
+                "date": "2026-07-10",
+                "amount": -42.5,
+                "documentType": "credit_note",
+                "transactionDirection": "deposit",
+                "account": "Checking",
+                "category": "Office Supplies",
+                "description": "Supplier refund",
+                "vendor": "Office Shop",
+                "lineItems": [{"description": "Returned paper", "amount": -42.5}],
+            },
+            idempotency_key="wave:credit-note",
+            document_id=8,
+        )
+
+        self.assertEqual(result["status"], "success")
+        data = handler.calls[0]
+        self.assertEqual(data["document_type"], "credit_note")
+        self.assertEqual(data["transaction_direction"], "deposit")
+        self.assertEqual(data["extracted_data"]["document_type"], "credit_note")
+        self.assertEqual(data["extracted_data"]["total_amount"], -42.5)
+
     def test_configured_default_resolves_generic_wave_target(self):
         handler = _RecordingHandler()
         config = {

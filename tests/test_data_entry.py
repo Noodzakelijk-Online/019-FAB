@@ -180,6 +180,39 @@ class TestDataEntry(unittest.TestCase):
         # Clean up generated CSV
         os.remove(csv_path)
 
+    @patch("src.data_entry.waveapps_business_handler.requests.post")
+    def test_waveapps_business_credit_note_posts_a_deposit(self, mock_post):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "data": {
+                "moneyTransactionCreate": {
+                    "didSucceed": True,
+                    "transaction": {"id": "vendor-credit-1"},
+                }
+            }
+        }
+        mock_post.return_value = response
+        credit_note = {
+            **self.dummy_processed_data,
+            "document_type": "credit_note",
+            "category": "Business",
+            "extracted_data": {
+                **self.dummy_processed_data["extracted_data"],
+                "document_type": "credit_note",
+                "total_amount": -45.50,
+                "description": "Supplier refund",
+            },
+        }
+
+        result = WaveappsBusinessHandler(self.config).enter_data(credit_note)
+
+        self.assertEqual(result["status"], "success")
+        request_input = mock_post.call_args.kwargs["json"]["variables"]["input"]
+        self.assertEqual(request_input["anchor"]["amount"], 45.5)
+        self.assertEqual(request_input["anchor"]["direction"], "DEPOSIT")
+        self.assertEqual(request_input["lineItems"][0]["balance"], "DECREASE")
+
     def test_mijngeldzaken_surface_catalog_and_operator(self):
         row = build_mijngeldzaken_import_row(
             self.dummy_processed_data,

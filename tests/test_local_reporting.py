@@ -108,6 +108,42 @@ class TestLocalFinancialReportingService(unittest.TestCase):
             self.assertEqual(cash["outflow"], 171.0)
             self.assertEqual(cash["netMovement"], -171.0)
 
+    def test_credit_note_reduces_expense_and_input_vat(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = self._ledger(temp_dir)
+            ledger.upsert_bookkeeping_record({
+                "documentId": 12,
+                "sourceType": "document",
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "targetSystem": "waveapps",
+                "targetAccount": "Office expenses",
+                "vendorName": "Office Shop",
+                "category": "Office",
+                "recordDate": "2026-04-05",
+                "amount": -60.5,
+                "vatAmount": -10.5,
+                "currency": "EUR",
+                "reviewRequired": False,
+                "reconciliationStatus": "not_started",
+                "metadata": {"documentType": "credit_note"},
+            })
+
+            report = LocalFinancialReportingService(ledger).generate(
+                from_date="2026-04-01",
+                to_date="2026-04-30",
+                include_rows=True,
+            )
+
+            profit_loss = report["reports"]["profitAndLoss"]["byCurrency"][0]
+            vat = report["reports"]["vat"]["byCurrency"][0]
+            self.assertEqual(profit_loss["expensesGross"], 110.5)
+            self.assertEqual(profit_loss["expensesNet"], 100.0)
+            self.assertEqual(vat["inputVat"], 10.5)
+            credit_row = next(row for row in report["rows"] if row["signedAmount"] == -60.5)
+            self.assertEqual(credit_row["grossAmount"], -60.5)
+            self.assertEqual(credit_row["vatAmount"], -10.5)
+
     def test_cash_basis_uses_only_bank_evidence_and_keeps_currencies_separate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = self._ledger(temp_dir)

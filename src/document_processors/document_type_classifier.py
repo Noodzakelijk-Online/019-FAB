@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 class DocumentTypeClassifier:
     """Conservatively infer the bookkeeping role of an OCR document."""
 
-    CLASSIFIER_VERSION = "deterministic_financial_document_type_v3"
+    CLASSIFIER_VERSION = "deterministic_financial_document_type_v4"
 
     _PATTERNS: Tuple[Tuple[str, float, Tuple[str, ...]], ...] = (
         (
@@ -107,7 +107,7 @@ class DocumentTypeClassifier:
         ("vendor_invoice", "invoice_number", 0.95),
     )
 
-    _POSTING_ELIGIBLE = {"receipt", "vendor_invoice"}
+    _POSTING_ELIGIBLE = {"credit_note", "receipt", "vendor_invoice"}
     _REVIEW_REQUIRED = {
         "bank_statement",
         "credit_note",
@@ -165,7 +165,6 @@ class DocumentTypeClassifier:
 
 NON_POSTING_DOCUMENT_TYPES = frozenset({
     "bank_statement",
-    "credit_note",
     "estimate",
     "government_correspondence",
     "insurance_policy",

@@ -157,6 +157,41 @@ class TestLocalBookkeepingRecordService(unittest.TestCase):
             )
             self.assertEqual(line_item["metadata"]["evidenceLineItemCount"], 2)
 
+    def test_credit_note_lines_follow_negative_ledger_direction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "credit-note-lines",
+                "originalFilename": "credit-note.pdf",
+                "documentType": "credit_note",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.50,
+                "vatAmount": 7.38,
+                "extractedData": {
+                    "document_type": "credit_note",
+                    "currency": "EUR",
+                    "line_items": [{
+                        "description": "Returned paper",
+                        "amount": 35.12,
+                        "taxAmount": 7.38,
+                    }],
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+            line_item = record["line_items"][0]
+
+            self.assertEqual(record["amount"], -42.5)
+            self.assertEqual(record["vat_amount"], -7.38)
+            self.assertEqual(line_item["amount"], -35.12)
+            self.assertEqual(line_item["tax_amount"], -7.38)
+            self.assertTrue(line_item["metadata"]["postingDirectionNormalized"])
+
     def test_impossible_legacy_vat_is_suppressed_but_preserved_as_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
