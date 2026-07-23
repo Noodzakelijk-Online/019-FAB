@@ -785,7 +785,7 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["total_amount"], 1.98)
             self.assertEqual(
                 document["metadata"]["processing"]["storedOcrReassessment"]["version"],
-                "financial_validation_v5",
+                "financial_validation_v6",
             )
             open_reasons = {
                 item["reason"]
@@ -905,11 +905,12 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(summary["resolvedReviewItems"], 0)
             document = ledger.get_document(document_id)
             self.assertEqual(document["processing_status"], "needs_review")
-            self.assertEqual(
-                document["metadata"]["processing"]["validation"]["fieldControls"][
-                    "transactionDate"
-                ]["reason"],
-                "implausible_record_date_year",
+            self.assertEqual(document["transaction_date"], "")
+            self.assertIn(
+                "Missing required field: transaction_date",
+                "; ".join(
+                    document["metadata"]["processing"]["validation"]["errors"]
+                ),
             )
             open_reasons = {
                 item["reason"]
@@ -1252,20 +1253,57 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                     "reason": reason,
                     "details": "Duplicate evidence requires review.",
                 })
+            confirmed_duplicate_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "confirmed-duplicate-praxis-review",
+                "originalFilename": "confirmed-duplicate-praxis.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+                "duplicateOfDocumentId": guarded_id,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": confirmed_duplicate_id,
+                    "reason": reason,
+                    "details": "Confirmed duplicate stays unchanged.",
+                })
 
             summary = LocalDocumentProcessor(
                 ledger,
             ).apply_trusted_category_suggestions()
 
-            self.assertEqual(summary["candidates"], 2)
-            self.assertEqual(summary["updatedDocuments"], 2)
-            self.assertEqual(summary["resolvedReviewItems"], 4)
-            self.assertEqual(summary["stillNeedsReview"], 1)
+            self.assertEqual(summary["candidates"], 3)
+            self.assertEqual(summary["updatedDocuments"], 3)
+            self.assertEqual(summary["resolvedReviewItems"], 6)
+            self.assertEqual(summary["stillNeedsReview"], 2)
             self.assertEqual(summary["readyDocuments"], 1)
             self.assertEqual(summary["externalSubmission"], "not_executed")
             duplicate_guarded = ledger.get_document(duplicate_guarded_id)
-            self.assertEqual(duplicate_guarded["category"], "Manual Review")
+            self.assertEqual(
+                duplicate_guarded["category"],
+                "Construction Materials & Tools",
+            )
             self.assertEqual(duplicate_guarded["processing_status"], "needs_review")
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in duplicate_guarded["review_items"]
+                    if item["status"] in {"pending", "in_review"}
+                },
+                {"duplicate_candidate"},
+            )
+            confirmed_duplicate = ledger.get_document(confirmed_duplicate_id)
+            self.assertEqual(confirmed_duplicate["category"], "Manual Review")
+            self.assertEqual(confirmed_duplicate["processing_status"], "needs_review")
 
             guarded = ledger.get_document(guarded_id)
             ready = ledger.get_document(ready_id)

@@ -46,7 +46,7 @@ PROCESSING_REVIEW_REASONS = {
     "validation_failed",
 }
 OCR_RECOVERY_VERSION = "illumination_normalization_v1"
-STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v5"
+STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v6"
 STORED_OCR_REASSESSMENT_REASONS = {
     "document_type_conflict",
     "low_confidence_categorization",
@@ -90,8 +90,6 @@ def trusted_category_suggestion_candidates(
             document_id=int(document["id"]),
             limit=100,
         )
-        if any(item.get("reason") == "duplicate_candidate" for item in open_reviews):
-            continue
         category_reviews = [
             item
             for item in open_reviews
@@ -330,7 +328,7 @@ class LocalDocumentProcessor:
         )
 
     def apply_trusted_category_suggestions(self, limit: int = 500) -> Dict[str, Any]:
-        """Apply exact built-in vendor taxonomy matches without closing other gates."""
+        """Apply exact vendor taxonomy matches while preserving every other gate."""
         candidates = self.trusted_category_suggestion_candidates(limit=limit)
         summary = {
             "candidates": len(candidates),

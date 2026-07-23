@@ -94,7 +94,7 @@ class FinancialFieldExtractor:
         "date of issue",
         "invoice date",
         "factuurdatum",
-        "datum:",
+        "datum",
         "besteldatum",
     )
     DATE_SECONDARY_LABELS = (
@@ -115,6 +115,7 @@ class FinancialFieldExtractor:
         (r"\bvodafone\b", "Vodafone"),
         (r"\bziggo\b", "Ziggo"),
         (r"\bvisser\s+assen\b", "Visser Assen"),
+        (r"\b(?:merchant|herchant)\s*[:.]?\s*1770001\b", "Lidl"),
     )
     VENDOR_HEADER_PATTERNS = (
         (
@@ -266,9 +267,12 @@ class FinancialFieldExtractor:
             for pattern in self.DATE_PATTERNS:
                 for match in re.finditer(pattern, line, flags=re.IGNORECASE):
                     normalized = self._normalize_date(match.group("date"))
-                    if not normalized:
+                    if not normalized or not self._plausible_transaction_date(normalized):
                         continue
-                    if any(label in context for label in self.DATE_PRIMARY_LABELS):
+                    if (
+                        any(label in context for label in self.DATE_PRIMARY_LABELS)
+                        or re.search(r"\bd?atum\b", context)
+                    ):
                         confidence = 0.95
                     elif any(label in context for label in self.DATE_SECONDARY_LABELS):
                         confidence = 0.82
@@ -586,6 +590,14 @@ class FinancialFieldExtractor:
             except ValueError:
                 continue
         return None
+
+    @staticmethod
+    def _plausible_transaction_date(value: str) -> bool:
+        try:
+            year = datetime.strptime(value, "%Y-%m-%d").year
+        except (TypeError, ValueError):
+            return False
+        return 1990 <= year <= datetime.now().year + 1
 
     @staticmethod
     def _looks_like_noise(line: str) -> bool:

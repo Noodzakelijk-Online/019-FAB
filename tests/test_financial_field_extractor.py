@@ -203,6 +203,20 @@ class TestFinancialFieldExtractor(unittest.TestCase):
                     "receipt_header_vendor_pattern",
                 )
 
+    def test_recovers_lidl_from_stable_terminal_merchant_identifier(self):
+        result = FinancialFieldExtractor().extract(
+            "Unreadable receipt header\n"
+            "Terminal: 2PR901 Herchant: 1770001\n"
+            "Totaal EUR 12,02"
+        )
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "Lidl")
+        self.assertEqual(result["field_confidences"]["vendor_name"], 0.9)
+        self.assertEqual(
+            result["field_evidence"]["vendor_name"]["source"],
+            "known_vendor_pattern",
+        )
+
     def test_payable_total_wins_over_discount_amount(self):
         result = FinancialFieldExtractor().extract(
             "T-Mobile\nKorting -9,99\n"
@@ -318,6 +332,32 @@ class TestFinancialFieldExtractor(unittest.TestCase):
 
         self.assertEqual(result["extracted_data"]["transaction_date"], "2023-07-07")
         self.assertEqual(result["field_confidences"]["transaction_date"], 0.8)
+
+    def test_explicit_ocr_datum_line_outranks_conflicting_unlabelled_date(self):
+        result = FinancialFieldExtractor().extract(
+            "ACTION\n13-07-2023 15:54:20\n"
+            "Totaal EUR 14,82\nDatum 23/07/2023"
+        )
+
+        self.assertEqual(result["extracted_data"]["transaction_date"], "2023-07-23")
+        self.assertEqual(result["field_confidences"]["transaction_date"], 0.95)
+
+    def test_implausible_labeled_date_falls_back_to_valid_receipt_date(self):
+        result = FinancialFieldExtractor().extract(
+            "ACTION\n10-06-2023 12:49:47\n"
+            "Totaal EUR 13,98\nDatum: 10/06/3038"
+        )
+
+        self.assertEqual(result["extracted_data"]["transaction_date"], "2023-06-10")
+        self.assertEqual(result["field_confidences"]["transaction_date"], 0.8)
+
+    def test_only_implausible_date_is_not_extracted(self):
+        result = FinancialFieldExtractor().extract(
+            "Kopie kaarthouder\nDatum: 16/07/2823\nTotaal EUR 7,46"
+        )
+
+        self.assertIsNone(result["extracted_data"]["transaction_date"])
+        self.assertEqual(result["field_confidences"]["transaction_date"], 0.0)
 
 
 if __name__ == "__main__":
