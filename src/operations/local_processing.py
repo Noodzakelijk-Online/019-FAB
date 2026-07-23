@@ -46,7 +46,7 @@ PROCESSING_REVIEW_REASONS = {
     "validation_failed",
 }
 OCR_RECOVERY_VERSION = "illumination_normalization_v1"
-STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v6"
+STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v7"
 STORED_OCR_REASSESSMENT_REASONS = {
     "document_type_conflict",
     "low_confidence_categorization",
@@ -1332,7 +1332,13 @@ class LocalDocumentProcessor:
                 extracted_data["document_type"] = semantic_document_type
             else:
                 semantic_document_type = str(document.get("document_type") or "unknown")
+            credit_note_amount_normalization = (
+                _normalize_credit_note_evidence_amounts(extracted_data, processed_data)
+                if semantic_document_type == "credit_note"
+                else None
+            )
             processed_data["document_type_classification"] = document_type_classification
+            processed_data["credit_note_amount_normalization"] = credit_note_amount_normalization
             processed_data["extracted_data"] = extracted_data
             non_posting = is_non_posting_document_type(semantic_document_type)
             if non_posting:
@@ -1449,6 +1455,7 @@ class LocalDocumentProcessor:
                     "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
                     "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
                     "documentTypeClassification": document_type_classification,
+                    "creditNoteAmountNormalization": credit_note_amount_normalization,
                 }
             },
         )
@@ -1536,6 +1543,7 @@ class LocalDocumentProcessor:
                 "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
                 "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
                 "documentTypeClassification": document_type_classification,
+                "creditNoteAmountNormalization": credit_note_amount_normalization,
                 "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
                 "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
                 "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
@@ -1553,6 +1561,7 @@ class LocalDocumentProcessor:
             "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
             "documentType": semantic_document_type,
             "documentTypeClassification": document_type_classification,
+            "creditNoteAmountNormalization": credit_note_amount_normalization,
             "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
             "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
             "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
@@ -1981,6 +1990,45 @@ def _sanitize_extracted_data(extracted_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         sanitized["vat_amount"] = vat_amount
     return sanitized
+
+
+def _normalize_credit_note_evidence_amounts(
+    extracted_data: Dict[str, Any],
+    processed_data: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Keep credit-note evidence positive while the ledger records its credit direction."""
+    field_evidence = (
+        dict(processed_data.get("field_evidence"))
+        if isinstance(processed_data.get("field_evidence"), dict)
+        else {}
+    )
+    normalized_fields = []
+    for field_name in ("total_amount", "vat_amount"):
+        value = extracted_data.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value >= 0:
+            continue
+        normalized_value = abs(float(value))
+        extracted_data[field_name] = normalized_value
+        evidence = (
+            dict(field_evidence.get(field_name))
+            if isinstance(field_evidence.get(field_name), dict)
+            else {}
+        )
+        evidence.update({
+            "normalization": "credit_note_absolute_evidence_amount",
+            "observedValue": value,
+            "normalizedValue": normalized_value,
+        })
+        field_evidence[field_name] = evidence
+        normalized_fields.append(field_name)
+    if not normalized_fields:
+        return None
+    processed_data["field_evidence"] = field_evidence
+    return {
+        "policy": "credit_note_absolute_evidence_amount",
+        "normalizedFields": normalized_fields,
+        "ledgerDirection": "credit",
+    }
 
 
 def _extracted_field_records(

@@ -16,7 +16,7 @@ class FinancialFieldExtractor:
     )
     MONTH_NAMES = (
         "jan(?:uary|uari)?|feb(?:ruary|ruari)?|mar(?:ch)?|maart|mrt|apr(?:il)?|"
-        "may|mei|jun(?:e|i)?|jul(?:y|i)?|aug(?:ust|ustus)?|sep(?:tember)?|"
+        "may|mei|jun(?:e|i)?|jur|jul(?:y|i)?|aug(?:ust|ustus)?|sep(?:tember)?|"
         "oct(?:ober)?|okt(?:ober)?|nov(?:ember)?|dec(?:ember)?"
     )
     DATE_PATTERNS = [
@@ -42,9 +42,11 @@ class FinancialFieldExtractor:
     PAYMENT_TOTAL_LABELS = [
         "pin",
         "vpay",
+        "bankpas",
         "amount charged",
         "amount paid",
         "paid today",
+        "betaling",
         "betaald",
     ]
     ROUNDING_TOTAL_LABELS = [
@@ -263,9 +265,14 @@ class FinancialFieldExtractor:
         candidates: List[Tuple[str, float, int]] = []
         previous_nonempty = ""
         for line_index, line in enumerate(text.splitlines()):
-            context = f"{previous_nonempty} {line}".lower()
+            search_line = re.sub(
+                r"(?<=[A-Za-z])[\]}](?=\s|\d)",
+                " ",
+                line,
+            )
+            context = f"{previous_nonempty} {search_line}".lower()
             for pattern in self.DATE_PATTERNS:
-                for match in re.finditer(pattern, line, flags=re.IGNORECASE):
+                for match in re.finditer(pattern, search_line, flags=re.IGNORECASE):
                     normalized = self._normalize_date(match.group("date"))
                     if not normalized or not self._plausible_transaction_date(normalized):
                         continue
@@ -279,8 +286,8 @@ class FinancialFieldExtractor:
                     else:
                         confidence = 0.65
                     candidates.append((normalized, confidence, line_index))
-            if line.strip():
-                previous_nonempty = line
+            if search_line.strip():
+                previous_nonempty = search_line
         if candidates:
             chosen = max(candidates, key=lambda candidate: (candidate[1], -candidate[2]))
             confidence = chosen[1]
@@ -292,11 +299,19 @@ class FinancialFieldExtractor:
 
     def _extract_total_amount(self, text: str) -> Tuple[Optional[float], Optional[str], float]:
         candidates: List[Tuple[float, Optional[str], float, int, int]] = []
+        vat_candidates: List[Tuple[float, Optional[str], float, int, int]] = []
         previous_nonempty = ""
         pending_total_label = False
-        has_total_label = any(label in text.lower() for label in self.TOTAL_LABELS)
+        normalized_text = "\n".join(
+            self._normalize_ocr_amount_labels(line)
+            for line in text.splitlines()
+        )
+        has_total_label = any(
+            label in normalized_text
+            for label in self.TOTAL_LABELS
+        )
         for line_index, line in enumerate(text.splitlines()):
-            lowered = line.lower()
+            lowered = self._normalize_ocr_amount_labels(line)
             line_amounts: List[Tuple[float, Optional[str], int]] = []
             for match in re.finditer(self.AMOUNT_PATTERN, line, flags=re.IGNORECASE):
                 if re.match(r"\s*%", line[match.end():]):
@@ -338,11 +353,15 @@ class FinancialFieldExtractor:
                 for label in self.PAYMENT_TOTAL_LABELS
             )
             has_refund_label = any(label in lowered for label in self.REFUND_TOTAL_LABELS)
-            vat_summary_line = bool(
-                re.search(r"\b(?:btw|vat)\b|\b\d{1,2}(?:[.,]\d+)?\s*%", lowered)
+            payment_metadata_line = bool(
+                re.search(
+                    r"\bauth(?:orization)?\.?\s*code\b|\bautorisatiecode\b",
+                    lowered,
+                )
             )
-            vat_summary_context = vat_summary_line or bool(
-                re.search(r"\b(?:btw|vat)\b|\b\d{1,2}(?:[.,]\d+)?\s*%", previous_nonempty)
+            vat_summary_line = self._is_vat_summary_context(lowered)
+            vat_summary_context = vat_summary_line or self._is_vat_summary_context(
+                previous_nonempty
             )
 
             if has_rounding_label:
@@ -365,8 +384,14 @@ class FinancialFieldExtractor:
                 )
                 if vat_candidate:
                     amount, currency, confidence, position = vat_candidate
-                    candidates.append((amount, currency, confidence, line_index, position))
-            elif had_pending_total_label and len(line_amounts) == 1:
+                    candidate = (amount, currency, confidence, line_index, position)
+                    candidates.append(candidate)
+                    vat_candidates.append(candidate)
+            elif (
+                had_pending_total_label
+                and len(line_amounts) == 1
+                and not payment_metadata_line
+            ):
                 amount, currency, position = line_amounts[0]
                 candidates.append((amount, currency, 0.88, line_index, position))
             else:
@@ -376,6 +401,20 @@ class FinancialFieldExtractor:
                 )
             if line.strip():
                 previous_nonempty = lowered
+
+        compact_payment_amounts = self._compact_payment_amounts(text)
+        for candidate in vat_candidates:
+            if any(
+                abs(abs(candidate[0]) - payment_amount) <= 0.01
+                for payment_amount in compact_payment_amounts
+            ):
+                candidates.append((
+                    candidate[0],
+                    candidate[1],
+                    1.0,
+                    candidate[3],
+                    candidate[4],
+                ))
 
         if not candidates:
             return None, None, 0.0
@@ -430,6 +469,20 @@ class FinancialFieldExtractor:
             first_amount, second_amount = values
             header_context = f"{previous_line} {line_text}"
             if (
+                first_amount > second_amount > 0
+                and second_amount <= first_amount * 0.3
+                and re.search(
+                    r"\b(?:btw|vat|bw)\b|\b(?:excl|incl|bruto|gross)\b",
+                    header_context,
+                )
+            ):
+                return (
+                    round(first_amount + second_amount, 2),
+                    line_amounts[0][1] or line_amounts[-1][1],
+                    0.94,
+                    line_amounts[0][2],
+                )
+            if (
                 second_amount > first_amount > 0
                 and re.search(r"\b(?:bruto|gross)\b", header_context)
             ):
@@ -455,6 +508,18 @@ class FinancialFieldExtractor:
                     line_amounts[-1][2],
                 )
         return None
+
+    @staticmethod
+    def _is_vat_summary_context(value: str) -> bool:
+        normalized = str(value or "").lower()
+        return bool(
+            re.search(r"\b(?:btw|vat)\b|\b\d{1,2}(?:[.,]\d+)?\s*%", normalized)
+            or re.search(
+                r"(?:\b(?:btw|vat|bw)\b.*\b(?:excl|incl)\b|"
+                r"\b(?:excl|incl)\b.*\b(?:btw|vat|bw)\b)",
+                normalized,
+            )
+        )
 
     def _extract_vat_amount(
         self,
@@ -483,6 +548,35 @@ class FinancialFieldExtractor:
             if candidates:
                 return candidates[-1], 0.75
         return None, 0.0
+
+    @staticmethod
+    def _normalize_ocr_amount_labels(value: str) -> str:
+        normalized = str(value or "").lower()
+        normalized = re.sub(
+            r"\b[fjt]otaa(?:l|[\]\[!|1)}])",
+            "totaal",
+            normalized,
+        )
+        normalized = re.sub(r"^\s*taal(?=\s*:)", "totaal", normalized)
+        normalized = re.sub(r"^\s*mota(?=\s*:)", "totaal", normalized)
+        normalized = re.sub(r"\bpri\s+javoordeel\b", "prijsvoordeel", normalized)
+        return normalized
+
+    @classmethod
+    def _compact_payment_amounts(cls, text: str) -> List[float]:
+        amounts = []
+        for line in str(text or "").splitlines():
+            match = re.search(
+                r"\bbankpas\s+(\d{3,6})\b",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            value = int(match.group(1)) / 100
+            if 0 < value <= 10000:
+                amounts.append(round(value, 2))
+        return amounts
 
     def _extract_reference(self, text: str, labels: List[str]) -> Tuple[Optional[str], float]:
         for label in labels:
@@ -553,6 +647,7 @@ class FinancialFieldExtractor:
             "april": "April",
             "mei": "May",
             "juni": "June",
+            "jur": "Jun",
             "juli": "July",
             "augustus": "August",
             "september": "September",
@@ -568,6 +663,8 @@ class FinancialFieldExtractor:
                 normalized_date,
                 flags=re.IGNORECASE,
             )
+        if re.search(r"[A-Za-z]", normalized_date):
+            normalized_date = re.sub(r"[-\s]+", " ", normalized_date).strip()
         candidates = [
             "%Y-%m-%d",
             "%Y/%m/%d",
@@ -583,6 +680,8 @@ class FinancialFieldExtractor:
             "%m/%d/%y",
             "%Y-%B-%d",
             "%Y-%b-%d",
+            "%Y %B %d",
+            "%Y %b %d",
             "%d %B %Y",
             "%d %b %Y",
             "%B %d, %Y",

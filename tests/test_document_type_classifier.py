@@ -57,6 +57,17 @@ class TestDocumentTypeClassifier(unittest.TestCase):
             "transaction_add",
         )
 
+    def test_dutch_refund_receipt_is_a_review_gated_credit_note(self):
+        result = self.classifier.classify(
+            "Praxis\nTERUGBETALING\nTerug (Vpay) 25,00",
+            {},
+        )
+
+        self.assertEqual(result["documentType"], "credit_note")
+        self.assertTrue(result["postingEligible"])
+        self.assertTrue(result["reviewRequired"])
+        self.assertFalse(is_non_posting_document_type(result["documentType"]))
+
     def test_unrecognized_document_remains_unknown(self):
         result = self.classifier.classify("General correspondence", {})
 
@@ -73,7 +84,7 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertFalse(result["postingEligible"])
         self.assertTrue(result["reviewRequired"])
         self.assertTrue(is_non_posting_document_type(result["documentType"]))
-        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v4")
+        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v5")
 
     def test_government_benefits_letter_is_non_posting_supporting_evidence(self):
         result = self.classifier.classify(

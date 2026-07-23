@@ -142,6 +142,40 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(result["extracted_data"]["total_amount"], 12.02)
         self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
 
+    def test_recovers_observed_ocr_total_label_variants(self):
+        cases = (
+            ("Lidl\ntaal: 16,54 EUR\ntotaal prijsvoordeel 6,65", 16.54),
+            ("Lidl\nfotaal 7,36\nfotaa) pri javoordeel 9,75", 7.36),
+            ("Lidl\nTotaa] 14,29", 14.29),
+            ("Lidl\nMota: 27,85 ER", 27.85),
+            ("Lidl\n/Totaa}: 6,48 Eup", 6.48),
+            ("Lidl\nfotaal 3,81\njotaal: 3,87 EUR", 3.87),
+        )
+
+        for text, expected in cases:
+            with self.subTest(text=text):
+                result = FinancialFieldExtractor().extract(text)
+                self.assertEqual(result["extracted_data"]["total_amount"], expected)
+                self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
+    def test_repairs_corrupted_total_only_with_payment_and_vat_consensus(self):
+        result = FinancialFieldExtractor().extract(
+            "Lidl\nfotaal 1,36\nbankpas 736\n"
+            "Bedr.Excl BW Bedr Incl\n89 6,75 0,61 1,6"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 7.36)
+        self.assertEqual(result["field_confidences"]["total_amount"], 1.0)
+
+    def test_payment_label_does_not_promote_timestamp_or_auth_code_to_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBETALING\n26/05/2023,17::31 Auth. code: B30014\n"
+            "Product 9,59"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+        self.assertEqual(result["field_confidences"]["total_amount"], 0.0)
+
     def test_insurance_coverage_limits_are_not_transaction_totals(self):
         result = FinancialFieldExtractor().extract(
             "Polisblad\nCataloguswaarde EUR 4.300,00\n"
@@ -234,6 +268,15 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(result["extracted_data"]["total_amount"], 24.95)
         self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
 
+    def test_bank_card_payment_wins_over_vat_summary(self):
+        result = FinancialFieldExtractor().extract(
+            "Lidl\nBankpas 5 _ 9,59\n"
+            "Bedr.Excl BTW Bedr Incl\nA 0 -5,25 0,00 -5,25"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 9.59)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
     def test_corrupted_gross_vat_value_is_recomputed_from_valid_parts(self):
         result = FinancialFieldExtractor().extract(
             "Shop\nBTW 21% 5,40 25,72 934,12"
@@ -324,6 +367,20 @@ class TestFinancialFieldExtractor(unittest.TestCase):
 
         self.assertEqual(dotted["extracted_data"]["transaction_date"], "2023-07-10")
         self.assertEqual(year_month["extracted_data"]["transaction_date"], "2023-07-07")
+
+    def test_recovers_observed_ocr_month_separator_variants(self):
+        cases = (
+            ("Lidl\n2023- jul 08\nTotaal 12,00", "2023-07-08"),
+            ("Lidl\n2023-jun- 02\nTotaal 12,00", "2023-06-02"),
+            ("Lidl\n2023--jur- 08\nTotaal 12,00", "2023-06-08"),
+            ("Lidl\nzondag 16 jul} 2023\nTotaal 12,00", "2023-07-16"),
+        )
+
+        for text, expected in cases:
+            with self.subTest(text=text):
+                result = FinancialFieldExtractor().extract(text)
+                self.assertEqual(result["extracted_data"]["transaction_date"], expected)
+                self.assertGreaterEqual(result["field_confidences"]["transaction_date"], 0.8)
 
     def test_unique_unlabelled_valid_date_has_review_threshold_confidence(self):
         result = FinancialFieldExtractor().extract(

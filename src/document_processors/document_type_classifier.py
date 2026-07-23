@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 class DocumentTypeClassifier:
     """Conservatively infer the bookkeeping role of an OCR document."""
 
-    CLASSIFIER_VERSION = "deterministic_financial_document_type_v4"
+    CLASSIFIER_VERSION = "deterministic_financial_document_type_v5"
 
     _PATTERNS: Tuple[Tuple[str, float, Tuple[str, ...]], ...] = (
         (
@@ -44,6 +44,7 @@ class DocumentTypeClassifier:
                 r"\bcreditnota\b",
                 r"\bcreditfactuur\b",
                 r"\bcredit\s+memo\b",
+                r"\bterugbetaling\b",
             ),
         ),
         (

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 import unittest
@@ -229,6 +230,61 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(record["metadata"]["evidenceAmount"], 42.5)
             self.assertTrue(record["review_required"])
             self.assertEqual(record["export_status"], "blocked_by_review")
+
+    def test_dutch_refund_uses_positive_evidence_and_negative_ledger_direction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credit_path = os.path.join(temp_dir, "praxis-refund.pdf")
+            source_bytes = b"%PDF-1.7\nretained refund source\n"
+            with open(credit_path, "wb") as handle:
+                handle.write(source_bytes)
+            source_hash_before = hashlib.sha256(source_bytes).hexdigest()
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "scanner-refund-1",
+                "originalFilename": "praxis-refund.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": credit_path,
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "ocrText": (
+                    "Praxis\nTERUGBETALING\nDatum: 07/07/2023\n"
+                    "Terug (Vpay) 25,00"
+                ),
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                processor_pipeline=RaisingPipeline(),
+            ).process_document(document_id, reuse_stored_ocr=True)
+
+            document = ledger.get_document(document_id)
+            record = document["bookkeeping_record"]
+            normalization = document["metadata"]["processing"][
+                "creditNoteAmountNormalization"
+            ]
+            total_evidence = document["metadata"]["processing"]["fieldEvidence"][
+                "total_amount"
+            ]
+            self.assertEqual(result["status"], "needs_review")
+            self.assertIn("credit_note_posting_review", result["reviewReasons"])
+            self.assertNotIn("validation_failed", result["reviewReasons"])
+            self.assertEqual(document["document_type"], "credit_note")
+            self.assertEqual(document["total_amount"], 25.0)
+            self.assertEqual(record["amount"], -25.0)
+            self.assertEqual(record["metadata"]["postingDirection"], "credit")
+            self.assertEqual(
+                normalization["policy"],
+                "credit_note_absolute_evidence_amount",
+            )
+            self.assertEqual(total_evidence["observedValue"], -25.0)
+            self.assertEqual(total_evidence["normalizedValue"], 25.0)
+            with open(credit_path, "rb") as handle:
+                self.assertEqual(
+                    hashlib.sha256(handle.read()).hexdigest(),
+                    source_hash_before,
+                )
 
     def test_order_confirmation_is_never_auto_ready_to_post(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -785,7 +841,7 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["total_amount"], 1.98)
             self.assertEqual(
                 document["metadata"]["processing"]["storedOcrReassessment"]["version"],
-                "financial_validation_v6",
+                "financial_validation_v7",
             )
             open_reasons = {
                 item["reason"]
