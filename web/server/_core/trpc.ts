@@ -1,5 +1,6 @@
 import { NOT_ADMIN_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
 import { initTRPC, TRPCError } from "@trpc/server";
+import type { Request } from "express";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { ENV } from "./env";
@@ -28,9 +29,9 @@ const requireUser = t.middleware(async opts => {
 
 export const protectedProcedure = t.procedure.use(requireUser);
 
-export function isLoopbackFabOperatorRequest(ctx: TrpcContext): boolean {
-  const remoteAddress = String(ctx.req.socket?.remoteAddress || "").toLowerCase();
-  const hostname = String(ctx.req.hostname || "").toLowerCase();
+export function isLoopbackRequest(req: Pick<Request, "hostname" | "socket">): boolean {
+  const remoteAddress = String(req.socket?.remoteAddress || "").toLowerCase();
+  const hostname = String(req.hostname || "").toLowerCase();
   const remoteIsLoopback = (
     remoteAddress === "::1"
     || remoteAddress === "127.0.0.1"
@@ -38,6 +39,10 @@ export function isLoopbackFabOperatorRequest(ctx: TrpcContext): boolean {
     || remoteAddress === "::ffff:127.0.0.1"
   );
   return remoteIsLoopback && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(hostname);
+}
+
+export function isLoopbackFabOperatorRequest(ctx: TrpcContext): boolean {
+  return isLoopbackRequest(ctx.req);
 }
 
 export const fabOperatorProcedure = t.procedure.use(

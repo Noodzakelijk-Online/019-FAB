@@ -12,6 +12,7 @@ import { webhookLimiter, relaxedLimiter } from "../lib/rateLimiter";
 import { createLogger } from "../lib/logger";
 import { registerFabOperationsRoutes } from "../fabOperations";
 import { registerFabRuntimeRoute } from "../fabRuntime";
+import { registerFabSourcePreviewRoutes } from "../fabSourcePreview";
 import { ENV } from "./env";
 
 const log = createLogger("Server");
@@ -78,6 +79,7 @@ async function startServer() {
   // ── OAuth callback ────────────────────────────────────────────
   registerOAuthRoutes(app);
   registerFabOperationsRoutes(app, relaxedLimiter);
+  registerFabSourcePreviewRoutes(app);
 
   // ── tRPC API with relaxed rate limiting ───────────────────────
   app.use(

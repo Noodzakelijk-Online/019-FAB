@@ -3,6 +3,7 @@ import binascii
 import hashlib
 import hmac
 import json
+import mimetypes
 import os
 import secrets
 from pathlib import Path
@@ -74,6 +75,21 @@ from src.utils.runtime_identity import local_instance_id
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 6 * 1024 * 1024
+LOCAL_SOURCE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024
+LOCAL_SOURCE_PREVIEW_MIME_TYPES = {
+    "application/json",
+    "application/pdf",
+    "application/xml",
+    "image/bmp",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+    "text/csv",
+    "text/plain",
+    "text/xml",
+}
 LOCAL_FORM_SESSION_KEY = "fab_local_form_session"
 REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
@@ -5562,6 +5578,66 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         if not document:
             return jsonify({"error": "Document not found"}), 404
         return jsonify(document)
+
+    @app.get("/api/documents/<int:document_id>/source")
+    def document_source(document_id: int):
+        document = ledger.get_document(document_id)
+        if not document:
+            return jsonify({"error": "Document not found"}), 404
+
+        source_path = str(document.get("storage_path") or "").strip()
+        if not source_path:
+            return jsonify({"error": "No retained source file is registered"}), 404
+        normalized_path = os.path.abspath(os.path.expandvars(os.path.expanduser(source_path)))
+        if not os.path.isfile(normalized_path):
+            return jsonify({"error": "The retained source file is unavailable"}), 404
+
+        expected_sha256 = str(document.get("content_sha256") or "").strip().lower()
+        if len(expected_sha256) != 64 or any(character not in "0123456789abcdef" for character in expected_sha256):
+            return jsonify({"error": "The retained source file has no valid integrity hash"}), 409
+
+        source_size = os.path.getsize(normalized_path)
+        if source_size > LOCAL_SOURCE_PREVIEW_MAX_BYTES:
+            return jsonify({
+                "error": "The retained source file exceeds the preview limit",
+                "maxBytes": LOCAL_SOURCE_PREVIEW_MAX_BYTES,
+            }), 413
+
+        digest = hashlib.sha256()
+        source_chunks = []
+        verified_size = 0
+        try:
+            with open(normalized_path, "rb") as source_file:
+                for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                    verified_size += len(chunk)
+                    if verified_size > LOCAL_SOURCE_PREVIEW_MAX_BYTES:
+                        return jsonify({
+                            "error": "The retained source file exceeds the preview limit",
+                            "maxBytes": LOCAL_SOURCE_PREVIEW_MAX_BYTES,
+                        }), 413
+                    digest.update(chunk)
+                    source_chunks.append(chunk)
+        except OSError:
+            return jsonify({"error": "The retained source file could not be verified"}), 409
+        if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            return jsonify({"error": "The retained source file failed its integrity check"}), 409
+
+        original_filename = str(document.get("original_filename") or Path(normalized_path).name)
+        declared_mime_type = str(document.get("mime_type") or "").split(";", 1)[0].strip().lower()
+        guessed_mime_type = str(mimetypes.guess_type(original_filename)[0] or "").lower()
+        preview_mime_type = (
+            declared_mime_type
+            if declared_mime_type in LOCAL_SOURCE_PREVIEW_MIME_TYPES
+            else guessed_mime_type
+        )
+        if preview_mime_type not in LOCAL_SOURCE_PREVIEW_MIME_TYPES:
+            return jsonify({"error": "This retained source file type cannot be previewed safely"}), 415
+
+        response = Response(b"".join(source_chunks), mimetype=preview_mime_type)
+        response.headers["Content-Disposition"] = "inline"
+        response.headers["X-FAB-Source-Integrity"] = "verified"
+        response.headers["X-FAB-Source-SHA256"] = expected_sha256
+        return response
 
     @app.get("/api/duplicates")
     def duplicate_candidates_api():

@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import tempfile
@@ -987,6 +988,85 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Bookkeeping, Routing, Export, Reconciliation", html)
             self.assertIn("workflow.document.imported", html)
             self.assertIn(f"/review/{review_id}/resolve", html)
+
+    def test_document_source_api_serves_only_checksum_verified_preview_bytes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            receipt_path = os.path.join(temp_dir, "receipt.txt")
+            source_bytes = b"Vendor: Office Shop\nTotal: EUR 42.50\n"
+            with open(receipt_path, "wb") as handle:
+                handle.write(source_bytes)
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "verified-source",
+                "originalFilename": "receipt.txt",
+                "mimeType": "text/plain",
+                "storagePath": receipt_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+                "processingStatus": "needs_review",
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            response = client.get(f"/api/documents/{document_id}/source")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.data, source_bytes)
+            self.assertEqual(response.mimetype, "text/plain")
+            self.assertIn("inline", response.headers["Content-Disposition"])
+            self.assertEqual(response.headers["X-FAB-Source-Integrity"], "verified")
+            self.assertEqual(
+                response.headers["X-FAB-Source-SHA256"],
+                hashlib.sha256(source_bytes).hexdigest(),
+            )
+            self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+            response.close()
+
+            with open(receipt_path, "ab") as handle:
+                handle.write(b"tampered")
+            tampered = client.get(f"/api/documents/{document_id}/source")
+
+            self.assertEqual(tampered.status_code, 409)
+            self.assertNotIn(source_bytes, tampered.data)
+            self.assertIn("failed its integrity check", tampered.get_json()["error"])
+            tampered.close()
+
+    def test_document_source_api_fails_closed_for_unhashed_unsafe_or_oversized_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            source_bytes = b"<html>active source</html>"
+            source_path = os.path.join(temp_dir, "source.html")
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
+            unhashed_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "unhashed-source",
+                "originalFilename": "source.html",
+                "mimeType": "text/html",
+                "storagePath": source_path,
+            })
+            unsafe_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "unsafe-source",
+                "originalFilename": "source.html",
+                "mimeType": "text/html",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            unhashed = client.get(f"/api/documents/{unhashed_id}/source")
+            unsafe = client.get(f"/api/documents/{unsafe_id}/source")
+            with patch("src.operations.local_api.LOCAL_SOURCE_PREVIEW_MAX_BYTES", 3):
+                oversized = client.get(f"/api/documents/{unsafe_id}/source")
+
+            self.assertEqual(unhashed.status_code, 409)
+            self.assertIn("integrity hash", unhashed.get_json()["error"])
+            self.assertEqual(unsafe.status_code, 415)
+            self.assertEqual(oversized.status_code, 413)
 
     def test_api_review_resolution_applies_corrections_and_exposes_rules(self):
         with tempfile.TemporaryDirectory() as temp_dir:

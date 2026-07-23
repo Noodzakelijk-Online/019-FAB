@@ -251,6 +251,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const [form, setForm] = useState(() => emptyForm());
   const [error, setError] = useState("");
   const [selectedDuplicateCandidateId, setSelectedDuplicateCandidateId] = useState(0);
+  const [previewDocumentId, setPreviewDocumentId] = useState(0);
 
   useEffect(() => {
     if (!item) return;
@@ -287,6 +288,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         ? current
         : count(duplicateCandidates[0]?.id)
     ));
+    setPreviewDocumentId(count(item.documentId));
     setError("");
   }, [copy, defaultApplyToMatchingVendor, item]);
 
@@ -324,6 +326,12 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     0,
     duplicateCandidates.findIndex((candidate) => count(candidate.id) === count(duplicateCandidate?.id)),
   );
+  const sourceDocumentId = count(item.documentId);
+  const comparisonDocumentId = count(duplicateCandidate?.candidateDocumentId);
+  const selectedPreviewDocumentId = previewDocumentId || sourceDocumentId;
+  const previewFilename = selectedPreviewDocumentId === comparisonDocumentId
+    ? text(candidateDocument.filename, copy("Comparison source", "Vergelijkingsbron"))
+    : text(document.filename, copy("Source document", "Brondocument"));
   const isBusy = resolvingReviewId !== null;
   const typeDecisionRequired = reviewItems.some((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")));
   const selectedNonPosting = NON_POSTING_DOCUMENT_TYPES.has(form.documentType);
@@ -432,6 +440,40 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           <button ref={closeRef} className="fab-icon-button" onClick={onClose} aria-label={copy("Close review", "Controle sluiten")} title={copy("Close review", "Controle sluiten")}><X aria-hidden="true" /></button>
         </div>
         <div className="fab-detail-body">
+          {sourceDocumentId > 0 && (
+            <section className={`fab-source-preview${comparisonDocumentId > 0 && comparisonDocumentId !== sourceDocumentId ? " has-comparison" : ""}`} aria-labelledby="fab-source-preview-title">
+              <div className="fab-source-preview-heading">
+                <div>
+                  <span>{copy("Retained evidence", "Bewaard bewijs")}</span>
+                  <h3 id="fab-source-preview-title">{copy("Source document", "Brondocument")}</h3>
+                </div>
+                <strong><ShieldCheck aria-hidden="true" /> {copy("Integrity checked", "Integriteit gecontroleerd")}</strong>
+              </div>
+              {comparisonDocumentId > 0 && comparisonDocumentId !== sourceDocumentId && (
+                <div className="fab-source-preview-switcher" role="group" aria-label={copy("Source document selection", "Selectie brondocument")}>
+                  <button type="button" className={selectedPreviewDocumentId === sourceDocumentId ? "is-active" : ""} aria-pressed={selectedPreviewDocumentId === sourceDocumentId} onClick={() => setPreviewDocumentId(sourceDocumentId)}>
+                    {copy("Current", "Huidig")} #{sourceDocumentId}
+                  </button>
+                  <button type="button" className={selectedPreviewDocumentId === comparisonDocumentId ? "is-active" : ""} aria-pressed={selectedPreviewDocumentId === comparisonDocumentId} onClick={() => setPreviewDocumentId(comparisonDocumentId)}>
+                    {copy("Candidate", "Kandidaat")} #{comparisonDocumentId}
+                  </button>
+                </div>
+              )}
+              <iframe
+                key={selectedPreviewDocumentId}
+                src={`/api/fab/source/${selectedPreviewDocumentId}`}
+                title={copy(`Source preview: ${previewFilename}`, `Bronvoorbeeld: ${previewFilename}`)}
+                referrerPolicy="no-referrer"
+              />
+              <div className="fab-source-preview-footer">
+                <span>{previewFilename}</span>
+                <a href={`/api/fab/source/${selectedPreviewDocumentId}`} target="_blank" rel="noreferrer">
+                  {copy("Open separately", "Apart openen")} <ArrowUpRight aria-hidden="true" />
+                </a>
+              </div>
+            </section>
+          )}
+
           <div className="fab-review-evidence-links">
             <a className="fab-secondary-button" href={`${localApiEndpoint}${text(item.reviewPath, "/#review")}`} target="_blank" rel="noreferrer"><FileSearch aria-hidden="true" /> {copy("Open FAB evidence", "Open FAB-bewijs")}</a>
             {text(document.sourceUrl, "") && <a className="fab-secondary-button" href={text(document.sourceUrl)} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {copy("Open Drive source", "Open Drive-bron")}</a>}
