@@ -158,6 +158,146 @@ class TestDuplicateDetector(unittest.TestCase):
         self.assertTrue(result["is_duplicate"])
         self.assertEqual(result["reason"], "exact_fingerprint_match")
 
+    def test_conflicting_invoice_numbers_disprove_matching_accounting_triple(self):
+        result = self.detector.is_duplicate(
+            {
+                "extracted_data": {
+                    "vendor_name": "Vendor BV",
+                    "invoice_number": "INV-2026-0043",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 37.68,
+                }
+            },
+            [
+                {
+                    "id": "different-invoice",
+                    "extracted_data": {
+                        "vendor_name": "Vendor BV",
+                        "invoice_number": "INV-2026-0042",
+                        "transaction_date": "2026-06-02",
+                        "total_amount": 37.68,
+                    },
+                }
+            ],
+        )
+
+        self.assertFalse(result["is_duplicate"])
+        self.assertEqual(
+            result["identity_conflicts"],
+            [{"document_id": "different-invoice", "fields": ["invoice_number"]}],
+        )
+
+    def test_matching_labeled_transaction_references_corroborate_receipt(self):
+        result = self.detector.is_duplicate(
+            {
+                "ocr_text": "Transactie nr.: 10632674",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "total_amount": 31.12,
+                },
+            },
+            [
+                {
+                    "id": "same-receipt",
+                    "ocr_text": "Transactie: 10632674",
+                    "extracted_data": {
+                        "vendor_name": "Praxis",
+                        "total_amount": 31.12,
+                    },
+                }
+            ],
+        )
+
+        self.assertTrue(result["is_duplicate"])
+        self.assertIn(
+            "transaction_reference",
+            result["matched_identity_fields"],
+        )
+
+    def test_conflicting_transaction_references_disprove_same_day_same_total(self):
+        result = self.detector.is_duplicate(
+            {
+                "ocr_text": "Periode: 3191 Transactie: 00007980",
+                "extracted_data": {
+                    "vendor_name": "Hornbach",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 59.60,
+                },
+            },
+            [
+                {
+                    "id": "different-receipt",
+                    "ocr_text": "Periode: 3191 Transactie: 00007979",
+                    "extracted_data": {
+                        "vendor_name": "Hornbach",
+                        "transaction_date": "2026-06-02",
+                        "total_amount": 59.60,
+                    },
+                }
+            ],
+        )
+
+        self.assertFalse(result["is_duplicate"])
+        self.assertEqual(
+            result["identity_conflicts"],
+            [
+                {
+                    "document_id": "different-receipt",
+                    "fields": ["transaction_reference"],
+                }
+            ],
+        )
+
+    def test_truncated_transaction_reference_does_not_disprove_duplicate(self):
+        result = self.detector.is_duplicate(
+            {
+                "ocr_text": "Transactie nr.: 10643617",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 25.0,
+                },
+            },
+            [
+                {
+                    "id": "same-credit-note",
+                    "ocr_text": "Transactie nr.: 10643",
+                    "extracted_data": {
+                        "vendor_name": "Praxis",
+                        "transaction_date": "2026-06-02",
+                        "total_amount": 25.0,
+                    },
+                }
+            ],
+        )
+
+        self.assertTrue(result["is_duplicate"])
+        self.assertNotIn("identity_conflicts", result)
+
+    def test_multiline_receipt_reference_is_recovered_from_ocr(self):
+        result = self.detector.is_duplicate(
+            {
+                "ocr_text": "Receipt number\n2736-6064",
+                "extracted_data": {
+                    "vendor_name": "BrainForce Co.",
+                    "total_amount": 29.0,
+                },
+            },
+            [
+                {
+                    "id": "same-receipt",
+                    "ocr_text": "Receipt #2736-6064",
+                    "extracted_data": {
+                        "vendor_name": "BrainForce Co.",
+                        "total_amount": 29.0,
+                    },
+                }
+            ],
+        )
+
+        self.assertTrue(result["is_duplicate"])
+        self.assertIn("receipt_number", result["matched_identity_fields"])
+
     def test_missing_dates_do_not_receive_similarity_credit(self):
         score = self.detector.similarity_score(
             {"extracted_data": {"vendor_name": "Vendor A", "total_amount": 10}},
