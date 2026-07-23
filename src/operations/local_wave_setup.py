@@ -15,6 +15,17 @@ from src.security.local_secret_store import (
     apply_local_wave_settings,
 )
 
+WAVE_DEVELOPER_TOKEN_GUIDE_URL = (
+    "https://developer.waveapps.com/hc/en-us/articles/"
+    "360020596571-Permitted-Use-Wave-Business-Owners"
+)
+WAVE_GRAPHQL_CLIENT_GUIDE_URL = (
+    "https://developer.waveapps.com/hc/en-us/articles/360018856171-Clients"
+)
+WAVE_OAUTH_SCOPE_GUIDE_URL = (
+    "https://developer.waveapps.com/hc/en-us/articles/360032818132-OAuth-Scopes"
+)
+
 
 class LocalWaveSetupService:
     """Manage local Wave credentials and verified account mappings without exposing tokens."""
@@ -97,6 +108,17 @@ class LocalWaveSetupService:
             status = "needs_validation"
         else:
             status = "needs_mapping"
+        activation = _activation_status(
+            status=status,
+            token_configured=token_configured,
+            business_id=business_id,
+            accounts=accounts,
+            mapping=mapping,
+            category_coverage_complete=category_coverage_complete,
+            unmapped_categories=[
+                intent["category"] for intent in in_use_intents if not intent["mapped"]
+            ],
+        )
         return {
             "success": True,
             "status": status,
@@ -127,6 +149,12 @@ class LocalWaveSetupService:
             },
             "lastValidatedAt": discovery.get("validatedAt"),
             "validatedBusiness": discovery.get("business"),
+            "activation": activation,
+            "documentation": {
+                "ownBusinessAccessToken": WAVE_DEVELOPER_TOKEN_GUIDE_URL,
+                "graphqlClient": WAVE_GRAPHQL_CLIENT_GUIDE_URL,
+                "oauthScopes": WAVE_OAUTH_SCOPE_GUIDE_URL,
+            },
             "externalSubmission": "not_executed",
         }
 
@@ -276,3 +304,106 @@ def _is_expense_account(account: Dict[str, Any]) -> bool:
     value = str(subtype.get("value") or "").upper()
     name = str(subtype.get("name") or "").casefold()
     return "EXPENSE" in value or "expense" in name or "kosten" in name
+
+
+def _activation_status(
+    *,
+    status: str,
+    token_configured: bool,
+    business_id: str,
+    accounts: list[Dict[str, Any]],
+    mapping: Dict[str, Any],
+    category_coverage_complete: bool,
+    unmapped_categories: list[str],
+) -> Dict[str, Any]:
+    connection_complete = token_configured and bool(business_id)
+    validation_complete = connection_complete and bool(accounts)
+    anchor_complete = validation_complete and mapping.get("anchorAccount", {}).get("verified") is True
+    mapping_complete = (
+        anchor_complete
+        and mapping.get("verified") is True
+        and category_coverage_complete
+    )
+    step_specs = [
+        {
+            "id": "connection",
+            "label": "Store Wave token and business ID",
+            "complete": connection_complete,
+        },
+        {
+            "id": "validation",
+            "label": "Validate business and chart of accounts",
+            "complete": validation_complete,
+        },
+        {
+            "id": "anchor_mapping",
+            "label": "Select the verified funding account",
+            "complete": anchor_complete,
+        },
+        {
+            "id": "category_mapping",
+            "label": "Map every FAB category currently in use",
+            "complete": mapping_complete,
+        },
+    ]
+    current_index = next(
+        (index for index, step in enumerate(step_specs) if not step["complete"]),
+        len(step_specs),
+    )
+    steps = [
+        {
+            **step,
+            "status": (
+                "complete"
+                if step["complete"]
+                else "current"
+                if index == current_index
+                else "pending"
+            ),
+        }
+        for index, step in enumerate(step_specs)
+    ]
+    next_action = _activation_next_action(
+        status,
+        business_id=business_id,
+        anchor_complete=anchor_complete,
+        unmapped_categories=unmapped_categories,
+    )
+    return {
+        "currentStep": steps[current_index]["id"] if current_index < len(steps) else "complete",
+        "nextAction": next_action,
+        "steps": steps,
+        "canValidate": connection_complete,
+        "canSaveMapping": validation_complete,
+        "canPrepareWaveDrafts": mapping_complete,
+        "canSubmitExternally": False,
+        "externalSubmission": "approval_gated",
+    }
+
+
+def _activation_next_action(
+    status: str,
+    *,
+    business_id: str,
+    anchor_complete: bool,
+    unmapped_categories: list[str],
+) -> str:
+    if status == "needs_token":
+        return "Create a user-owned Wave access token and store it in FAB."
+    if status == "needs_business_id":
+        return "Enter the Wave business ID that FAB is allowed to operate."
+    if status == "needs_validation":
+        return "Run read-only Wave validation to load the live chart of accounts."
+    if status == "needs_mapping":
+        if not anchor_complete:
+            return "Select a verified Wave funding account."
+        if unmapped_categories:
+            preview = ", ".join(unmapped_categories[:3])
+            suffix = "" if len(unmapped_categories) <= 3 else f" and {len(unmapped_categories) - 3} more"
+            return f"Map the Wave expense account for: {preview}{suffix}."
+        return "Repair the invalid Wave posting-account mapping and validate it again."
+    if status == "ready":
+        return "Review and approve one prepared Wave draft before enabling routine delivery."
+    if business_id:
+        return "Inspect the Wave setup status before continuing."
+    return "Configure the Wave downstream target."

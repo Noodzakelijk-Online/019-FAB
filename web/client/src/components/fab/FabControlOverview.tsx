@@ -69,7 +69,7 @@ export function FabControlOverview({
 }: FabControlOverviewProps) {
   const { lang, copy, status, dateLocale } = useFabLocale();
   const operations = record(health.operations);
-  const healthStatus = text(operations.status || health.status, connected ? "unknown" : "disconnected");
+  const healthStatus = text(health.status || operations.status, connected ? "unknown" : "disconnected");
   const closeStatus = text(closeReadiness.status, "unavailable");
   const canRun = bool(autonomy.canRunAutonomously);
   const pendingReview = metrics.pendingReview;

@@ -17,8 +17,8 @@ import {
 import { useFabLocale } from "./fabLocale";
 import { bool, text, type FabRecord } from "./fabView";
 
-const WAVE_TOKEN_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360020596571-Permitted-Use-Wave-Business-Owners";
-const WAVE_SCOPE_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360032818132-OAuth-Scopes";
+const FALLBACK_WAVE_TOKEN_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360020596571-Permitted-Use-Wave-Business-Owners";
+const FALLBACK_WAVE_SCOPE_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360032818132-OAuth-Scopes";
 
 export type FabWaveSetupSaveInput = {
   targetSystem?: "waveapps_business" | "waveapps_personal";
@@ -62,6 +62,9 @@ export function FabWaveSetupDrawer({
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const mapping = record(setup.mapping);
+  const documentation = record(setup.documentation);
+  const waveTokenGuideUrl = text(documentation.ownBusinessAccessToken, FALLBACK_WAVE_TOKEN_GUIDE_URL);
+  const waveScopeGuideUrl = text(documentation.oauthScopes, FALLBACK_WAVE_SCOPE_GUIDE_URL);
   const anchorMapping = record(mapping.anchorAccount);
   const defaultMapping = record(mapping.defaultCategoryAccount);
   const configuredCategoryMappings = records(mapping.categoryAccounts);
@@ -240,8 +243,8 @@ export function FabWaveSetupDrawer({
                 <strong>{copy("Create your Wave access token", "Maak je Wave-toegangstoken")}</strong>
                 <span>{copy("For your own Wave business, create an application in Wave's Developer Portal and generate its long-lived access token. FAB never reads your Wave password or browser session.", "Maak voor je eigen Wave-bedrijf een toepassing in het Wave Developer Portal en genereer daar het langlopende toegangstoken. FAB leest nooit je Wave-wachtwoord of browsersessie.")}</span>
               </div>
-              <a href={WAVE_TOKEN_GUIDE_URL} target="_blank" rel="noreferrer">{copy("Open official token guide", "Open officiele tokenhandleiding")} <ArrowUpRight aria-hidden="true" /></a>
-              <small>{copy("For OAuth applications, current FAB workflows need business:read, account:read, customer:read, product:read, invoice:read, and transaction:write. Validation is read-only; posting remains approval-gated.", "Huidige FAB-workflows vereisen voor OAuth-toepassingen business:read, account:read, customer:read, product:read, invoice:read en transaction:write. Validatie is alleen-lezen; boeken blijft goedkeuringsplichtig.")} <a href={WAVE_SCOPE_GUIDE_URL} target="_blank" rel="noreferrer">{copy("Review scopes", "Bekijk scopes")} <ArrowUpRight aria-hidden="true" /></a></small>
+              <a href={waveTokenGuideUrl} target="_blank" rel="noreferrer">{copy("Open official token guide", "Open officiele tokenhandleiding")} <ArrowUpRight aria-hidden="true" /></a>
+              <small>{copy("For OAuth applications, current FAB workflows need business:read, account:read, customer:read, product:read, invoice:read, and transaction:write. Validation is read-only; posting remains approval-gated.", "Huidige FAB-workflows vereisen voor OAuth-toepassingen business:read, account:read, customer:read, product:read, invoice:read en transaction:write. Validatie is alleen-lezen; boeken blijft goedkeuringsplichtig.")} <a href={waveScopeGuideUrl} target="_blank" rel="noreferrer">{copy("Review scopes", "Bekijk scopes")} <ArrowUpRight aria-hidden="true" /></a></small>
             </div>
             <form className="fab-wave-form" onSubmit={(event) => { event.preventDefault(); void saveConnection(); }}>
               <label><span>{copy("Wave business ID", "Wave-bedrijfs-ID")}</span><input value={businessId} onChange={(event) => setBusinessId(event.target.value)} autoComplete="off" spellCheck={false} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" disabled={busy || bool(environmentOverrides.businessId)} /></label>

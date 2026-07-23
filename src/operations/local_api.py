@@ -3818,11 +3818,31 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def health():
         operations_health = LocalOperationsHealth(ledger, config).summarize()
         readiness = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions).compact()
+        wave_setup = LocalWaveSetupService(config).status(ledger, "waveapps_business")
+        wave_activation = wave_setup.get("activation") if isinstance(wave_setup.get("activation"), dict) else {}
+        core_target = {
+            "id": "waveapps_business",
+            "label": "Wave - Noodzakelijk Online",
+            "status": wave_setup.get("status"),
+            "ready": wave_setup.get("ready") is True,
+            "currentStep": wave_activation.get("currentStep"),
+            "nextAction": wave_activation.get("nextAction"),
+            "externalSubmission": "not_executed",
+        }
+        readiness["coreTarget"] = core_target
+        if not core_target["ready"]:
+            readiness["status"] = _combined_health_status(readiness.get("status"), "attention")
+            readiness["issueCount"] = int(readiness.get("issueCount") or 0) + 1
+            readiness["attentionIssues"] = int(readiness.get("attentionIssues") or 0) + 1
+        health_status = _combined_health_status(
+            operations_health.get("status"),
+            readiness.get("status"),
+        )
         return jsonify({
             "service": "fab-ledger-api",
             "apiVersion": "1",
             "instanceId": local_instance_id(Path(__file__).resolve().parents[2]),
-            "status": operations_health["status"],
+            "status": health_status,
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
             "intakePaths": app.config["FAB_LOCAL_INTAKE_PATHS"],
@@ -7197,6 +7217,18 @@ def _autonomy_service(
         intake_paths=intake_paths,
         intake_extensions=intake_extensions,
     )
+
+
+def _combined_health_status(*statuses: Any) -> str:
+    rank = {
+        "ok": 0,
+        "ready": 0,
+        "attention": 1,
+        "attention_required": 1,
+        "blocked": 2,
+    }
+    normalized = [str(status or "ok") for status in statuses]
+    return max(normalized, key=lambda status: rank.get(status, 1))
 
 
 def _workflow_recovery_service(

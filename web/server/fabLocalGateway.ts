@@ -252,7 +252,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       details: waveSetup.ready === true
         ? "Wave business and account mappings were verified from the live chart of accounts."
         : "Connect Wave, validate the business, and map the posting accounts.",
-      nextAction: waveSetupNextAction(setupStatus),
+      nextAction: stringValue(asRecord(waveSetup.activation)?.nextAction, waveSetupNextAction(setupStatus)),
     };
   });
 
@@ -531,7 +531,7 @@ function waveSetupNextAction(status: string): string {
   if (status === "needs_token") return "Add the user-owned Wave access token.";
   if (status === "needs_business_id") return "Select the Wave business to operate.";
   if (status === "needs_validation") return "Validate the Wave business and load its chart of accounts.";
-  if (status === "needs_mapping") return "Map the verified bank and default expense accounts.";
+  if (status === "needs_mapping") return "Map the verified funding account and every FAB category currently in use.";
   if (status === "ready") return "Wave is ready for governed bookkeeping operations.";
   return "Review the Wave connection setup.";
 }

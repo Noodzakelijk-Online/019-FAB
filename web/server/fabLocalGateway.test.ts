@@ -151,7 +151,7 @@ describe("FAB local API gateway", () => {
         status: "needs_mapping",
         configured: true,
         ready: false,
-        nextAction: "Map the verified bank and default expense accounts.",
+        nextAction: "Map the verified funding account and every FAB category currently in use.",
       }),
       expect.objectContaining({
         id: "hai",

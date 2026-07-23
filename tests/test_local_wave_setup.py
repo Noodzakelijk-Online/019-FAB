@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 
+from src.operations.local_api import create_app
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_wave_setup import LocalWaveSetupService
 
@@ -33,6 +34,9 @@ class TestLocalWaveSetupService(unittest.TestCase):
 
         self.assertEqual(saved["status"], "needs_validation")
         self.assertTrue(saved["accessTokenConfigured"])
+        self.assertEqual(saved["activation"]["currentStep"], "validation")
+        self.assertTrue(saved["activation"]["canValidate"])
+        self.assertFalse(saved["activation"]["canPrepareWaveDrafts"])
         self.assertNotIn("private-wave-token", json.dumps(saved))
 
         self._record_discovery()
@@ -49,6 +53,9 @@ class TestLocalWaveSetupService(unittest.TestCase):
 
         self.assertEqual(mapped["status"], "ready")
         self.assertTrue(mapped["ready"])
+        self.assertEqual(mapped["activation"]["currentStep"], "complete")
+        self.assertTrue(mapped["activation"]["canPrepareWaveDrafts"])
+        self.assertFalse(mapped["activation"]["canSubmitExternally"])
         self.assertTrue(mapped["mapping"]["verified"])
         self.assertEqual(mapped["accountOptions"]["anchor"][0]["id"], "anchor-1")
         self.assertEqual(mapped["accountOptions"]["expense"][0]["id"], "expense-1")
@@ -127,6 +134,8 @@ class TestLocalWaveSetupService(unittest.TestCase):
 
         self.assertEqual(result["status"], "needs_mapping")
         self.assertFalse(result["ready"])
+        self.assertEqual(result["activation"]["currentStep"], "category_mapping")
+        self.assertIn("Office Supplies", result["activation"]["nextAction"])
         self.assertEqual(
             result["mappingCoverage"]["unmappedInUseCategories"],
             ["Office Supplies"],
@@ -148,6 +157,30 @@ class TestLocalWaveSetupService(unittest.TestCase):
         self.assertEqual(result["status"], "needs_token")
         self.assertFalse(result["accessTokenConfigured"])
         self.assertEqual(result["businessId"], "business-1")
+
+    def test_health_reports_unready_wave_core_target_as_attention(self):
+        app_config = dict(self.config)
+        app_config["fab_local_ledger_path"] = os.path.join(
+            self.temp_dir.name,
+            "health.sqlite3",
+        )
+        health = create_app(app_config).test_client().get("/api/health").get_json()
+
+        self.assertEqual(health["operations"]["status"], "ok")
+        self.assertEqual(health["status"], "attention")
+        self.assertEqual(health["readiness"]["status"], "attention")
+        self.assertEqual(
+            health["readiness"]["coreTarget"],
+            {
+                "id": "waveapps_business",
+                "label": "Wave - Noodzakelijk Online",
+                "status": "needs_token",
+                "ready": False,
+                "currentStep": "connection",
+                "nextAction": "Create a user-owned Wave access token and store it in FAB.",
+                "externalSubmission": "not_executed",
+            },
+        )
 
     def _record_discovery(self):
         self.ledger.record_wave_operation_snapshot({
