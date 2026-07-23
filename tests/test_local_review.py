@@ -399,16 +399,24 @@ class TestLocalReviewService(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
 
-            def register(source_id, vendor, target="waveapps_business", duplicate_of=None):
+            def register(
+                source_id,
+                vendor,
+                target="waveapps_business",
+                duplicate_of=None,
+                transaction_date="2026-06-28",
+                total_amount=25.0,
+            ):
                 document_id = ledger.register_document({
                     "source": "google_drive",
                     "sourceDocumentId": source_id,
                     "originalFilename": f"{source_id}.pdf",
+                    "storagePath": f"C:/retained-sources/{source_id}.pdf",
                     "processingStatus": "needs_review",
                     "vendorName": vendor,
                     "category": "Manual Review",
-                    "transactionDate": "2026-06-28",
-                    "totalAmount": 25.0,
+                    "transactionDate": transaction_date,
+                    "totalAmount": total_amount,
                     "duplicateOfDocumentId": duplicate_of,
                     "metadata": {"targetSystem": target},
                 })
@@ -425,7 +433,12 @@ class TestLocalReviewService(unittest.TestCase):
                 return document_id, review_id
 
             primary_id, primary_review_id = register("primary", "T-Mobile")
-            matching_id, _ = register("matching", "  t-mobile  ")
+            matching_id, _ = register(
+                "matching",
+                "  t-mobile  ",
+                transaction_date="2026-06-27",
+                total_amount=37.5,
+            )
             approximate_id, _ = register("approximate", "T Mobile")
             personal_id, _ = register("personal", "T-Mobile", target="waveapps_personal")
             duplicate_id, _ = register("duplicate", "T-Mobile", duplicate_of=primary_id)
@@ -477,8 +490,12 @@ class TestLocalReviewService(unittest.TestCase):
             matching = ledger.get_document(matching_id)
             self.assertEqual(matching["vendor_name"], "  t-mobile  ")
             self.assertEqual(matching["category"], "Operations | Telecommunications")
-            self.assertEqual(matching["transaction_date"], "2026-06-28")
-            self.assertEqual(matching["total_amount"], 25.0)
+            self.assertEqual(matching["transaction_date"], "2026-06-27")
+            self.assertEqual(matching["total_amount"], 37.5)
+            self.assertEqual(
+                matching["storage_path"],
+                "C:/retained-sources/matching.pdf",
+            )
             self.assertEqual(matching["processing_status"], "needs_review")
             self.assertEqual(
                 [item["id"] for item in ledger.list_review_items(

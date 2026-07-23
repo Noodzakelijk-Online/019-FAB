@@ -18,6 +18,7 @@ import {
   matchesReviewTriage,
   reviewTriageCounts,
   reviewTriageFilters,
+  vendorReviewBatches,
   type FabReviewTriageFilter,
 } from "./fabReviewTriage";
 import {
@@ -81,9 +82,18 @@ export function FabReviewWorkspace({
   const [selectedId, setSelectedId] = useState("");
   const [reviewFilter, setReviewFilter] = useState<FabReviewTriageFilter>("all");
   const triageCounts = useMemo(() => reviewTriageCounts(workItems), [workItems]);
+  const vendorBatches = useMemo(() => vendorReviewBatches(workItems), [workItems]);
   const visibleItems = useMemo(
-    () => workItems.filter((item) => matchesReviewTriage(item, reviewFilter) && matchesSearch(item, search)),
-    [reviewFilter, workItems, search],
+    () => reviewFilter === "vendor_batches"
+      ? vendorBatches
+        .filter((batch) => batch.items.some((item) => matchesSearch(item, search)))
+        .map((batch) => batch.representative)
+      : workItems.filter((item) => matchesReviewTriage(item, reviewFilter) && matchesSearch(item, search)),
+    [reviewFilter, vendorBatches, workItems, search],
+  );
+  const vendorBatchByRepresentativeId = useMemo(
+    () => new Map(vendorBatches.map((batch) => [text(batch.representative.id), batch])),
+    [vendorBatches],
   );
   const selected = workItems.find((item) => text(item.id, "") === selectedId) || null;
   const state = panelState(resource, workItems.length);
@@ -124,7 +134,9 @@ export function FabReviewWorkspace({
             ))}
           </div>
           <span className="fab-result-count">
-            {copy(`${visibleItems.length} shown`, `${visibleItems.length} weergegeven`)}
+            {reviewFilter === "vendor_batches"
+              ? copy(`${visibleItems.length} vendor batches shown`, `${visibleItems.length} leveranciersbatches weergegeven`)
+              : copy(`${visibleItems.length} shown`, `${visibleItems.length} weergegeven`)}
           </span>
         </div>
       ) : null}
@@ -149,6 +161,7 @@ export function FabReviewWorkspace({
                 const financialIssues = records(document.financialFieldIssues);
                 const categorySuggestion = asRecord(document.categorySuggestion);
                 const postingEligible = document.postingEligible !== false;
+                const vendorBatch = vendorBatchByRepresentativeId.get(text(item.id));
                 return (
                   <tr key={text(item.id)}>
                     <td data-label={copy("Source", "Bron")}>
@@ -161,6 +174,10 @@ export function FabReviewWorkspace({
                       <span>{text(categorySuggestion.category, "")
                         ? copy(`Suggested: ${text(categorySuggestion.category)}`, `Voorgesteld: ${text(categorySuggestion.category)}`)
                         : text(document.category, copy("Category missing", "Categorie ontbreekt"))}</span>
+                      {vendorBatch && <span>{copy(
+                        `${vendorBatch.items.length} exact-vendor documents in this batch`,
+                        `${vendorBatch.items.length} documenten met exact dezelfde leverancier in deze batch`,
+                      )}</span>}
                     </td>
                     <td data-label={copy("Open decisions", "Open beslissingen")}>
                       <div className="fab-review-reasons">
@@ -174,7 +191,9 @@ export function FabReviewWorkspace({
                     </td>
                     <td data-label={copy("Actions", "Acties")}>
                       <button className="fab-primary-button compact" onClick={() => setSelectedId(text(item.id))}>
-                        <ClipboardCheck aria-hidden="true" /> {copy("Review", "Controleren")}
+                        <ClipboardCheck aria-hidden="true" /> {vendorBatch
+                          ? copy(`Review ${vendorBatch.items.length}`, `${vendorBatch.items.length} controleren`)
+                          : copy("Review", "Controleren")}
                       </button>
                     </td>
                   </tr>
@@ -199,6 +218,7 @@ export function FabReviewWorkspace({
         resolvingReviewId={resolvingReviewId}
         onResolve={onResolve}
         onClose={() => setSelectedId("")}
+        defaultApplyToMatchingVendor={reviewFilter === "vendor_batches"}
       />
     </section>
   );
@@ -208,6 +228,7 @@ function reviewFilterLabel(
   filter: FabReviewTriageFilter,
   copy: (english: string, dutch: string) => string,
 ): string {
+  if (filter === "vendor_batches") return copy("Vendor batches", "Leveranciersbatches");
   if (filter === "suggestions") return copy("Suggestions", "Voorstellen");
   if (filter === "validation") return copy("Validation", "Validatie");
   if (filter === "duplicates") return copy("Duplicates", "Duplicaten");
@@ -215,7 +236,7 @@ function reviewFilterLabel(
   return copy("All", "Alles");
 }
 
-function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, resolvingReviewId, onResolve, onClose }: {
+function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, resolvingReviewId, onResolve, onClose, defaultApplyToMatchingVendor }: {
   item: FabRecord | null;
   workItems: FabRecord[];
   categoryOptions: string[];
@@ -223,6 +244,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   resolvingReviewId: number | null;
   onResolve: (input: FabReviewResolution) => Promise<void>;
   onClose: () => void;
+  defaultApplyToMatchingVendor: boolean;
 }) {
   const { copy } = useFabLocale();
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -257,7 +279,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         )
         : copy("Verified against the source document in FAB.", "Geverifieerd aan de hand van het brondocument in FAB."),
       learnRule: true,
-      applyToMatchingVendor: false,
+      applyToMatchingVendor: defaultApplyToMatchingVendor,
     });
     const duplicateCandidates = records(item.duplicateCandidates);
     setSelectedDuplicateCandidateId((current) => (
@@ -266,7 +288,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         : count(duplicateCandidates[0]?.id)
     ));
     setError("");
-  }, [copy, item]);
+  }, [copy, defaultApplyToMatchingVendor, item]);
 
   useEffect(() => {
     if (!item) return;
