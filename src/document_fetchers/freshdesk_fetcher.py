@@ -85,15 +85,12 @@ class FreshdeskFetcher(BaseFetcher):
                             )
                             attachment_response.raise_for_status()
                             attachment_content = attachment_response.content
-                            local_path = self._content_download_path(
+                            local_path = self._store_content(
                                 attachments_dir,
                                 file_name,
                                 document_id,
                                 attachment_content,
                             )
-
-                            with open(local_path, "wb") as f:
-                                f.write(attachment_content)
 
                             documents.append({
                                 "id": document_id,

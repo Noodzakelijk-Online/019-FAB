@@ -192,15 +192,12 @@ class GmailFetcher(BaseFetcher):
                         continue
                     stable_attachment_id = attachment_id or _inline_attachment_id(part, file_data)
                     document_id = message['id'] + '_' + stable_attachment_id
-                    local_path = self._content_download_path(
+                    local_path = self._store_content(
                         attachments_dir,
                         file_name,
                         document_id,
                         file_data,
                     )
-
-                    with open(local_path, 'wb') as f:
-                        f.write(file_data)
 
                     documents.append({
                         'id': document_id,

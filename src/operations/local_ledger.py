@@ -951,6 +951,43 @@ class LocalOperationsLedger:
             )
             return int(cursor.rowcount) == 1
 
+    def force_release_runtime_lease(
+        self,
+        lease_name: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> bool:
+        """Release a lease after its owning FAB services have been stopped."""
+        normalized_name = str(lease_name or "").strip()
+        normalized_actor = str(actor or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if not normalized_name or not normalized_actor or not normalized_reason:
+            raise ValueError("lease_name, actor, and reason are required")
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT owner_token FROM runtime_leases WHERE lease_name = ? LIMIT 1",
+                (normalized_name,),
+            ).fetchone()
+        if not row:
+            return False
+
+        owner_token = str(row["owner_token"] or "").strip()
+        if not owner_token or not self.release_runtime_lease(normalized_name, owner_token):
+            return False
+        self.record_audit_event({
+            "action": "runtime_lease.force_released",
+            "entityType": "runtime_lease",
+            "entityId": normalized_name,
+            "details": {
+                "actor": normalized_actor,
+                "reason": normalized_reason,
+                "externalSubmission": "not_executed",
+            },
+        })
+        return True
+
     def get_runtime_lease(self, lease_name: str) -> Optional[Dict[str, Any]]:
         now = datetime.now(timezone.utc)
         with self._connection() as connection:

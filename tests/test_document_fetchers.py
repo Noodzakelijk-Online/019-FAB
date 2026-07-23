@@ -5,10 +5,20 @@ import os
 import shutil
 import tempfile
 
+from src.document_fetchers.base import BaseFetcher
 from src.document_fetchers.gmail_fetcher import GmailFetcher
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
 from src.document_fetchers.photos_fetcher import PhotosFetcher
+
+
+class _ConcreteFetcher(BaseFetcher):
+    def fetch_documents(self):
+        return []
+
+    def _authenticate(self):
+        return None
+
 
 class TestDocumentFetchers(unittest.TestCase):
 
@@ -46,6 +56,71 @@ class TestDocumentFetchers(unittest.TestCase):
             "google_photos_download_dir",
         ]:
             os.makedirs(self.config[key], exist_ok=True)
+
+    def test_content_store_reuses_only_verified_immutable_evidence(self):
+        fetcher = _ConcreteFetcher({})
+        content = b"%PDF-1.7\nverified scanner evidence"
+        local_path = fetcher._store_content(
+            self.temp_dir.name,
+            "scan.pdf",
+            "gmail-message-1:attachment-1",
+            content,
+        )
+
+        with patch("src.document_fetchers.base.os.replace") as replace:
+            reused_path = fetcher._store_content(
+                self.temp_dir.name,
+                "scan.pdf",
+                "gmail-message-1:attachment-1",
+                content,
+            )
+
+        self.assertEqual(reused_path, local_path)
+        replace.assert_not_called()
+        with open(local_path, "rb") as handle:
+            self.assertEqual(handle.read(), content)
+
+    def test_content_store_refuses_to_overwrite_conflicting_evidence(self):
+        fetcher = _ConcreteFetcher({})
+        content = b"%PDF-1.7\nexpected scanner evidence"
+        local_path = fetcher._content_download_path(
+            self.temp_dir.name,
+            "scan.pdf",
+            "gmail-message-2:attachment-1",
+            content,
+        )
+        with open(local_path, "wb") as handle:
+            handle.write(b"corrupted evidence")
+
+        with self.assertRaisesRegex(OSError, "size does not match"):
+            fetcher._store_content(
+                self.temp_dir.name,
+                "scan.pdf",
+                "gmail-message-2:attachment-1",
+                content,
+            )
+
+        with open(local_path, "rb") as handle:
+            self.assertEqual(handle.read(), b"corrupted evidence")
+
+    def test_content_store_removes_staged_file_when_publish_fails(self):
+        fetcher = _ConcreteFetcher({})
+        with patch(
+            "src.document_fetchers.base.os.replace",
+            side_effect=OSError("publish failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "publish failed"):
+                fetcher._store_content(
+                    self.temp_dir.name,
+                    "scan.pdf",
+                    "gmail-message-3:attachment-1",
+                    b"%PDF-1.7\nscanner evidence",
+                )
+
+        self.assertFalse(any(
+            name.startswith(".fab-evidence-")
+            for name in os.listdir(self.temp_dir.name)
+        ))
 
     @patch("src.document_fetchers.gmail_fetcher.build")
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")

@@ -247,13 +247,48 @@ elseif (Test-Path -LiteralPath $workerRuntimePath) {
 
 if (-not $runtime -and $apiPids.Count -eq 0 -and -not $workerPid) {
     Write-Host "No owned FAB services were found. The managed services are already stopped."
-    exit 0
 }
 
 Stop-FabProcessTree -ProcessId $webPid -CommandMarker "pnpm" -Name "FAB dashboard"
 Stop-FabProcessTree -ProcessId $workerPid -CommandMarker "src.run_worker" -Name "FAB autonomous worker"
 foreach ($ownedApiPid in $apiPids) {
     Stop-FabProcessTree -ProcessId $ownedApiPid -CommandMarker "src.operations.local_api" -Name "FAB ledger API"
+}
+
+try {
+    $python = Get-Command python -ErrorAction Stop
+    $cleanupScript = @"
+from src.config_loader import ConfigLoader
+from src.operations.local_ledger import LocalOperationsLedger, default_ledger_path
+
+config = ConfigLoader(config_file='config/config.ini').get_all_config()
+ledger_path = str(
+    config.get('fab_local_ledger_path')
+    or config.get('operations_ledger_path')
+    or default_ledger_path()
+)
+ledger = LocalOperationsLedger(ledger_path)
+released = [
+    lease_name
+    for lease_name in ('local_connector_intake', 'local_autonomous_cycle')
+    if ledger.force_release_runtime_lease(
+        lease_name,
+        actor='Stop-FAB.ps1',
+        reason='owned_services_stopped',
+    )
+]
+print(chr(44).join(released))
+"@
+    $releasedLeases = & $python.Source -c $cleanupScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Lease cleanup exited with code $LASTEXITCODE."
+    }
+    if ($releasedLeases) {
+        Write-Host "Released stopped FAB runtime leases: $releasedLeases"
+    }
+}
+catch {
+    Write-Warning "FAB services stopped, but runtime lease cleanup failed: $($_.Exception.Message)"
 }
 
 Remove-Item -LiteralPath $runtimePath -Force -ErrorAction SilentlyContinue

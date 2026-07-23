@@ -142,6 +142,36 @@ class TestLocalOperationsLedger(unittest.TestCase):
                 ledger.acquire_runtime_lease("autonomy", "owner-three", ttl_seconds=60)["acquired"]
             )
 
+    def test_runtime_lease_can_be_force_released_after_owned_service_shutdown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.acquire_runtime_lease(
+                "local_connector_intake",
+                "stopped-worker",
+                ttl_seconds=21600,
+                metadata={"actor": "local_worker"},
+            )
+
+            released = ledger.force_release_runtime_lease(
+                "local_connector_intake",
+                actor="Stop-FAB.ps1",
+                reason="owned_services_stopped",
+            )
+
+            self.assertTrue(released)
+            self.assertIsNone(ledger.get_runtime_lease("local_connector_intake"))
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["action"], "runtime_lease.force_released")
+            self.assertEqual(event["entity_id"], "local_connector_intake")
+            self.assertEqual(event["details"]["actor"], "Stop-FAB.ps1")
+            self.assertEqual(event["details"]["reason"], "owned_services_stopped")
+            self.assertEqual(event["details"]["externalSubmission"], "not_executed")
+            self.assertFalse(ledger.force_release_runtime_lease(
+                "local_connector_intake",
+                actor="Stop-FAB.ps1",
+                reason="owned_services_stopped",
+            ))
+
     def test_source_accounts_are_upserted_and_counted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
