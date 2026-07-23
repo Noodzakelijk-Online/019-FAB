@@ -4,6 +4,7 @@ import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
@@ -15,6 +16,7 @@ from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
 from src.operations.local_ledger import LocalOperationsLedger
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
+from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
@@ -281,6 +283,11 @@ class TestLocalOperationsApi(unittest.TestCase):
             health = client.get("/api/health")
             self.assertEqual(health.status_code, 200)
             self.assertEqual(health.get_json()["service"], "fab-ledger-api")
+            self.assertEqual(
+                health.get_json()["instanceId"],
+                local_instance_id(Path(__file__).resolve().parents[1]),
+            )
+            self.assertNotIn("instanceRoot", health.get_json())
             self.assertFalse(health.get_json()["authRequired"])
 
             dashboard = client.get("/api/dashboard")
@@ -306,6 +313,10 @@ class TestLocalOperationsApi(unittest.TestCase):
             review_payload = review.get_json()
             self.assertEqual(review_payload["reviewItems"][0]["reason"], "low_confidence")
             self.assertEqual(review_payload["summary"]["documents"], 1)
+            self.assertEqual(review_payload["summary"]["postingBlockedDocuments"], 1)
+            self.assertEqual(review_payload["summary"]["postingBlockedReviewItems"], 1)
+            self.assertEqual(review_payload["summary"]["evidenceOnlyDocuments"], 0)
+            self.assertEqual(review_payload["summary"]["evidenceOnlyReviewItems"], 0)
             self.assertEqual(review_payload["summary"]["duplicateCandidates"], 0)
             batch_capability = review_payload["capabilities"]["exactVendorCategoryBatch"]
             self.assertTrue(batch_capability["enabled"])
@@ -337,6 +348,33 @@ class TestLocalOperationsApi(unittest.TestCase):
             audit = client.get("/api/audit")
             self.assertEqual(audit.status_code, 200)
             self.assertEqual(audit.get_json()["auditEvents"][0]["action"], "local_review.review_item.resolve")
+
+    def test_review_summary_separates_non_posting_evidence_from_posting_blocks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "bank-statement-evidence",
+                "originalFilename": "statement.pdf",
+                "documentType": "bank_statement",
+                "processingStatus": "needs_review",
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "non_posting_document_type",
+                "details": "Retain as supporting evidence.",
+            })
+
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            payload = app.test_client().get("/api/review?status=open").get_json()
+
+            self.assertEqual(payload["summary"]["documents"], 1)
+            self.assertEqual(payload["summary"]["postingBlockedDocuments"], 0)
+            self.assertEqual(payload["summary"]["postingBlockedReviewItems"], 0)
+            self.assertEqual(payload["summary"]["evidenceOnlyDocuments"], 1)
+            self.assertEqual(payload["summary"]["evidenceOnlyReviewItems"], 1)
+            self.assertFalse(payload["workItems"][0]["document"]["postingEligible"])
 
     def test_review_api_exposes_suppressed_financial_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:

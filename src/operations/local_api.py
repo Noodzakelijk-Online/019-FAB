@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import secrets
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
@@ -65,6 +66,7 @@ from src.operations.local_workflow_recovery import (
     LocalWorkflowRecoveryScheduler,
     LocalWorkflowRecoveryService,
 )
+from src.utils.runtime_identity import local_instance_id
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -3817,6 +3819,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify({
             "service": "fab-ledger-api",
             "apiVersion": "1",
+            "instanceId": local_instance_id(Path(__file__).resolve().parents[2]),
             "status": operations_health["status"],
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
@@ -6836,6 +6839,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             limit=_limit_arg(),
         )
         work_items = _review_work_items(ledger, review_items)
+        evidence_only_work_items = [
+            item
+            for item in work_items
+            if (item.get("document") or {}).get("postingEligible") is False
+        ]
+        posting_blocked_work_items = [
+            item
+            for item in work_items
+            if (item.get("document") or {}).get("postingEligible") is not False
+        ]
         return jsonify({
             "reviewItems": review_items,
             "workItems": work_items,
@@ -6854,6 +6867,20 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "summary": {
                 "reviewItems": len(review_items),
                 "documents": len([item for item in work_items if item.get("documentId")]),
+                "postingBlockedDocuments": len([
+                    item for item in posting_blocked_work_items if item.get("documentId")
+                ]),
+                "postingBlockedReviewItems": sum(
+                    len(item.get("reviewItems") or [])
+                    for item in posting_blocked_work_items
+                ),
+                "evidenceOnlyDocuments": len([
+                    item for item in evidence_only_work_items if item.get("documentId")
+                ]),
+                "evidenceOnlyReviewItems": sum(
+                    len(item.get("reviewItems") or [])
+                    for item in evidence_only_work_items
+                ),
                 "duplicateCandidates": len([
                     item for item in work_items
                     if "duplicate_candidate" in (item.get("reasons") or [])

@@ -109,7 +109,15 @@ describe("FAB local API gateway", () => {
         mapping: { verified: false },
       },
       "/api/review": {
-        summary: { reviewItems: 2, documents: 1, duplicateCandidates: 0 },
+        summary: {
+          reviewItems: 3,
+          documents: 2,
+          postingBlockedDocuments: 1,
+          postingBlockedReviewItems: 2,
+          evidenceOnlyDocuments: 1,
+          evidenceOnlyReviewItems: 1,
+          duplicateCandidates: 0,
+        },
         categoryOptions: ["Operations | Office Supplies"],
         workItems: [{ id: "document-7", documentId: 7, reasons: ["manual_review_category"] }],
       },
@@ -127,7 +135,14 @@ describe("FAB local API gateway", () => {
     const result = await getFabControlCenter();
 
     expect(result.connection.connected).toBe(true);
-    expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, pendingReviewDocuments: 1, unreconciled: 5, exceptions: 2 });
+    expect(result.metrics).toMatchObject({
+      documents: 18,
+      pendingReview: 4,
+      pendingReviewDocuments: 2,
+      postingBlockedReviewDocuments: 1,
+      unreconciled: 5,
+      exceptions: 2,
+    });
     expect(result.resourceStates.metrics.state).toBe("live");
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
@@ -152,7 +167,12 @@ describe("FAB local API gateway", () => {
       workOrders: [expect.objectContaining({ documentId: 7 })],
     });
     expect(result.reviews).toMatchObject({
-      summary: { reviewItems: 2, documents: 1 },
+      summary: {
+        reviewItems: 3,
+        documents: 2,
+        postingBlockedDocuments: 1,
+        evidenceOnlyDocuments: 1,
+      },
       categoryOptions: ["Operations | Office Supplies"],
       workItems: [expect.objectContaining({ documentId: 7 })],
     });
@@ -190,6 +210,7 @@ describe("FAB local API gateway", () => {
       documents: null,
       pendingReview: null,
       pendingReviewDocuments: null,
+      postingBlockedReviewDocuments: null,
       unreconciled: null,
       exceptions: null,
     });

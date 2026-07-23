@@ -40,6 +40,7 @@ export type FabControlCenter = {
     documents: number | null;
     pendingReview: number | null;
     pendingReviewDocuments: number | null;
+    postingBlockedReviewDocuments: number | null;
     unreconciled: number | null;
     unreconciledDocuments: number | null;
     unreconciledBankTransactions: number | null;
@@ -267,6 +268,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       documents: nullableNumber(metrics.documents),
       pendingReview: nullableNumber(metrics.pending_review),
       pendingReviewDocuments: nullableNumber(reviewSummary.documents),
+      postingBlockedReviewDocuments: nullableNumber(reviewSummary.postingBlockedDocuments),
       unreconciled: sumNullable(metrics.unreconciled_bank_transactions, metrics.unreconciled_documents),
       unreconciledDocuments: nullableNumber(metrics.unreconciled_documents),
       unreconciledBankTransactions: nullableNumber(metrics.unreconciled_bank_transactions),
@@ -478,6 +480,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
       documents: null,
       pendingReview: null,
       pendingReviewDocuments: null,
+      postingBlockedReviewDocuments: null,
       unreconciled: null,
       unreconciledDocuments: null,
       unreconciledBankTransactions: null,

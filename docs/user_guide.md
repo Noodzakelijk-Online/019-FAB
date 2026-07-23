@@ -146,6 +146,8 @@ Use the **Gmail scanner** activation step in the operator dashboard to install a
 
 Normalized bookkeeping records apply fail-closed financial consistency controls. Dutch day-first dates are canonicalized to ISO dates; impossible or ambiguous dates are retained only as evidence and block export. VAT and line-item tax amounts that lack a non-zero total, conflict in sign, or exceed the configured `vat_max_total_ratio` are retained as evidence but removed from normalized posting totals until an operator corrects the source-backed review item.
 
+The operator activation checklist distinguishes posting-blocking decisions from evidence-only reviews. Bank statements, sensitive government documents, and other confidently non-posting material remain visible and retained for review, but they no longer inflate the number of documents blocking Wave delivery. The complete review workspace still shows both groups; no review item is silently resolved.
+
 ### 4.3. `[google_drive]` Section
 
 Configuration for fetching documents from Google Drive.

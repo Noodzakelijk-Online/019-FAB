@@ -40,9 +40,11 @@ export function FabActivationChecklist({
     && bool(driveAuthorization.tokenPresent)
     && bool(driveAuthorization.folderConfigured)
     && !bool(driveAuthorization.reauthorizationRequired);
-  const reviewCountKnown = reviewSummary.documents !== null && reviewSummary.documents !== undefined;
-  const reviewDocuments = count(reviewSummary.documents);
-  const reviewsReady = reviewCountKnown && reviewDocuments === 0;
+  const reviewCountSource = reviewSummary.postingBlockedDocuments ?? reviewSummary.documents;
+  const reviewCountKnown = reviewCountSource !== null && reviewCountSource !== undefined;
+  const postingBlockedDocuments = count(reviewCountSource);
+  const evidenceOnlyDocuments = count(reviewSummary.evidenceOnlyDocuments);
+  const reviewsReady = reviewCountKnown && postingBlockedDocuments === 0;
 
   if (waveReady && gmailReady && driveReady && reviewsReady) return null;
 
@@ -82,9 +84,11 @@ export function FabActivationChecklist({
           complete={reviewsReady}
           title={copy("Document decisions", "Documentbeslissingen")}
           status={reviewCountKnown
-            ? reviewDocuments === 0
-              ? copy("Review queue clear", "Controlewachtrij leeg")
-              : `${reviewDocuments} ${copy(reviewDocuments === 1 ? "document blocked" : "documents blocked", reviewDocuments === 1 ? "document geblokkeerd" : "documenten geblokkeerd")}`
+            ? postingBlockedDocuments === 0
+              ? evidenceOnlyDocuments > 0
+                ? `${copy("Posting queue clear", "Boekingswachtrij leeg")}; ${evidenceOnlyDocuments} ${copy(evidenceOnlyDocuments === 1 ? "evidence review retained" : "evidence reviews retained", evidenceOnlyDocuments === 1 ? "bewijscontrole behouden" : "bewijscontroles behouden")}`
+                : copy("Posting review queue clear", "Boekingscontrolewachtrij leeg")
+              : `${postingBlockedDocuments} ${copy(postingBlockedDocuments === 1 ? "posting document blocked" : "posting documents blocked", postingBlockedDocuments === 1 ? "boekingsdocument geblokkeerd" : "boekingsdocumenten geblokkeerd")}`
             : copy("Review status unavailable", "Controlestatus niet beschikbaar")}
           actionLabel={copy("Open review queue", "Controlewachtrij openen")}
           onAction={onOpenReviews}

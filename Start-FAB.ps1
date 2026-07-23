@@ -11,15 +11,34 @@ $webRoot = Join-Path $root "web"
 $dataRoot = Join-Path $root "data"
 $logsRoot = Join-Path $root "logs"
 $runtimePath = Join-Path $dataRoot "fab-runtime.json"
+$workerRuntimePath = Join-Path $dataRoot "fab-worker-runtime.json"
 $defaultApiPort = 5001
 $defaultWebPort = 3000
+
+function Get-FabInstanceId {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/").Replace("\", "/")
+    if ($env:OS -eq "Windows_NT") {
+        $normalized = $normalized.ToLowerInvariant()
+    }
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
 
 function Test-FabEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$ExpectedService,
         [string]$ApiToken = "",
-        [string]$ExpectedLocalApiEndpoint = ""
+        [string]$ExpectedLocalApiEndpoint = "",
+        [string]$ExpectedInstanceRoot = ""
     )
 
     try {
@@ -37,6 +56,13 @@ function Test-FabEndpoint {
         }
         if ($ExpectedLocalApiEndpoint -and ([string]$response.localApiEndpoint).TrimEnd("/") -ne $ExpectedLocalApiEndpoint.TrimEnd("/")) {
             return $false
+        }
+        if ($ExpectedInstanceRoot) {
+            $actualInstanceId = [string]$response.instanceId
+            $expectedInstanceId = Get-FabInstanceId -Path $ExpectedInstanceRoot
+            if (-not $actualInstanceId -or $actualInstanceId -ne $expectedInstanceId) {
+                return $false
+            }
         }
         return $true
     }
@@ -96,6 +122,59 @@ function Get-FabProcessId {
     return [int]$process.ProcessId
 }
 
+function Find-RunningFabApi {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot,
+        [string]$ApiToken = ""
+    )
+
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "python.exe" -and
+            $_.CommandLine -and
+            $_.CommandLine -like "*src.operations.local_api*"
+        } |
+        Sort-Object ProcessId
+    foreach ($process in $processes) {
+        $listeners = Get-NetTCPConnection -State Listen -OwningProcess $process.ProcessId -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
+            Sort-Object LocalPort -Unique
+        foreach ($listener in $listeners) {
+            $url = "http://127.0.0.1:$($listener.LocalPort)/api/health"
+            if (Test-FabEndpoint -Url $url -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot) {
+                return [PSCustomObject]@{
+                    ProcessId = [int]$process.ProcessId
+                    Url = $url
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Get-FabWorkerRuntimeProcessId {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedRoot
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        $runtime = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        $actualRoot = [System.IO.Path]::GetFullPath([string]$runtime.instanceRoot).TrimEnd("\", "/")
+        $expected = [System.IO.Path]::GetFullPath($ExpectedRoot).TrimEnd("\", "/")
+        if ($actualRoot -ne $expected) {
+            return $null
+        }
+        return Get-FabProcessId -ProcessId $runtime.pid -CommandMarker "src.run_worker"
+    }
+    catch {
+        return $null
+    }
+}
+
 function Wait-FabEndpoint {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -103,12 +182,13 @@ function Wait-FabEndpoint {
         [Parameter(Mandatory = $true)][string]$ExpectedService,
         [string]$ApiToken = "",
         [string]$ExpectedLocalApiEndpoint = "",
+        [string]$ExpectedInstanceRoot = "",
         [int]$TimeoutSeconds = 45
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if (Test-FabEndpoint -Url $Url -ExpectedService $ExpectedService -ApiToken $ApiToken -ExpectedLocalApiEndpoint $ExpectedLocalApiEndpoint) {
+        if (Test-FabEndpoint -Url $Url -ExpectedService $ExpectedService -ApiToken $ApiToken -ExpectedLocalApiEndpoint $ExpectedLocalApiEndpoint -ExpectedInstanceRoot $ExpectedInstanceRoot) {
             return
         }
         Start-Sleep -Milliseconds 500
@@ -232,23 +312,28 @@ if ($savedRuntime) {
     $apiPid = Get-FabProcessId -ProcessId $savedRuntime.apiPid -CommandMarker "src.operations.local_api"
     $workerPid = Get-FabProcessId -ProcessId $savedRuntime.workerPid -CommandMarker "src.run_worker"
     $webPid = Get-FabProcessId -ProcessId $savedRuntime.webPid -CommandMarker "pnpm"
-    if ($apiPid -and $savedRuntime.apiUrl -and (Test-FabEndpoint -Url $savedRuntime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken)) {
+    if ($apiPid -and $savedRuntime.apiUrl -and (Test-FabEndpoint -Url $savedRuntime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root)) {
         $apiUrl = [string]$savedRuntime.apiUrl
     }
     else {
         $apiPid = $null
     }
-    if ($webPid -and $savedRuntime.dashboardUrl) {
-        $savedDashboardUri = [System.Uri]$savedRuntime.dashboardUrl
-        $savedWebIdentityUrl = "$($savedDashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
-        $savedApiBaseUrl = if ($apiUrl) { ([System.Uri]$apiUrl).GetLeftPart([System.UriPartial]::Authority) } else { "" }
-        if ($savedApiBaseUrl -and (Test-FabEndpoint -Url $savedWebIdentityUrl -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $savedApiBaseUrl)) {
-            $dashboardUrl = [string]$savedRuntime.dashboardUrl
-        }
-        else {
-            $webPid = $null
-        }
+}
+
+if (-not $apiPid) {
+    $runningApi = Find-RunningFabApi -ExpectedRoot $root -ApiToken $apiToken
+    if ($runningApi) {
+        $apiPid = [int]$runningApi.ProcessId
+        $apiUrl = [string]$runningApi.Url
     }
+}
+
+$managedWorkerPid = Get-FabWorkerRuntimeProcessId -Path $workerRuntimePath -ExpectedRoot $root
+if ($managedWorkerPid) {
+    $workerPid = $managedWorkerPid
+}
+elseif (Test-Path -LiteralPath $workerRuntimePath) {
+    $workerPid = $null
 }
 
 if (-not $apiPid) {
@@ -270,6 +355,17 @@ if (-not $apiPid) {
     }
 }
 $apiBaseUrl = ([System.Uri]$apiUrl).GetLeftPart([System.UriPartial]::Authority)
+
+if ($webPid -and $savedRuntime -and $savedRuntime.dashboardUrl) {
+    $savedDashboardUri = [System.Uri]$savedRuntime.dashboardUrl
+    $savedWebIdentityUrl = "$($savedDashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
+    if (Test-FabEndpoint -Url $savedWebIdentityUrl -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -ExpectedInstanceRoot $root) {
+        $dashboardUrl = [string]$savedRuntime.dashboardUrl
+    }
+    else {
+        $webPid = $null
+    }
+}
 
 if (-not $workerPid) {
     $workerProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.run_worker") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "worker.out.log") -RedirectStandardError (Join-Path $logsRoot "worker.err.log") -PassThru
@@ -321,8 +417,8 @@ else {
     $webIdentityUrl = "$($dashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
 }
 
-Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken
-Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -TimeoutSeconds 60
+Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root
+Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -ExpectedInstanceRoot $root -TimeoutSeconds 60
 if (-not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker")) {
     throw "FAB autonomous worker exited during startup. Check logs\worker.err.log."
 }

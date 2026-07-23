@@ -21,6 +21,7 @@ describe("FAB runtime identity", () => {
         service: "fab-operator-dashboard",
         apiVersion: "1",
         localApiEndpoint: "http://127.0.0.1:5007",
+        instanceId: expect.stringMatching(/^[a-f0-9]{64}$/),
       });
     } finally {
       await new Promise<void>((resolve, reject) => {
