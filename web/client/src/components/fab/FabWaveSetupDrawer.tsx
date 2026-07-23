@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
+  ArrowUpRight,
   Building2,
   CheckCircle2,
   KeyRound,
@@ -15,6 +16,9 @@ import {
 } from "lucide-react";
 import { useFabLocale } from "./fabLocale";
 import { bool, text, type FabRecord } from "./fabView";
+
+const WAVE_TOKEN_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360020596571-Permitted-Use-Wave-Business-Owners";
+const WAVE_SCOPE_GUIDE_URL = "https://developer.waveapps.com/hc/en-us/articles/360032818132-OAuth-Scopes";
 
 export type FabWaveSetupSaveInput = {
   targetSystem?: "waveapps_business" | "waveapps_personal";
@@ -230,6 +234,14 @@ export function FabWaveSetupDrawer({
 
           <section className="fab-drive-credential-panel">
             <div className="fab-subsection-heading"><div><span>{copy("Step 1", "Stap 1")}</span><h3>{copy("Store the Wave connection", "Wave-koppeling opslaan")}</h3></div></div>
+            <div className="fab-wave-token-guide">
+              <div>
+                <strong>{copy("Create your Wave access token", "Maak je Wave-toegangstoken")}</strong>
+                <span>{copy("For your own Wave business, create an application in Wave's Developer Portal and generate its long-lived access token. FAB never reads your Wave password or browser session.", "Maak voor je eigen Wave-bedrijf een toepassing in het Wave Developer Portal en genereer daar het langlopende toegangstoken. FAB leest nooit je Wave-wachtwoord of browsersessie.")}</span>
+              </div>
+              <a href={WAVE_TOKEN_GUIDE_URL} target="_blank" rel="noreferrer">{copy("Open official token guide", "Open officiele tokenhandleiding")} <ArrowUpRight aria-hidden="true" /></a>
+              <small>{copy("For OAuth applications, current FAB workflows need business:read, account:read, customer:read, product:read, invoice:read, and transaction:write. Validation is read-only; posting remains approval-gated.", "Huidige FAB-workflows vereisen voor OAuth-toepassingen business:read, account:read, customer:read, product:read, invoice:read en transaction:write. Validatie is alleen-lezen; boeken blijft goedkeuringsplichtig.")} <a href={WAVE_SCOPE_GUIDE_URL} target="_blank" rel="noreferrer">{copy("Review scopes", "Bekijk scopes")} <ArrowUpRight aria-hidden="true" /></a></small>
+            </div>
             <form className="fab-wave-form" onSubmit={(event) => { event.preventDefault(); void saveConnection(); }}>
               <label><span>{copy("Wave business ID", "Wave-bedrijfs-ID")}</span><input value={businessId} onChange={(event) => setBusinessId(event.target.value)} autoComplete="off" spellCheck={false} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" disabled={busy || bool(environmentOverrides.businessId)} /></label>
               <label><span>{tokenConfigured ? copy("Replace access token", "Toegangstoken vervangen") : copy("Access token", "Toegangstoken")}</span><input type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} autoComplete="new-password" spellCheck={false} placeholder={tokenConfigured ? copy("Leave blank to keep the stored token", "Laat leeg om het opgeslagen token te behouden") : copy("Paste the user-owned Wave token", "Plak het Wave-token van de gebruiker")} disabled={busy || tokenEnvironmentOverride} /></label>

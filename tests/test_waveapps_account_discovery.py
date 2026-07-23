@@ -58,6 +58,55 @@ class TestWaveappsAccountDiscoveryService(unittest.TestCase):
         self.assertEqual(result["status"], "not_configured")
         self.assertEqual(result["missingFields"], ["accessToken", "businessId"])
 
+    @patch("src.data_entry.waveapps_account_discovery.requests.post")
+    def test_provider_authentication_and_rate_limit_failures_are_actionable(self, mock_post):
+        cases = (
+            (401, "authentication_failed", "Replace"),
+            (403, "authorization_failed", "Confirm"),
+            (429, "rate_limited", "Wait"),
+        )
+        for status_code, expected_status, next_action in cases:
+            with self.subTest(status_code=status_code):
+                reset_all_limiters()
+                response = MagicMock()
+                response.status_code = status_code
+                mock_post.return_value = response
+
+                result = WaveappsAccountDiscoveryService(self.config).discover("waveapps_business")
+
+                self.assertFalse(result["success"])
+                self.assertEqual(result["status"], expected_status)
+                self.assertIn(next_action, result["nextAction"])
+                self.assertEqual(result["externalSubmission"], "not_executed")
+                self.assertNotIn("business-secret-token", str(result))
+
+    @patch("src.data_entry.waveapps_account_discovery.requests.post")
+    def test_invalid_json_and_graphql_business_errors_are_classified(self, mock_post):
+        invalid_json = MagicMock()
+        invalid_json.status_code = 200
+        invalid_json.raise_for_status.return_value = None
+        invalid_json.json.side_effect = ValueError("invalid json")
+        mock_post.return_value = invalid_json
+
+        invalid_result = WaveappsAccountDiscoveryService(self.config).discover("waveapps_business")
+
+        self.assertEqual(invalid_result["status"], "provider_error")
+        self.assertIn("invalid response", invalid_result["message"])
+
+        missing_business = MagicMock()
+        missing_business.status_code = 200
+        missing_business.raise_for_status.return_value = None
+        missing_business.json.return_value = {
+            "data": {"business": None},
+            "errors": [{"message": "Business not found for the supplied id."}],
+        }
+        mock_post.return_value = missing_business
+
+        missing_result = WaveappsAccountDiscoveryService(self.config).discover("waveapps_business")
+
+        self.assertEqual(missing_result["status"], "business_not_found")
+        self.assertIn("business ID", missing_result["nextAction"])
+
     def test_default_category_account_does_not_replace_explicit_category_mapping(self):
         config = dict(self.config)
         config["waveapps_business_category_account_ids"] = {}

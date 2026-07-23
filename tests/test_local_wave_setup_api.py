@@ -105,6 +105,33 @@ class TestLocalWaveSetupApi(unittest.TestCase):
         self.assertEqual(malformed_validation.status_code, 400)
         self.assertIn("must be an object", malformed_validation.get_json()["error"])
 
+    @patch("src.data_entry.waveapps_account_discovery.requests.post")
+    def test_validation_returns_safe_actionable_authentication_failure(self, mock_post):
+        response = MagicMock()
+        response.status_code = 401
+        mock_post.return_value = response
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_secret_store_path": os.path.join(temp_dir, "credentials", "secrets.enc"),
+                "fab_local_secret_key_path": os.path.join(temp_dir, "credentials", "secrets.key"),
+            }).test_client()
+            client.put("/api/wave/setup", json={
+                "accessToken": "private-wave-token",
+                "businessId": "business-1",
+            })
+
+            validated = client.post("/api/wave/setup/validate", json={
+                "targetSystem": "waveapps_business",
+            })
+
+        payload = validated.get_json()
+        self.assertEqual(validated.status_code, 401)
+        self.assertEqual(payload["status"], "authentication_failed")
+        self.assertIn("rejected the access token", payload["error"])
+        self.assertIn("Replace", payload["nextAction"])
+        self.assertNotIn("private-wave-token", validated.data.decode("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

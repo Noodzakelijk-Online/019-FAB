@@ -5035,11 +5035,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "discovery": discovery,
             "setup": LocalWaveSetupService(config).status(ledger, target_system),
         }
-        status_code = 200 if result["success"] else 400
-        if discovery.get("status") in {"rate_limited", "quota_exhausted"}:
-            status_code = 429
-        elif discovery.get("status") == "provider_error":
-            status_code = 502
+        if not result["success"]:
+            result["error"] = discovery.get("message") or "Wave validation failed."
+            result["nextAction"] = discovery.get("nextAction")
+        status_code = _wave_discovery_http_status(discovery)
         return jsonify(result), status_code
 
     @app.post("/api/wave/accounts/discover")
@@ -5047,13 +5046,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         payload = request.get_json(silent=True) or {}
         target_system = str(payload.get("targetSystem") or payload.get("target_system") or "waveapps_business")
         result = run_wave_account_discovery(target_system)
-        status_code = 200 if result.get("success") else 400
-        if result.get("status") in {"rate_limited", "quota_exhausted"}:
-            status_code = 429
-        elif result.get("status") in {"provider_error", "pagination_incomplete"}:
-            status_code = 502
-        elif result.get("status") == "internal_error":
-            status_code = 500
+        status_code = _wave_discovery_http_status(result)
         return jsonify(result), status_code
 
     @app.post("/wave/accounts/discover")
@@ -7530,6 +7523,21 @@ def _review_category_options(ledger: LocalOperationsLedger, config: Dict[str, An
         if isinstance(value, dict):
             categories.update(str(category).strip() for category in value if str(category).strip())
     return sorted(categories, key=str.casefold)
+
+
+def _wave_discovery_http_status(result: Dict[str, Any]) -> int:
+    if result.get("success"):
+        return 200
+    return {
+        "authentication_failed": 401,
+        "authorization_failed": 403,
+        "business_not_found": 404,
+        "rate_limited": 429,
+        "quota_exhausted": 429,
+        "provider_error": 502,
+        "pagination_incomplete": 502,
+        "internal_error": 500,
+    }.get(str(result.get("status") or ""), 400)
 
 
 def _corrections_from_mapping(values: Any) -> Dict[str, Any]:
