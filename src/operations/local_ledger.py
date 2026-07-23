@@ -1446,6 +1446,14 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_duplicate_candidate(self, candidate_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM duplicate_candidates WHERE id = ? LIMIT 1",
+                (int(candidate_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def resolve_duplicate_candidates_for_document(
         self,
         document_id: int,

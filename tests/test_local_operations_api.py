@@ -389,6 +389,114 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(payload["workItems"][0]["documentId"], document_id)
             self.assertEqual(payload["workItems"][0]["document"]["vendorName"], "Vendor")
 
+    def test_review_api_exposes_identity_evidence_and_resolves_one_duplicate_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            canonical_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "canonical-receipt",
+                "originalFilename": "canonical.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transactie nr.: 10632674",
+            })
+            alternate_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "alternate-receipt",
+                "originalFilename": "alternate.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transactie nr.: 10639999",
+            })
+            subject_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "subject-receipt",
+                "originalFilename": "subject.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transaction: 10632674",
+            })
+            selected_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.95,
+                "status": "pending",
+            })
+            remaining_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": alternate_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.91,
+                "status": "pending",
+            })
+            review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Compare transaction identity.",
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            initial = client.get("/api/review?status=open").get_json()
+            candidates = {
+                candidate["id"]: candidate
+                for candidate in initial["workItems"][0]["duplicateCandidates"]
+            }
+
+            self.assertEqual(
+                candidates[selected_candidate_id]["matchedIdentityFields"],
+                ["vendor", "date", "amount", "transaction_reference"],
+            )
+            self.assertEqual(
+                candidates[selected_candidate_id]["currentIdentity"]["transactionReference"],
+                "10632674",
+            )
+            self.assertEqual(
+                candidates[selected_candidate_id]["candidateIdentity"]["transactionReference"],
+                "10632674",
+            )
+            self.assertEqual(
+                candidates[remaining_candidate_id]["conflictingIdentityFields"],
+                ["transaction_reference"],
+            )
+
+            rejected = client.post(
+                f"/api/review/{review_id}/resolve",
+                json={
+                    "status": "rejected",
+                    "resolution": "Not the same transaction.",
+                    "corrections": {"duplicateCandidateId": selected_candidate_id},
+                    "learnRule": False,
+                },
+            )
+
+            self.assertEqual(rejected.status_code, 200)
+            self.assertEqual(rejected.get_json()["status"], "candidate_rejected")
+            self.assertEqual(
+                rejected.get_json()["remainingDuplicateCandidateIds"],
+                [remaining_candidate_id],
+            )
+            refreshed = client.get("/api/review?status=open").get_json()
+            self.assertEqual(len(refreshed["workItems"][0]["duplicateCandidates"]), 1)
+            self.assertEqual(
+                refreshed["workItems"][0]["duplicateCandidates"][0]["id"],
+                remaining_candidate_id,
+            )
+            self.assertEqual(
+                refreshed["workItems"][0]["reviewItems"][0]["status"],
+                "in_review",
+            )
+
     def test_review_summary_separates_non_posting_evidence_from_posting_blocks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

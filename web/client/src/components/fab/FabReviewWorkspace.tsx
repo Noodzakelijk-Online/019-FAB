@@ -8,6 +8,7 @@ import {
   CopyCheck,
   FileSearch,
   Scale,
+  ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
@@ -48,6 +49,7 @@ export type FabReviewResolution = {
     vatAmount?: number;
     targetSystem?: "waveapps_business" | "waveapps_personal" | "mijngeldzaken";
     duplicateOfDocumentId?: number;
+    duplicateCandidateId?: number;
     documentType?: ReviewDocumentType;
   };
   learnRule?: boolean;
@@ -226,6 +228,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const closeRef = useRef<HTMLButtonElement>(null);
   const [form, setForm] = useState(() => emptyForm());
   const [error, setError] = useState("");
+  const [selectedDuplicateCandidateId, setSelectedDuplicateCandidateId] = useState(0);
 
   useEffect(() => {
     if (!item) return;
@@ -256,6 +259,12 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
       learnRule: true,
       applyToMatchingVendor: false,
     });
+    const duplicateCandidates = records(item.duplicateCandidates);
+    setSelectedDuplicateCandidateId((current) => (
+      duplicateCandidates.some((candidate) => count(candidate.id) === current)
+        ? current
+        : count(duplicateCandidates[0]?.id)
+    ));
     setError("");
   }, [copy, item]);
 
@@ -281,8 +290,18 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const duplicateReview = reviewItems.find((review) => text(review.reason, "") === "duplicate_candidate") || null;
   const duplicateCandidates = records(item.duplicateCandidates);
   const financialIssues = records(document.financialFieldIssues);
-  const duplicateCandidate = duplicateCandidates[0] || null;
+  const duplicateCandidate = duplicateCandidates.find(
+    (candidate) => count(candidate.id) === selectedDuplicateCandidateId,
+  ) || duplicateCandidates[0] || null;
   const candidateDocument = asRecord(duplicateCandidate?.document);
+  const currentIdentity = asRecord(duplicateCandidate?.currentIdentity);
+  const candidateIdentity = asRecord(duplicateCandidate?.candidateIdentity);
+  const matchedIdentityFields = stringList(duplicateCandidate?.matchedIdentityFields);
+  const conflictingIdentityFields = stringList(duplicateCandidate?.conflictingIdentityFields);
+  const duplicateCandidateIndex = Math.max(
+    0,
+    duplicateCandidates.findIndex((candidate) => count(candidate.id) === count(duplicateCandidate?.id)),
+  );
   const isBusy = resolvingReviewId !== null;
   const typeDecisionRequired = reviewItems.some((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")));
   const selectedNonPosting = NON_POSTING_DOCUMENT_TYPES.has(form.documentType);
@@ -358,8 +377,9 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
   async function decideDuplicate(isDuplicate: boolean) {
     if (!duplicateReview) return;
+    const duplicateCandidateId = count(duplicateCandidate?.id);
     const candidateId = count(duplicateCandidate?.candidateDocumentId);
-    if (isDuplicate && !candidateId) {
+    if (!duplicateCandidateId || !candidateId) {
       setError(copy("The duplicate candidate is missing its canonical document.", "Bij het duplicaat ontbreekt het canonieke document."));
       return;
     }
@@ -370,8 +390,11 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         status: isDuplicate ? "approved" : "rejected",
         resolution: isDuplicate
           ? copy(`Confirmed as the same transaction as document #${candidateId}.`, `Bevestigd als dezelfde transactie als document #${candidateId}.`)
-          : copy("Confirmed as a different transaction after source comparison.", "Na bronvergelijking bevestigd als een andere transactie."),
-        corrections: isDuplicate ? { duplicateOfDocumentId: candidateId } : {},
+          : copy(`Confirmed as a different transaction from document #${candidateId}.`, `Bevestigd als een andere transactie dan document #${candidateId}.`),
+        corrections: {
+          duplicateCandidateId,
+          duplicateOfDocumentId: isDuplicate ? candidateId : undefined,
+        },
         learnRule: false,
       });
     } catch (cause) {
@@ -459,9 +482,103 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
           {duplicateReview && (
             <section className="fab-duplicate-decision">
-              <div className="fab-subsection-heading"><div><span>{copy("Duplicate control", "Duplicaatcontrole")}</span><h3>{copy("Compare both source documents", "Vergelijk beide brondocumenten")}</h3></div></div>
-              {duplicateCandidate ? <div className="fab-duplicate-comparison"><div><small>{copy("Current", "Huidig")}</small><strong>#{text(item.documentId)} {text(document.filename)}</strong><span>{text(document.transactionDate)} | {formatMoney(document.totalAmount, document.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span></div><Scale aria-hidden="true" /><div><small>{copy("Candidate", "Kandidaat")}</small><strong>#{text(duplicateCandidate.candidateDocumentId)} {text(candidateDocument.filename)}</strong><span>{text(candidateDocument.transactionDate)} | {formatMoney(candidateDocument.totalAmount, candidateDocument.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span><a href={`${localApiEndpoint}/documents/${text(duplicateCandidate.candidateDocumentId)}`} target="_blank" rel="noreferrer">{copy("Open comparison evidence", "Open vergelijkingsbewijs")} <ArrowUpRight aria-hidden="true" /></a></div></div> : <p>{copy("Duplicate candidate evidence is incomplete. Keep this gate open.", "Het duplicaatbewijs is onvolledig. Laat deze controle open.")}</p>}
-              <div className="fab-detail-actions"><button className="fab-primary-button" type="button" disabled={isBusy || !duplicateCandidate} onClick={() => { void decideDuplicate(true); }}><CopyCheck aria-hidden="true" /> {copy("Same transaction", "Dezelfde transactie")}</button><button className="fab-secondary-button" type="button" disabled={isBusy} onClick={() => { void decideDuplicate(false); }}><X aria-hidden="true" /> {copy("Different transaction", "Andere transactie")}</button></div>
+              <div className="fab-subsection-heading">
+                <div>
+                  <span>{copy("Duplicate control", "Duplicaatcontrole")}</span>
+                  <h3>{copy("Compare both source documents", "Vergelijk beide brondocumenten")}</h3>
+                </div>
+                {duplicateCandidate && (
+                  <strong className="fab-duplicate-position">
+                    {copy(
+                      `${duplicateCandidateIndex + 1} of ${duplicateCandidates.length}`,
+                      `${duplicateCandidateIndex + 1} van ${duplicateCandidates.length}`,
+                    )}
+                  </strong>
+                )}
+              </div>
+
+              {duplicateCandidates.length > 1 && (
+                <div className="fab-duplicate-candidate-picker" role="group" aria-label={copy("Duplicate candidates", "Duplicaatkandidaten")}>
+                  {duplicateCandidates.map((candidate, index) => (
+                    <button
+                      key={text(candidate.id)}
+                      type="button"
+                      className={count(candidate.id) === count(duplicateCandidate?.id) ? "is-active" : ""}
+                      aria-pressed={count(candidate.id) === count(duplicateCandidate?.id)}
+                      onClick={() => setSelectedDuplicateCandidateId(count(candidate.id))}
+                    >
+                      <span>{copy(`Match ${index + 1}`, `Match ${index + 1}`)}</span>
+                      <strong>#{text(candidate.candidateDocumentId)}</strong>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {duplicateCandidate ? (
+                <>
+                  <div className="fab-duplicate-evidence-summary">
+                    <div>
+                      <span className="fab-status-chip tone-info">{humanize(duplicateCandidate.matchType)}</span>
+                      <strong>{copy(
+                        `${formatPercent(duplicateCandidate.confidenceScore) || "Unscored"} detector confidence`,
+                        `${formatPercent(duplicateCandidate.confidenceScore) || "Geen score"} detectorbetrouwbaarheid`,
+                      )}</strong>
+                      <small>{copy(
+                        `${count(duplicateCandidate.comparableFields)} comparable identity fields`,
+                        `${count(duplicateCandidate.comparableFields)} vergelijkbare identiteitsvelden`,
+                      )}</small>
+                    </div>
+                    <div className="fab-duplicate-match-tags" aria-label={copy("Matched identity fields", "Overeenkomende identiteitsvelden")}>
+                      {matchedIdentityFields.length > 0
+                        ? matchedIdentityFields.map((field) => <span key={field}><CheckCircle2 aria-hidden="true" /> {humanize(field)}</span>)
+                        : <span className="is-neutral">{copy("No exact identity field match", "Geen exacte overeenkomst van identiteitsvelden")}</span>}
+                    </div>
+                  </div>
+
+                  {conflictingIdentityFields.length > 0 && (
+                    <div className="fab-financial-warning" role="alert">
+                      <AlertTriangle aria-hidden="true" />
+                      <div>
+                        <strong>{copy("Conflicting transaction identifiers", "Tegenstrijdige transactie-identificaties")}</strong>
+                        <span>{conflictingIdentityFields.map(humanize).join(", ")}. {copy("Do not approve this pair without checking both source files.", "Keur dit paar niet goed zonder beide bronbestanden te controleren.")}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="fab-duplicate-comparison">
+                    <div>
+                      <small>{copy("Current", "Huidig")}</small>
+                      <strong>#{text(item.documentId)} {text(document.filename)}</strong>
+                      <span>{text(document.vendorName, copy("Vendor missing", "Leverancier ontbreekt"))}</span>
+                      <span>{text(document.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {formatMoney(document.totalAmount, document.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span>
+                      <DuplicateIdentityEvidence identity={currentIdentity} copy={copy} />
+                    </div>
+                    <Scale aria-hidden="true" />
+                    <div>
+                      <small>{copy("Candidate", "Kandidaat")}</small>
+                      <strong>#{text(duplicateCandidate.candidateDocumentId)} {text(candidateDocument.filename)}</strong>
+                      <span>{text(candidateDocument.vendorName, copy("Vendor missing", "Leverancier ontbreekt"))}</span>
+                      <span>{text(candidateDocument.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {formatMoney(candidateDocument.totalAmount, candidateDocument.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span>
+                      <DuplicateIdentityEvidence identity={candidateIdentity} copy={copy} />
+                      <a href={`${localApiEndpoint}/documents/${text(duplicateCandidate.candidateDocumentId)}`} target="_blank" rel="noreferrer">{copy("Open comparison evidence", "Open vergelijkingsbewijs")} <ArrowUpRight aria-hidden="true" /></a>
+                    </div>
+                  </div>
+
+                  <div className="fab-duplicate-retention-note">
+                    <ShieldCheck aria-hidden="true" />
+                    <span>
+                      <strong>{copy("Both source files are retained", "Beide bronbestanden blijven behouden")}</strong>
+                      <small>{copy("This decision controls bookkeeping identity only. FAB does not delete or archive either source file here.", "Deze beslissing bepaalt alleen de boekhoudkundige identiteit. FAB verwijdert of archiveert hier geen van beide bronbestanden.")}</small>
+                    </span>
+                  </div>
+                </>
+              ) : (
+                <p>{copy("Duplicate candidate evidence is incomplete. Keep this gate open.", "Het duplicaatbewijs is onvolledig. Laat deze controle open.")}</p>
+              )}
+              <div className="fab-detail-actions">
+                <button className="fab-primary-button" type="button" disabled={isBusy || !duplicateCandidate} onClick={() => { void decideDuplicate(true); }}><CopyCheck aria-hidden="true" /> {copy("Same transaction", "Dezelfde transactie")}</button>
+                <button className="fab-secondary-button" type="button" disabled={isBusy || !duplicateCandidate} onClick={() => { void decideDuplicate(false); }}><X aria-hidden="true" /> {copy("Different transaction", "Andere transactie")}</button>
+              </div>
             </section>
           )}
 
@@ -471,6 +588,32 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
       </aside>
     </div>,
     globalThis.document.body,
+  );
+}
+
+function DuplicateIdentityEvidence({ identity, copy }: {
+  identity: FabRecord;
+  copy: (english: string, dutch: string) => string;
+}) {
+  const fields = [
+    [copy("Invoice", "Factuur"), text(identity.invoiceNumber, "")],
+    [copy("Receipt", "Bon"), text(identity.receiptNumber, "")],
+    [copy("Order", "Bestelling"), text(identity.orderNumber, "")],
+    [copy("Transaction", "Transactie"), text(identity.transactionReference, "")],
+    [copy("VAT", "Btw"), text(identity.tax, "")],
+  ].filter((field): field is [string, string] => Boolean(field[1]));
+  if (!fields.length) {
+    return <p className="fab-duplicate-no-reference">{copy("No labeled reference recovered", "Geen gelabelde referentie gevonden")}</p>;
+  }
+  return (
+    <dl className="fab-duplicate-identifiers">
+      {fields.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -508,6 +651,12 @@ function normalizedVendor(value: string): string {
 
 function numericText(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }
 
 function parseNumber(value: string): number | undefined {

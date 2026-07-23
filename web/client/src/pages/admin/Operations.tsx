@@ -156,7 +156,15 @@ export default function AdminOperations() {
       const result = await resolveReview.mutateAsync(input);
       const batch = asRecord(result.batchPropagation);
       const propagated = count(batch.appliedDocuments);
-      toast.success(propagated > 0
+      const remainingDuplicateCandidates = Array.isArray(result.remainingDuplicateCandidateIds)
+        ? result.remainingDuplicateCandidateIds.length
+        : 0;
+      toast.success(text(result.status, "") === "candidate_rejected"
+        ? copy(
+          `Candidate rejected; ${remainingDuplicateCandidates} duplicate match${remainingDuplicateCandidates === 1 ? "" : "es"} still require review.`,
+          `Kandidaat afgewezen; ${remainingDuplicateCandidates} duplicaatmatch${remainingDuplicateCandidates === 1 ? "" : "es"} moet${remainingDuplicateCandidates === 1 ? "" : "en"} nog worden gecontroleerd.`,
+        )
+        : propagated > 0
         ? copy(
           `Verified details saved and category applied to ${propagated} other exact vendor match${propagated === 1 ? "" : "es"}.`,
           `Geverifieerde gegevens opgeslagen en categorie toegepast op ${propagated} andere exacte leveranciersmatch${propagated === 1 ? "" : "es"}.`,

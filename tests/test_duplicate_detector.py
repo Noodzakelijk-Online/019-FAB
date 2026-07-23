@@ -298,6 +298,32 @@ class TestDuplicateDetector(unittest.TestCase):
         self.assertTrue(result["is_duplicate"])
         self.assertIn("receipt_number", result["matched_identity_fields"])
 
+    def test_comparison_exposes_bounded_identity_evidence_for_review(self):
+        comparison = self.detector.compare_identity_evidence(
+            {
+                "ocr_text": "Transactie nr.: 10632674",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 31.12,
+                },
+            },
+            {
+                "ocr_text": "Transaction: 10632674",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 31.12,
+                },
+            },
+        )
+
+        self.assertIn("transaction_reference", comparison["matched_identity_fields"])
+        self.assertEqual(comparison["conflicting_identity_fields"], [])
+        self.assertEqual(comparison["left"]["transaction_reference"], "10632674")
+        self.assertEqual(comparison["right"]["transaction_reference"], "10632674")
+        self.assertGreaterEqual(comparison["comparable_fields"], 3)
+
     def test_missing_dates_do_not_receive_similarity_credit(self):
         score = self.detector.similarity_score(
             {"extracted_data": {"vendor_name": "Vendor A", "total_amount": 10}},

@@ -399,6 +399,7 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             self.assertEqual(candidate_id, same_candidate_id)
+            self.assertEqual(ledger.get_duplicate_candidate(candidate_id)["id"], candidate_id)
             self.assertEqual(ledger.dashboard_metrics()["duplicate_candidates"], 1)
             self.assertEqual(ledger.dashboard_metrics()["open_duplicate_candidates"], 1)
             candidates = ledger.list_duplicate_candidates(status="in_review", document_id=duplicate_id)

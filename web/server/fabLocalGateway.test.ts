@@ -164,9 +164,30 @@ describe("FAB local API gateway", () => {
             privateInternalMetadata: { raw: true },
           },
           duplicateCandidates: [{
+            id: 11,
             candidateDocumentId: 6,
+            matchType: "fuzzy_document_match",
+            confidenceScore: 0.96,
+            matchedIdentityFields: ["vendor", "date", "amount", "transaction_reference"],
+            conflictingIdentityFields: [],
+            comparableFields: 4,
+            similarityScore: 1,
+            currentIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+              privateReference: "omit-this",
+            },
+            candidateIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+            },
             document: {
               filename: "possible-duplicate.pdf",
+              vendorName: "Example",
               transactionDate: "2026-07-01",
               totalAmount: 42,
               ocrExcerpt: "omit duplicate OCR",
@@ -260,9 +281,19 @@ describe("FAB local API gateway", () => {
         }),
         duplicateCandidates: [
           expect.objectContaining({
+            id: 11,
             candidateDocumentId: 6,
+            matchType: "fuzzy_document_match",
+            matchedIdentityFields: ["vendor", "date", "amount", "transaction_reference"],
+            currentIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+            },
             document: {
               filename: "possible-duplicate.pdf",
+              vendorName: "Example",
               transactionDate: "2026-07-01",
               totalAmount: 42,
             },
@@ -303,6 +334,7 @@ describe("FAB local API gateway", () => {
     expect(serialized).not.toContain("private-evidence-digest");
     expect(serialized).not.toContain("private-business-id");
     expect(serialized).not.toContain("privateModelTrace");
+    expect(serialized).not.toContain("privateReference");
     expect(serialized).not.toContain("privateInternalMetadata");
     expect(serialized).not.toContain("omit duplicate OCR");
     expect(serialized).not.toContain("duplicateFingerprint");
@@ -460,6 +492,7 @@ describe("FAB local API gateway", () => {
       corrections: {
         category: "Operations | Office Supplies",
         totalAmount: 42.5,
+        duplicateCandidateId: 7,
       },
     });
 
@@ -469,7 +502,11 @@ describe("FAB local API gateway", () => {
       body: {
         status: "approved",
         resolution: "Verified against the source receipt.",
-        corrections: { category: "Operations | Office Supplies", totalAmount: 42.5 },
+        corrections: {
+          category: "Operations | Office Supplies",
+          totalAmount: 42.5,
+          duplicateCandidateId: 7,
+        },
         learnRule: true,
         applyToMatchingVendor: false,
       },

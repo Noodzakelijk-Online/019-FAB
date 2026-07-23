@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
 from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
+from src.document_handling.duplicate_detector import DuplicateDetector
 from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
@@ -6877,7 +6878,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             status=status_filter,
             limit=_limit_arg(),
         )
-        work_items = _review_work_items(ledger, review_items)
+        work_items = _review_work_items(ledger, review_items, config)
         evidence_only_work_items = [
             item
             for item in work_items
@@ -6949,6 +6950,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         status_code = {
             "not_found": 404,
             "already_resolved": 409,
+            "duplicate_candidate_not_found": 404,
+            "duplicate_candidate_already_resolved": 409,
+            "duplicate_candidate_mismatch": 409,
+            "duplicate_candidate_selection_required": 409,
+            "invalid_duplicate_decision": 400,
         }.get(result.get("status"), 200)
         return jsonify(result), status_code
 
@@ -7475,7 +7481,11 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> list:
+def _review_work_items(
+    ledger: LocalOperationsLedger,
+    review_items: list,
+    config: Optional[Dict[str, Any]] = None,
+) -> list:
     grouped: Dict[str, list] = {}
     for item in review_items:
         document_id = item.get("document_id")
@@ -7491,6 +7501,7 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
     documents = review_context["documents"]
     bookkeeping_records = review_context["bookkeeping_records"]
     duplicate_links = review_context["duplicate_candidates"]
+    duplicate_detector = DuplicateDetector(config or {})
 
     work_items = []
     for group in grouped.values():
@@ -7511,6 +7522,11 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
             if int(candidate.get("document_id") or 0) != int(document_id or 0):
                 other_id = candidate.get("document_id")
             other_document = documents.get(int(other_id)) if other_id is not None else None
+            comparison = (
+                duplicate_detector.compare_identity_evidence(document, other_document)
+                if document and other_document
+                else {}
+            )
             duplicate_candidates.append({
                 "id": candidate.get("id"),
                 "candidateDocumentId": other_id,
@@ -7518,6 +7534,12 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
                 "confidenceScore": candidate.get("confidence_score"),
                 "reason": candidate.get("reason"),
                 "evidence": candidate.get("evidence") or {},
+                "matchedIdentityFields": comparison.get("matched_identity_fields") or [],
+                "conflictingIdentityFields": comparison.get("conflicting_identity_fields") or [],
+                "similarityScore": comparison.get("similarity_score"),
+                "comparableFields": comparison.get("comparable_fields"),
+                "currentIdentity": _compact_duplicate_identity(comparison.get("left") or {}),
+                "candidateIdentity": _compact_duplicate_identity(comparison.get("right") or {}),
                 "document": _compact_review_document(other_document) if other_document else None,
             })
         work_items.append({
@@ -7548,6 +7570,20 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
         ),
         reverse=True,
     )
+
+
+def _compact_duplicate_identity(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "postingPolarity": evidence.get("posting_polarity"),
+        "vendor": evidence.get("vendor"),
+        "date": evidence.get("date"),
+        "amount": evidence.get("amount"),
+        "tax": evidence.get("tax"),
+        "invoiceNumber": evidence.get("invoice_number"),
+        "receiptNumber": evidence.get("receipt_number"),
+        "orderNumber": evidence.get("order_number"),
+        "transactionReference": evidence.get("transaction_reference"),
+    }
 
 
 def _compact_review_document(
@@ -7611,6 +7647,8 @@ def _compact_review_document(
         "targetSystem": target_system,
         "invoiceNumber": extracted.get("invoice_number"),
         "receiptNumber": extracted.get("receipt_number"),
+        "orderNumber": extracted.get("order_number"),
+        "transactionReference": extracted.get("transaction_reference"),
         "confidenceScore": document.get("confidence_score"),
         "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
         "ocrExcerpt": ocr_text[:1200],
@@ -7645,6 +7683,7 @@ def _corrections_from_mapping(values: Any) -> Dict[str, Any]:
         "vatAmount",
         "targetSystem",
         "duplicateOfDocumentId",
+        "duplicateCandidateId",
         "documentType",
     )
     corrections = {}

@@ -163,6 +163,188 @@ class TestLocalReviewService(unittest.TestCase):
             self.assertEqual(document["duplicate_candidates"][0]["status"], "rejected")
             self.assertEqual(ledger.dashboard_metrics()["documents"], 2)
 
+    def test_pair_scoped_duplicate_rejection_keeps_other_candidate_open(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            canonical_ids = [
+                ledger.register_document({
+                    "source": "google_drive",
+                    "sourceDocumentId": f"canonical-{index}",
+                    "originalFilename": f"canonical-{index}.pdf",
+                    "processingStatus": "processed",
+                })
+                for index in range(2)
+            ]
+            subject_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "subject",
+                "originalFilename": "subject.pdf",
+                "processingStatus": "needs_review",
+                "duplicateOfDocumentId": canonical_ids[0],
+            })
+            candidate_ids = [
+                ledger.record_duplicate_candidate({
+                    "documentId": subject_id,
+                    "candidateDocumentId": canonical_id,
+                    "matchType": "fuzzy_document_match",
+                    "status": "pending",
+                })
+                for canonical_id in canonical_ids
+            ]
+            review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Compare both candidates.",
+            })
+
+            first_result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="rejected",
+                resolution="Different transaction from the first candidate.",
+                corrections={"duplicateCandidateId": candidate_ids[0]},
+                learn_rule=False,
+            )
+
+            self.assertTrue(first_result["success"])
+            self.assertEqual(first_result["status"], "candidate_rejected")
+            self.assertEqual(first_result["reviewItemStatus"], "in_review")
+            self.assertEqual(first_result["remainingDuplicateCandidateIds"], [candidate_ids[1]])
+            first_document = ledger.get_document(subject_id)
+            self.assertIsNone(first_document["duplicate_of_document_id"])
+            self.assertEqual(first_document["processing_status"], "needs_review")
+            self.assertEqual(
+                {item["id"]: item["status"] for item in first_document["duplicate_candidates"]},
+                {candidate_ids[0]: "rejected", candidate_ids[1]: "pending"},
+            )
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "in_review")
+
+            final_result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="rejected",
+                resolution="Different transaction from the remaining candidate.",
+                corrections={"duplicateCandidateId": candidate_ids[1]},
+                learn_rule=False,
+            )
+
+            self.assertTrue(final_result["success"])
+            self.assertEqual(final_result["status"], "rejected")
+            self.assertEqual(final_result["remainingDuplicateCandidateIds"], [])
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "rejected")
+            self.assertEqual(ledger.get_document(subject_id)["processing_status"], "reviewed")
+            self.assertEqual(ledger.dashboard_metrics()["documents"], 3)
+
+    def test_multi_candidate_duplicate_review_requires_an_explicit_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            candidate_document_ids = [
+                ledger.register_document({
+                    "source": "scanner",
+                    "sourceDocumentId": f"candidate-{index}",
+                    "originalFilename": f"candidate-{index}.pdf",
+                })
+                for index in range(2)
+            ]
+            subject_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "subject",
+                "originalFilename": "subject.pdf",
+                "processingStatus": "needs_review",
+            })
+            for candidate_document_id in candidate_document_ids:
+                ledger.record_duplicate_candidate({
+                    "documentId": subject_id,
+                    "candidateDocumentId": candidate_document_id,
+                    "matchType": "fuzzy_document_match",
+                    "status": "pending",
+                })
+            review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Select a pair.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="rejected",
+                resolution="Ambiguous document-level decision.",
+                corrections={},
+                learn_rule=False,
+            )
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "duplicate_candidate_selection_required")
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "pending")
+            self.assertEqual(
+                {item["status"] for item in ledger.get_document(subject_id)["duplicate_candidates"]},
+                {"pending"},
+            )
+
+    def test_pair_scoped_duplicate_approval_selects_canonical_and_retains_all_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            canonical_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "canonical",
+                "originalFilename": "canonical.pdf",
+                "processingStatus": "processed",
+            })
+            alternate_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "alternate",
+                "originalFilename": "alternate.pdf",
+                "processingStatus": "processed",
+            })
+            subject_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "subject",
+                "originalFilename": "subject.pdf",
+                "processingStatus": "needs_review",
+            })
+            selected_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": canonical_id,
+                "candidateDocumentId": subject_id,
+                "matchType": "exact_fingerprint_match",
+                "status": "pending",
+            })
+            alternate_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": alternate_id,
+                "matchType": "fuzzy_document_match",
+                "status": "pending",
+            })
+            review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Choose the canonical transaction.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="approved",
+                resolution="The retained files represent the same transaction.",
+                corrections={
+                    "duplicateCandidateId": selected_candidate_id,
+                    "duplicateOfDocumentId": canonical_id,
+                },
+                learn_rule=False,
+            )
+
+            self.assertTrue(result["success"])
+            self.assertTrue(result["sourceFilesRetained"])
+            self.assertEqual(result["duplicateCandidatesResolved"], 2)
+            document = ledger.get_document(subject_id)
+            self.assertEqual(document["duplicate_of_document_id"], canonical_id)
+            self.assertEqual(document["processing_status"], "duplicate")
+            self.assertEqual(
+                {item["id"]: item["status"] for item in document["duplicate_candidates"]},
+                {
+                    selected_candidate_id: "approved",
+                    alternate_candidate_id: "rejected",
+                },
+            )
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "approved")
+            self.assertEqual(ledger.dashboard_metrics()["documents"], 3)
+
     def test_category_correction_resolves_satisfied_gates_but_preserves_duplicate_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

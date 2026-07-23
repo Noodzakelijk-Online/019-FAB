@@ -53,6 +53,42 @@ class LocalReviewService:
 
         document = self.ledger.get_document(int(review_item["document_id"])) if review_item.get("document_id") else None
         normalized_corrections = normalize_corrections(corrections or {})
+        if document and review_item.get("reason") == "duplicate_candidate":
+            open_duplicate_candidates = [
+                item
+                for item in document.get("duplicate_candidates") or []
+                if item.get("status") in OPEN_REVIEW_STATUSES
+            ]
+            if not normalized_corrections.get("duplicateCandidateId"):
+                if len(open_duplicate_candidates) != 1:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Select one duplicate candidate before resolving this review"
+                            if open_duplicate_candidates
+                            else "No open duplicate candidate belongs to this review"
+                        ),
+                        "status": (
+                            "duplicate_candidate_selection_required"
+                            if open_duplicate_candidates
+                            else "duplicate_candidate_not_found"
+                        ),
+                    }
+                selected_candidate = open_duplicate_candidates[0]
+                normalized_corrections["duplicateCandidateId"] = int(selected_candidate["id"])
+                if status == "approved" and not normalized_corrections.get("duplicateOfDocumentId"):
+                    normalized_corrections["duplicateOfDocumentId"] = (
+                        int(selected_candidate["candidate_document_id"])
+                        if int(selected_candidate["document_id"]) == int(document["id"])
+                        else int(selected_candidate["document_id"])
+                    )
+            return self._resolve_duplicate_candidate_review(
+                review_item=review_item,
+                document=document,
+                status=status,
+                resolution=resolution,
+                corrections=normalized_corrections,
+            )
         original_data = _document_snapshot(document) if document else {}
         document_update = {}
         rule_id = None
@@ -198,6 +234,242 @@ class LocalReviewService:
             "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
             "corrections": normalized_corrections,
             "batchPropagation": batch_propagation,
+        }
+
+    def _resolve_duplicate_candidate_review(
+        self,
+        review_item: Dict[str, Any],
+        document: Dict[str, Any],
+        status: str,
+        resolution: Optional[str],
+        corrections: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if status not in {"approved", "rejected"}:
+            return {
+                "success": False,
+                "error": "Duplicate candidates must be approved or rejected",
+                "status": "invalid_duplicate_decision",
+            }
+
+        candidate_id = int(corrections["duplicateCandidateId"])
+        candidate = self.ledger.get_duplicate_candidate(candidate_id)
+        if not candidate:
+            return {
+                "success": False,
+                "error": "Duplicate candidate not found",
+                "status": "duplicate_candidate_not_found",
+            }
+        if candidate.get("status") not in OPEN_REVIEW_STATUSES:
+            return {
+                "success": False,
+                "error": "Duplicate candidate is already closed",
+                "status": "duplicate_candidate_already_resolved",
+                "duplicateCandidateId": candidate_id,
+            }
+
+        document_id = int(document["id"])
+        pair_document_ids = {
+            int(candidate["document_id"]),
+            int(candidate["candidate_document_id"]),
+        }
+        if document_id not in pair_document_ids:
+            return {
+                "success": False,
+                "error": "Duplicate candidate does not belong to this review document",
+                "status": "duplicate_candidate_mismatch",
+            }
+        counterpart_document_id = next(
+            pair_id for pair_id in pair_document_ids if pair_id != document_id
+        )
+        accepted = status == "approved"
+        if accepted and corrections.get("duplicateOfDocumentId") != counterpart_document_id:
+            return {
+                "success": False,
+                "error": "The canonical document must match the selected duplicate candidate",
+                "status": "duplicate_candidate_mismatch",
+            }
+
+        review_item_id = int(review_item["id"])
+        original_data = _document_snapshot(document)
+        decision = "same_transaction" if accepted else "different_transaction"
+        candidate_resolution = resolution or (
+            f"Confirmed as the same transaction as document #{counterpart_document_id}."
+            if accepted
+            else f"Confirmed as a different transaction from document #{counterpart_document_id}."
+        )
+        self.ledger.resolve_duplicate_candidate(
+            candidate_id,
+            "approved" if accepted else "rejected",
+            candidate_resolution,
+            evidence={
+                "reviewItemId": review_item_id,
+                "operatorDecision": decision,
+                "counterpartDocumentId": counterpart_document_id,
+                "sourceFilesRetained": True,
+            },
+        )
+        duplicate_candidates_resolved = 1
+
+        if accepted:
+            for other_candidate in document.get("duplicate_candidates") or []:
+                other_candidate_id = int(other_candidate.get("id") or 0)
+                if (
+                    not other_candidate_id
+                    or other_candidate_id == candidate_id
+                    or other_candidate.get("status") not in OPEN_REVIEW_STATUSES
+                ):
+                    continue
+                if self.ledger.resolve_duplicate_candidate(
+                    other_candidate_id,
+                    "rejected",
+                    (
+                        f"Superseded by approved duplicate candidate #{candidate_id}; "
+                        f"document #{counterpart_document_id} is the selected canonical record."
+                    ),
+                    evidence={
+                        "reviewItemId": review_item_id,
+                        "operatorDecision": "superseded",
+                        "supersededByDuplicateCandidateId": candidate_id,
+                        "sourceFilesRetained": True,
+                    },
+                ):
+                    duplicate_candidates_resolved += 1
+            self.ledger.update_document(document_id, {
+                "duplicateOfDocumentId": counterpart_document_id,
+                "processingStatus": "duplicate",
+            })
+        elif document.get("duplicate_of_document_id") == counterpart_document_id:
+            self.ledger.clear_document_duplicate(document_id)
+
+        refreshed_document = self.ledger.get_document(document_id) or document
+        remaining_duplicate_candidates = [
+            item
+            for item in refreshed_document.get("duplicate_candidates") or []
+            if item.get("status") in OPEN_REVIEW_STATUSES
+        ]
+        close_review = accepted or not remaining_duplicate_candidates
+        correction_status = status if close_review else "candidate_rejected"
+        correction_id = self.ledger.record_review_correction({
+            "reviewItemId": review_item_id,
+            "documentId": document_id,
+            "originalData": original_data,
+            "correctedData": corrections,
+            "status": correction_status,
+        })
+        if close_review:
+            self.ledger.resolve_review_item(
+                review_item_id,
+                status=status,
+                resolution=candidate_resolution,
+                corrected_data={
+                    "corrections": corrections,
+                    "correctionId": correction_id,
+                    "duplicateCandidateId": candidate_id,
+                },
+            )
+        else:
+            self.ledger.resolve_review_item(
+                review_item_id,
+                status="in_review",
+                resolution=(
+                    f"Candidate #{candidate_id} rejected; "
+                    f"{len(remaining_duplicate_candidates)} candidate(s) still require review."
+                ),
+                corrected_data={
+                    "lastDuplicateCandidateDecision": {
+                        "duplicateCandidateId": candidate_id,
+                        "counterpartDocumentId": counterpart_document_id,
+                        "decision": decision,
+                        "correctionId": correction_id,
+                    },
+                },
+            )
+
+        updated_document = self.ledger.get_document(document_id) or document
+        superseded_review_ids = []
+        if accepted:
+            superseded_review_ids = self._resolve_superseded_document_reviews(
+                review_item,
+                status,
+                corrections,
+                updated_document,
+            )
+            updated_document = self.ledger.get_document(document_id) or updated_document
+
+        remaining_review_items = [
+            item
+            for item in updated_document.get("review_items") or []
+            if item.get("status") in OPEN_REVIEW_STATUSES
+        ]
+        if accepted:
+            final_processing_status = "duplicate"
+        elif remaining_review_items:
+            final_processing_status = "needs_review"
+        else:
+            final_processing_status = "reviewed"
+        if updated_document.get("processing_status") != final_processing_status:
+            self.ledger.update_document(
+                document_id,
+                {"processingStatus": final_processing_status},
+            )
+            updated_document = self.ledger.get_document(document_id) or updated_document
+
+        bookkeeping_record = LocalBookkeepingRecordService(self.ledger).upsert_from_document(
+            document_id
+        )
+        result_status = status if close_review else "candidate_rejected"
+        audit_details = {
+            "status": result_status,
+            "resolution": candidate_resolution,
+            "documentId": document_id,
+            "duplicateCandidateId": candidate_id,
+            "counterpartDocumentId": counterpart_document_id,
+            "operatorDecision": decision,
+            "correctionId": correction_id,
+            "duplicateCandidatesResolved": duplicate_candidates_resolved,
+            "remainingDuplicateCandidateIds": [
+                int(item["id"]) for item in remaining_duplicate_candidates
+            ],
+            "supersededReviewItemIds": superseded_review_ids,
+            "remainingReviewItemIds": [
+                int(item["id"]) for item in remaining_review_items
+            ],
+            "processingStatus": final_processing_status,
+            "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
+            "sourceFilesRetained": True,
+        }
+        self.ledger.record_audit_event({
+            "action": "local_review.duplicate_candidate.resolve",
+            "entityType": "duplicate_candidate",
+            "entityId": str(candidate_id),
+            "details": audit_details,
+        })
+        self.ledger.record_audit_event({
+            "action": "local_review.review_item.resolve",
+            "entityType": "review_item",
+            "entityId": str(review_item_id),
+            "details": audit_details,
+        })
+
+        return {
+            "success": True,
+            "reviewItemId": review_item_id,
+            "documentId": document_id,
+            "status": result_status,
+            "reviewItemStatus": status if close_review else "in_review",
+            "duplicateCandidateId": candidate_id,
+            "counterpartDocumentId": counterpart_document_id,
+            "correctionId": correction_id,
+            "duplicateCandidatesResolved": duplicate_candidates_resolved,
+            "remainingDuplicateCandidateIds": [
+                int(item["id"]) for item in remaining_duplicate_candidates
+            ],
+            "supersededReviewItemIds": superseded_review_ids,
+            "remainingReviewItems": remaining_review_items,
+            "processingStatus": final_processing_status,
+            "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
+            "corrections": corrections,
+            "sourceFilesRetained": True,
         }
 
     def _apply_vendor_category_to_matching_reviews(
@@ -470,6 +742,8 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
         "targetSystem": "targetSystem",
         "duplicate_of_document_id": "duplicateOfDocumentId",
         "duplicateOfDocumentId": "duplicateOfDocumentId",
+        "duplicate_candidate_id": "duplicateCandidateId",
+        "duplicateCandidateId": "duplicateCandidateId",
         "document_type": "documentType",
         "documentType": "documentType",
     }
@@ -482,7 +756,7 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
             if parsed is not None:
                 result[mapped] = parsed
             continue
-        if mapped == "duplicateOfDocumentId":
+        if mapped in {"duplicateOfDocumentId", "duplicateCandidateId"}:
             parsed_id = _int(value)
             if parsed_id is not None:
                 result[mapped] = parsed_id

@@ -444,6 +444,7 @@ export async function resolveFabReviewItem(input: {
     vatAmount?: number;
     targetSystem?: string;
     duplicateOfDocumentId?: number;
+    duplicateCandidateId?: number;
     documentType?: "receipt" | "vendor_invoice" | "credit_note" | "order_confirmation" | "estimate" | "bank_statement" | "insurance_policy" | "government_correspondence";
   };
   learnRule?: boolean;
@@ -561,6 +562,7 @@ function projectReviewWorkItem(value: JsonRecord): JsonRecord {
     "normalizedRecordDate",
     "normalizedVatAmount",
     "ocrExcerpt",
+    "orderNumber",
     "postingEligible",
     "processingStatus",
     "source",
@@ -568,8 +570,11 @@ function projectReviewWorkItem(value: JsonRecord): JsonRecord {
     "targetSystem",
     "totalAmount",
     "transactionDate",
+    "transactionReference",
     "vatAmount",
     "vendorName",
+    "invoiceNumber",
+    "receiptNumber",
   ]);
   const categorySuggestion = selectFields(
     asRecord(value.document)?.categorySuggestion,
@@ -582,15 +587,48 @@ function projectReviewWorkItem(value: JsonRecord): JsonRecord {
     ...selectFields(candidate, [
       "candidateDocumentId",
       "confidenceScore",
+      "conflictingIdentityFields",
+      "comparableFields",
       "id",
       "matchType",
+      "matchedIdentityFields",
       "reason",
+      "similarityScore",
+    ]),
+    currentIdentity: selectFields(candidate.currentIdentity, [
+      "amount",
+      "date",
+      "invoiceNumber",
+      "orderNumber",
+      "postingPolarity",
+      "receiptNumber",
+      "tax",
+      "transactionReference",
+      "vendor",
+    ]),
+    candidateIdentity: selectFields(candidate.candidateIdentity, [
+      "amount",
+      "date",
+      "invoiceNumber",
+      "orderNumber",
+      "postingPolarity",
+      "receiptNumber",
+      "tax",
+      "transactionReference",
+      "vendor",
     ]),
     document: selectFields(candidate.document, [
       "currency",
+      "documentType",
       "filename",
+      "invoiceNumber",
+      "orderNumber",
+      "receiptNumber",
+      "source",
       "totalAmount",
       "transactionDate",
+      "transactionReference",
+      "vendorName",
     ]),
   }));
   const reviewItems = arrayValue(value.reviewItems).map((item) => selectFields(

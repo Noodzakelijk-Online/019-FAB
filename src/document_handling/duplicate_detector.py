@@ -150,13 +150,40 @@ class DuplicateDetector:
         score, _ = self._similarity_details(left, right)
         return score
 
+    def identity_evidence(self, document: Dict[str, Any]) -> Dict[str, str]:
+        """Return the bounded, normalized transaction identity used by the detector."""
+        return dict(self._identity_evidence(document))
+
+    def compare_identity_evidence(
+        self,
+        left: Dict[str, Any],
+        right: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        left_evidence = self._identity_evidence(left)
+        right_evidence = self._identity_evidence(right)
+        similarity_score, comparable_fields = self._similarity_details(left, right)
+        return {
+            "left": dict(left_evidence),
+            "right": dict(right_evidence),
+            "matched_identity_fields": self._matching_identity_fields(
+                left_evidence,
+                right_evidence,
+            ),
+            "conflicting_identity_fields": self._identity_conflicts(
+                left_evidence,
+                right_evidence,
+            ),
+            "similarity_score": round(similarity_score, 4),
+            "comparable_fields": comparable_fields,
+        }
+
     def _similarity_details(
         self,
         left: Dict[str, Any],
         right: Dict[str, Any],
     ) -> Tuple[float, int]:
-        left_data = left.get("extracted_data", left)
-        right_data = right.get("extracted_data", right)
+        left_data = left.get("extracted_data") if isinstance(left.get("extracted_data"), dict) else left
+        right_data = right.get("extracted_data") if isinstance(right.get("extracted_data"), dict) else right
 
         comparisons = []
         self._append_text_comparison(
@@ -232,7 +259,11 @@ class DuplicateDetector:
 
     @classmethod
     def _identity_evidence(cls, document: Dict[str, Any]) -> Dict[str, str]:
-        extracted = document.get("extracted_data", document)
+        extracted = (
+            document.get("extracted_data")
+            if isinstance(document.get("extracted_data"), dict)
+            else document
+        )
         return {
             "posting_polarity": cls._posting_polarity(document),
             "vendor": cls._normalize(extracted.get("vendor_name") or document.get("vendor_name")),
