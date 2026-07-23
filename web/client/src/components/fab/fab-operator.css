@@ -489,6 +489,13 @@ html.fab-operator-active body {
 .fab-filter-bar label { display: flex; align-items: center; gap: 7px; min-height: 44px; color: var(--fab-muted); font-size: 13px; }
 .fab-filter-bar select { min-height: 38px; padding: 0 30px 0 9px; border: 1px solid var(--fab-line-strong); border-radius: 5px; background: #fff; color: var(--fab-ink); font-size: 13px; }
 .fab-result-count { margin-left: auto; color: var(--fab-muted); font-size: 12px; }
+.fab-review-filter-bar { justify-content: space-between; }
+.fab-segmented-control { display: flex; flex-wrap: wrap; gap: 2px; min-width: 0; padding: 3px; border: 1px solid var(--fab-line-strong); border-radius: 6px; background: #e9efed; }
+.fab-segmented-control button { display: inline-flex; align-items: center; justify-content: space-between; gap: 9px; min-height: 36px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: var(--fab-muted); font-size: 12px; font-weight: 700; cursor: pointer; }
+.fab-segmented-control button:hover { background: rgba(255,255,255,.7); color: var(--fab-ink); }
+.fab-segmented-control button:focus-visible { outline: 2px solid var(--fab-blue); outline-offset: 1px; }
+.fab-segmented-control button.is-active { background: #fff; color: var(--fab-ink); box-shadow: 0 1px 2px rgba(15,32,40,.12); }
+.fab-segmented-control button strong { min-width: 18px; color: inherit; font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
 .fab-severity-summary span { padding: 5px 8px; font-size: 12px !important; }
 .fab-table { min-width: 920px; }
 .fab-table th { padding: 11px 12px; }
@@ -805,6 +812,10 @@ html.fab-operator-active body {
   .fab-context-strip span { border-right: 0; border-bottom: 1px solid var(--fab-line-strong); }
   .fab-context-strip span:last-child { border-bottom: 0; }
   .fab-severity-summary { flex-wrap: wrap; justify-content: flex-end; }
+  .fab-review-filter-bar { align-items: stretch; flex-direction: column; }
+  .fab-review-filter-bar .fab-result-count { margin-left: 0; }
+  .fab-segmented-control { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fab-segmented-control button:first-child { grid-column: 1 / -1; }
   .fab-table-wrap { overflow: visible; contain: layout inline-size paint; }
   .fab-table { display: block; min-width: 0; }
   .fab-table thead { display: none; }

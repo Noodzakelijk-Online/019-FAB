@@ -14,6 +14,12 @@ import {
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
 import {
+  matchesReviewTriage,
+  reviewTriageCounts,
+  reviewTriageFilters,
+  type FabReviewTriageFilter,
+} from "./fabReviewTriage";
+import {
   asRecord,
   count,
   humanize,
@@ -67,9 +73,11 @@ export function FabReviewWorkspace({
 }: FabReviewWorkspaceProps) {
   const { copy } = useFabLocale();
   const [selectedId, setSelectedId] = useState("");
+  const [reviewFilter, setReviewFilter] = useState<FabReviewTriageFilter>("all");
+  const triageCounts = useMemo(() => reviewTriageCounts(workItems), [workItems]);
   const visibleItems = useMemo(
-    () => workItems.filter((item) => matchesSearch(item, search)),
-    [workItems, search],
+    () => workItems.filter((item) => matchesReviewTriage(item, reviewFilter) && matchesSearch(item, search)),
+    [reviewFilter, workItems, search],
   );
   const selected = workItems.find((item) => text(item.id, "") === selectedId) || null;
   const state = panelState(resource, workItems.length);
@@ -92,6 +100,28 @@ export function FabReviewWorkspace({
           <FabDataStatus resource={resource} state={state} emptyLabel={copy("Clear", "Leeg")} />
         </div>
       </div>
+
+      {(resource?.state === "live" || resource?.state === "stale") && workItems.length > 0 ? (
+        <div className="fab-filter-bar fab-review-filter-bar">
+          <div className="fab-segmented-control" role="group" aria-label={copy("Review queue mode", "Modus controlewachtrij")}>
+            {reviewTriageFilters.map((filter) => (
+              <button
+                key={filter}
+                type="button"
+                className={reviewFilter === filter ? "is-active" : ""}
+                aria-pressed={reviewFilter === filter}
+                onClick={() => setReviewFilter(filter)}
+              >
+                <span>{reviewFilterLabel(filter, copy)}</span>
+                <strong>{triageCounts[filter]}</strong>
+              </button>
+            ))}
+          </div>
+          <span className="fab-result-count">
+            {copy(`${visibleItems.length} shown`, `${visibleItems.length} weergegeven`)}
+          </span>
+        </div>
+      ) : null}
 
       {(resource?.state === "live" || resource?.state === "stale") && visibleItems.length > 0 ? (
         <div className="fab-table-wrap">
@@ -149,8 +179,8 @@ export function FabReviewWorkspace({
         </div>
       ) : resource?.state === "live" && workItems.length === 0 ? (
         <div className="fab-empty-state compact"><CheckCircle2 aria-hidden="true" /><strong>{copy("No document decisions waiting", "Geen documentbeslissingen in afwachting")}</strong><span>{copy("FAB has no open document review gates.", "FAB heeft geen open documentcontroles.")}</span></div>
-      ) : resource?.state === "live" && visibleItems.length === 0 ? (
-        <div className="fab-empty-state compact"><FileSearch aria-hidden="true" /><strong>{copy("No matching reviews", "Geen overeenkomende controles")}</strong><span>{copy("Adjust the active search.", "Pas de zoekopdracht aan.")}</span></div>
+      ) : (resource?.state === "live" || resource?.state === "stale") && workItems.length > 0 && visibleItems.length === 0 ? (
+        <div className="fab-empty-state compact"><FileSearch aria-hidden="true" /><strong>{copy("No matching reviews", "Geen overeenkomende controles")}</strong><span>{copy("Adjust the review mode or active search.", "Pas de controlemodus of zoekopdracht aan.")}</span></div>
       ) : (
         <FabPanelStateMessage resource={resource} title={copy("Review queue", "Controlewachtrij")} />
       )}
@@ -166,6 +196,17 @@ export function FabReviewWorkspace({
       />
     </section>
   );
+}
+
+function reviewFilterLabel(
+  filter: FabReviewTriageFilter,
+  copy: (english: string, dutch: string) => string,
+): string {
+  if (filter === "suggestions") return copy("Suggestions", "Voorstellen");
+  if (filter === "validation") return copy("Validation", "Validatie");
+  if (filter === "duplicates") return copy("Duplicates", "Duplicaten");
+  if (filter === "supporting") return copy("Supporting", "Onderbouwing");
+  return copy("All", "Alles");
 }
 
 function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, resolvingReviewId, onResolve, onClose }: {
