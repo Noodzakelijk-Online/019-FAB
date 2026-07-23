@@ -20,6 +20,10 @@ import {
   type FabReviewTriageFilter,
 } from "./fabReviewTriage";
 import {
+  reviewApprovalBlockers,
+  type FabReviewApprovalBlocker,
+} from "./fabReviewApproval";
+import {
   asRecord,
   count,
   humanize,
@@ -283,6 +287,8 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const typeDecisionRequired = reviewItems.some((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")));
   const selectedNonPosting = NON_POSTING_DOCUMENT_TYPES.has(form.documentType);
   const selectedCreditNote = form.documentType === "credit_note";
+  const approvalBlockers = reviewApprovalBlockers(form, { nonPosting: selectedNonPosting });
+  const approvalReady = approvalBlockers.length === 0;
   const detailReviewSupportsBatch = VENDOR_CATEGORY_REASONS.has(text(detailReview?.reason, ""));
   const matchingVendorDocuments = detailReviewSupportsBatch ? workItems.filter((candidate) => {
     if (text(candidate.id, "") === text(item.id, "")) return false;
@@ -438,7 +444,16 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
               <label><span>{copy("Decision note", "Beslisnotitie")}</span><textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })} rows={3} required /></label>
               {!selectedNonPosting && <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span><strong>{copy("Teach FAB this exact vendor/category rule", "Leer FAB deze exacte leverancier/categorieregel")}</strong><small>{copy("Your approved source-backed decision becomes reusable for future exact-vendor matches.", "Uw goedgekeurde, brongestuurde beslissing wordt herbruikbaar voor toekomstige exacte leveranciersmatches.")}</small></span></label>}
               {!selectedNonPosting && matchingVendorDocuments > 0 && <label className="fab-review-checkbox fab-review-batch"><input type="checkbox" checked={form.applyToMatchingVendor} onChange={(event) => setForm({ ...form, applyToMatchingVendor: event.target.checked })} /><span><strong>{copy(`Apply this category to ${matchingVendorDocuments} other exact vendor match${matchingVendorDocuments === 1 ? "" : "es"}`, `Pas deze categorie toe op ${matchingVendorDocuments} andere exacte leveranciersmatch${matchingVendorDocuments === 1 ? "" : "es"}`)}</strong><small>{copy("Dates and amounts stay unchanged. Duplicate and missing-field reviews remain open.", "Datums en bedragen blijven ongewijzigd. Controles voor duplicaten en ontbrekende velden blijven open.")}</small></span></label>}
-              <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : selectedCreditNote ? copy("Approve credit reversal", "Creditboeking goedkeuren") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
+              {!approvalReady && (
+                <div className="fab-review-readiness" role="status">
+                  <AlertTriangle aria-hidden="true" />
+                  <span>
+                    <strong>{copy("Required before approval", "Vereist voor goedkeuring")}</strong>
+                    <small>{approvalBlockers.map((blocker) => reviewApprovalBlockerLabel(blocker, copy)).join(", ")}</small>
+                  </span>
+                </div>
+              )}
+              <button className="fab-primary-button" type="submit" disabled={isBusy || !approvalReady}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : selectedCreditNote ? copy("Approve credit reversal", "Creditboeking goedkeuren") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
             </form>
           )}
 
@@ -498,6 +513,18 @@ function numericText(value: unknown): string {
 function parseNumber(value: string): number | undefined {
   const parsed = Number(value.replace(",", "."));
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function reviewApprovalBlockerLabel(
+  blocker: FabReviewApprovalBlocker,
+  copy: (english: string, dutch: string) => string,
+): string {
+  if (blocker === "vendorName") return copy("vendor", "leverancier");
+  if (blocker === "transactionDate") return copy("valid transaction date", "geldige transactiedatum");
+  if (blocker === "totalAmount") return copy("positive amount", "positief bedrag");
+  if (blocker === "vatAmount") return copy("valid VAT", "geldige btw");
+  if (blocker === "category") return copy("FAB category intent", "FAB-categorie-intentie");
+  return copy("decision note", "beslisnotitie");
 }
 
 function formatMoney(value: unknown, currency: unknown, missingLabel: string): string {

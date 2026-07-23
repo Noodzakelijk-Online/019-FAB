@@ -598,6 +598,11 @@ html.fab-operator-active body {
 .fab-review-batch > span { display: grid; gap: 3px; }
 .fab-review-batch strong { color: var(--fab-ink); font-size: 12px; }
 .fab-review-batch small { color: var(--fab-muted); font-size: 11px; font-weight: 450; line-height: 1.45; }
+.fab-review-readiness { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; padding: 10px 11px; border: 1px solid #e6c994; border-radius: 6px; background: var(--fab-amber-soft); color: var(--fab-amber); }
+.fab-review-readiness > svg { width: 16px; height: 16px; margin-top: 1px; }
+.fab-review-readiness > span { display: grid; gap: 2px; }
+.fab-review-readiness strong { color: var(--fab-ink); font-size: 12px; }
+.fab-review-readiness small { color: var(--fab-muted); font-size: 11px; line-height: 1.4; }
 .fab-subsection-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .fab-subsection-heading > div { display: grid; }
 .fab-subsection-heading span { color: var(--fab-subtle); font-size: 9px; font-weight: 740; text-transform: uppercase; }
