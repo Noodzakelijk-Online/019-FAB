@@ -490,10 +490,16 @@ class FinancialFieldExtractor:
                 rf"\b{re.escape(label)}\b\s*(?:nr|no|number|nummer)?\s*[:#-]?\s*"
                 rf"(?P<ref>[A-Z0-9][A-Z0-9\-/]{{3,}})"
             )
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match:
-                return match.group("ref"), 0.8
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                reference = match.group("ref")
+                if self._plausible_reference(reference):
+                    return reference, 0.8
         return None, 0.0
+
+    @staticmethod
+    def _plausible_reference(value: str) -> bool:
+        normalized = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+        return len(normalized) >= 4 and any(character.isdigit() for character in normalized)
 
     @classmethod
     def _amount_from_match(cls, match: re.Match) -> Optional[float]:

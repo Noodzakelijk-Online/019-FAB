@@ -359,6 +359,22 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertIsNone(result["extracted_data"]["transaction_date"])
         self.assertEqual(result["field_confidences"]["transaction_date"], 0.0)
 
+    def test_reference_requires_identifier_digits(self):
+        false_reference = FinancialFieldExtractor().extract(
+            "T-Mobile\nInvoice staat open\nTotaal EUR 27,68"
+        )
+        valid_reference = FinancialFieldExtractor().extract(
+            "BrainForce\nInvoice BD4462AC-0002\nTotaal EUR 29,00"
+        )
+
+        self.assertIsNone(false_reference["extracted_data"]["invoice_number"])
+        self.assertEqual(false_reference["field_confidences"]["invoice_number"], 0.0)
+        self.assertEqual(
+            valid_reference["extracted_data"]["invoice_number"],
+            "BD4462AC-0002",
+        )
+        self.assertEqual(valid_reference["field_confidences"]["invoice_number"], 0.8)
+
 
 if __name__ == "__main__":
     unittest.main()

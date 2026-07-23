@@ -1479,6 +1479,39 @@ class LocalOperationsLedger:
                 updated += 1
             return updated
 
+    def resolve_duplicate_candidate(
+        self,
+        candidate_id: int,
+        status: str,
+        resolution: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM duplicate_candidates WHERE id = ? LIMIT 1",
+                (int(candidate_id),),
+            ).fetchone()
+            if not row:
+                return False
+            current_evidence = self._row_to_dict(row).get("evidence") or {}
+            updated_evidence = {
+                **current_evidence,
+                **(evidence or {}),
+            }
+            if resolution:
+                updated_evidence["resolution"] = resolution
+            self._update_with_connection(
+                connection,
+                "duplicate_candidates",
+                int(candidate_id),
+                {
+                    "status": status,
+                    "evidence_json": self._json(updated_evidence),
+                    "updated_at": self._now(),
+                },
+            )
+        return True
+
     def upsert_document_group(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         group_key = str(payload.get("groupKey") or payload.get("group_key") or "").strip()
         if not group_key:

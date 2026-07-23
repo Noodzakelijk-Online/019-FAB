@@ -145,6 +145,92 @@ def duplicate_link_cycles(
     return sorted(cycles, key=lambda members: (members[0], len(members), members))
 
 
+def duplicate_candidate_reassessment_plan(
+    ledger: LocalOperationsLedger,
+    config: Optional[Dict[str, Any]] = None,
+    limit: int = 500,
+) -> list:
+    """Find open duplicate pairs whose current evidence changes their disposition."""
+    detector = DuplicateDetector(config or {})
+    open_candidates = ledger.list_duplicate_candidates(
+        status=("pending", "in_review"),
+        limit=max(1, min(_safe_int(limit) or 500, 5000)),
+    )
+    pair_rows: Dict[tuple, list] = {}
+    for candidate in open_candidates:
+        document_id = _safe_int(candidate.get("document_id"))
+        candidate_document_id = _safe_int(candidate.get("candidate_document_id"))
+        if not document_id or not candidate_document_id or document_id == candidate_document_id:
+            continue
+        pair = tuple(sorted((document_id, candidate_document_id)))
+        pair_rows.setdefault(pair, []).append(candidate)
+
+    plans = []
+    for (canonical_id, subject_id), rows in sorted(pair_rows.items()):
+        canonical = ledger.get_document(canonical_id)
+        subject = ledger.get_document(subject_id)
+        if not canonical or not subject:
+            continue
+        if (
+            canonical.get("duplicate_of_document_id")
+            or subject.get("duplicate_of_document_id")
+            or str(canonical.get("processing_status") or "") == "duplicate"
+            or str(subject.get("processing_status") or "") == "duplicate"
+        ):
+            continue
+
+        exact_content_row = next(
+            (
+                row
+                for row in rows
+                if str(row.get("match_type") or "") == "exact_content_hash"
+            ),
+            None,
+        )
+        content_hash_matches = bool(
+            canonical.get("content_sha256")
+            and canonical.get("content_sha256") == subject.get("content_sha256")
+        )
+        if exact_content_row and not content_hash_matches:
+            # Never discard an existing byte-identity claim without both current hashes.
+            continue
+        if content_hash_matches:
+            result = {
+                "is_duplicate": True,
+                "reason": "exact_content_hash",
+                "confidence_score": 1.0,
+                "matched_document_id": canonical_id,
+            }
+        else:
+            result = detector.is_duplicate(
+                _duplicate_comparison_document(subject),
+                [_duplicate_comparison_document(canonical)],
+            )
+
+        desired_type = str(result.get("reason") or "")
+        desired_row = next(
+            (
+                row
+                for row in rows
+                if _safe_int(row.get("document_id")) == subject_id
+                and _safe_int(row.get("candidate_document_id")) == canonical_id
+                and str(row.get("match_type") or "") == desired_type
+            ),
+            None,
+        )
+        if result.get("is_duplicate") and len(rows) == 1 and desired_row:
+            continue
+        plans.append({
+            "pair": [canonical_id, subject_id],
+            "canonicalDocument": canonical,
+            "subjectDocument": subject,
+            "candidateRows": rows,
+            "action": "canonicalize" if result.get("is_duplicate") else "reject",
+            "result": result,
+        })
+    return plans
+
+
 class LocalDocumentProcessor:
     """Run local ledger documents through FAB's processing interfaces."""
 
@@ -175,6 +261,7 @@ class LocalDocumentProcessor:
 
     def process_imported(self, limit: int = 25) -> Dict[str, Any]:
         duplicate_cycle_repair = self.repair_duplicate_cycles()
+        duplicate_candidate_reassessment = self.reassess_duplicate_candidates()
         trusted_category_automation = self.apply_trusted_category_suggestions(limit=limit)
         documents = self.ledger.list_documents(status="imported", limit=limit)
         summary: Dict[str, Any] = {
@@ -185,6 +272,7 @@ class LocalDocumentProcessor:
             "skipped": 0,
             "documents": [],
             "duplicateCycleRepair": duplicate_cycle_repair,
+            "duplicateCandidateReassessment": duplicate_candidate_reassessment,
             "trustedCategoryAutomation": trusted_category_automation,
         }
         for document in documents:
@@ -205,6 +293,7 @@ class LocalDocumentProcessor:
             summary["processed"]
             + summary["needsReview"]
             + duplicate_cycle_repair["documentsCleared"]
+            + duplicate_candidate_reassessment["affectedDocuments"]
             + trusted_category_automation["updatedDocuments"]
         )
 
@@ -218,6 +307,9 @@ class LocalDocumentProcessor:
                 "failed": summary["failed"],
                 "skipped": summary["skipped"],
                 "duplicateCyclesRepaired": duplicate_cycle_repair["cyclesRepaired"],
+                "duplicateCandidatePairsReassessed": duplicate_candidate_reassessment[
+                    "candidatePairs"
+                ],
                 "trustedCategoriesApplied": trusted_category_automation["updatedDocuments"],
             },
         })
@@ -318,6 +410,212 @@ class LocalDocumentProcessor:
                 "entityType": "bookkeeping_document",
                 "details": dict(summary),
             })
+        return summary
+
+    def reassess_duplicate_candidates(
+        self,
+        *,
+        actor: str = "fab_local_processing",
+        create_backup: bool = True,
+        limit: int = 500,
+    ) -> Dict[str, Any]:
+        """Revalidate open duplicate pairs from current structured evidence."""
+        plans = duplicate_candidate_reassessment_plan(
+            self.ledger,
+            self.config,
+            limit=limit,
+        )
+        summary = {
+            "candidatePairs": len(plans),
+            "rejectedPairs": 0,
+            "retainedPairs": 0,
+            "candidateRowsClosed": 0,
+            "candidateRowsOpened": 0,
+            "resolvedReviewItems": 0,
+            "reviewItemsCreated": 0,
+            "affectedDocuments": 0,
+            "pairDocumentIds": [plan["pair"] for plan in plans],
+            "externalSubmission": "not_executed",
+            "sourceFilesModified": False,
+            "confirmedDuplicateLinksModified": False,
+        }
+        if not plans:
+            return summary
+        if create_backup:
+            backup = LocalBackupService(self.ledger, self.config).create_backup(
+                note="Automatic pre-repair backup before duplicate evidence reassessment"
+            )
+            manifest = backup.get("manifest") or {}
+            if (
+                not backup.get("success")
+                or not manifest.get("ledgerSha256")
+                or not manifest.get("ledgerBytes")
+            ):
+                raise RuntimeError(
+                    "Duplicate evidence reassessment requires a checksum-bound ledger backup."
+                )
+            summary["backup"] = {
+                "status": backup.get("status"),
+                "backupFilename": backup.get("backupFilename"),
+                "ledgerSha256": manifest.get("ledgerSha256"),
+                "ledgerBytes": manifest.get("ledgerBytes"),
+            }
+
+        affected_document_ids = set()
+        for plan in plans:
+            canonical = plan["canonicalDocument"]
+            subject = plan["subjectDocument"]
+            canonical_id, subject_id = plan["pair"]
+            result = plan["result"]
+            closed_ids = []
+            for row in plan["candidateRows"]:
+                row_id = int(row["id"])
+                if self.ledger.resolve_duplicate_candidate(
+                    row_id,
+                    "rejected",
+                    (
+                        "Superseded by canonical duplicate evidence reassessment."
+                        if result.get("is_duplicate")
+                        else "Current structured evidence no longer meets the duplicate threshold."
+                    ),
+                    evidence={
+                        "reassessedAt": _now(),
+                        "reassessedBy": actor,
+                        "reassessmentResult": {
+                            "isDuplicate": bool(result.get("is_duplicate")),
+                            "reason": result.get("reason"),
+                            "confidenceScore": result.get("confidence_score"),
+                        },
+                        "externalSubmission": "not_executed",
+                    },
+                ):
+                    closed_ids.append(row_id)
+                    summary["candidateRowsClosed"] += 1
+
+            opened_candidate_id = None
+            if result.get("is_duplicate"):
+                had_subject_duplicate_review = any(
+                    str(item.get("reason") or "") == "duplicate_candidate"
+                    for item in _open_reviews(subject)
+                )
+                opened_candidate_id = self.ledger.record_duplicate_candidate({
+                    "documentId": subject_id,
+                    "candidateDocumentId": canonical_id,
+                    "matchType": result.get("reason") or "fuzzy_document_match",
+                    "confidenceScore": result.get("confidence_score"),
+                    "status": "pending",
+                    "reason": "Duplicate evidence retained after deterministic reassessment.",
+                    "evidence": {
+                        "matchedDocumentId": canonical_id,
+                        "confidenceScore": result.get("confidence_score"),
+                        "reason": result.get("reason"),
+                        "vendorName": subject.get("vendor_name"),
+                        "transactionDate": subject.get("transaction_date"),
+                        "totalAmount": subject.get("total_amount"),
+                        "invoiceNumber": (
+                            (subject.get("extracted_data") or {}).get("invoice_number")
+                        ),
+                        "canonicalizationPolicy": "earlier_ingested_document_id",
+                        "reassessedAt": _now(),
+                        "reassessedBy": actor,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                self._queue_review(
+                    subject,
+                    "duplicate_candidate",
+                    (
+                        f"Compare document #{subject_id} with canonical document "
+                        f"#{canonical_id}; current evidence reports "
+                        f"{result.get('reason')}."
+                    ),
+                    corrected_data={
+                        "duplicateCandidateId": opened_candidate_id,
+                        "candidateDocumentId": canonical_id,
+                        "confidenceScore": result.get("confidence_score"),
+                    },
+                )
+                if not had_subject_duplicate_review:
+                    summary["reviewItemsCreated"] += 1
+                summary["candidateRowsOpened"] += 1
+                summary["retainedPairs"] += 1
+            else:
+                summary["rejectedPairs"] += 1
+
+            affected_document_ids.update((canonical_id, subject_id))
+            self.ledger.record_audit_event({
+                "action": "local_processing.duplicate_candidate_reassessed",
+                "entityType": "duplicate_candidate",
+                "entityId": str(opened_candidate_id or closed_ids[0]),
+                "details": {
+                    "actor": actor,
+                    "action": plan["action"],
+                    "canonicalDocumentId": canonical_id,
+                    "subjectDocumentId": subject_id,
+                    "closedCandidateIds": closed_ids,
+                    "openedCandidateId": opened_candidate_id,
+                    "result": result,
+                    "externalSubmission": "not_executed",
+                    "sourceFilesModified": False,
+                    "confirmedDuplicateLinksModified": False,
+                },
+            })
+
+        for document_id in sorted(affected_document_ids):
+            open_candidates = self.ledger.list_duplicate_candidates(
+                status=("pending", "in_review"),
+                document_id=document_id,
+                limit=100,
+            )
+            document = self.ledger.get_document(document_id)
+            if not document:
+                continue
+            if not open_candidates and not document.get("duplicate_of_document_id"):
+                for item in _open_reviews(document):
+                    if str(item.get("reason") or "") != "duplicate_candidate":
+                        continue
+                    self.ledger.resolve_review_item(
+                        int(item["id"]),
+                        status="resolved",
+                        resolution=(
+                            "Resolved because current structured evidence no longer "
+                            "supports an open duplicate candidate."
+                        ),
+                        corrected_data={
+                            "actor": actor,
+                            "externalSubmission": "not_executed",
+                        },
+                    )
+                    summary["resolvedReviewItems"] += 1
+
+            refreshed = self.ledger.get_document(document_id) or document
+            remaining_reviews = _open_reviews(refreshed)
+            metadata = dict(refreshed.get("metadata") or {})
+            processing = dict(metadata.get("processing") or {})
+            processing["reviewReasons"] = _dedupe([
+                str(item.get("reason") or "")
+                for item in remaining_reviews
+            ])
+            if not open_candidates:
+                processing["duplicateMatch"] = None
+            metadata["processing"] = processing
+            update = {"metadata": metadata}
+            if str(refreshed.get("processing_status") or "") == "needs_review":
+                update["processingStatus"] = (
+                    "needs_review" if remaining_reviews else "processed"
+                )
+            self.ledger.update_document(document_id, update)
+            LocalBookkeepingRecordService(
+                self.ledger,
+                self.config,
+            ).upsert_from_document(document_id)
+
+        summary["affectedDocuments"] = len(affected_document_ids)
+        self.ledger.record_audit_event({
+            "action": "local_processing.duplicate_candidate_reassessment_completed",
+            "entityType": "duplicate_candidate",
+            "details": dict(summary),
+        })
         return summary
 
     def trusted_category_suggestion_candidates(self, limit: int = 500) -> list:
@@ -1281,7 +1579,7 @@ class LocalDocumentProcessor:
         existing_documents = [
             _duplicate_comparison_document(item)
             for item in self.ledger.list_documents(limit=500)
-            if int(item.get("id") or 0) != int(document["id"])
+            if 0 < int(item.get("id") or 0) < int(document["id"])
             and not item.get("duplicate_of_document_id")
             and str(item.get("processing_status") or "") not in {"duplicate", "failed"}
         ]

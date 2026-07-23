@@ -107,6 +107,57 @@ class TestDuplicateDetector(unittest.TestCase):
 
         self.assertFalse(result["is_duplicate"])
 
+    def test_common_word_invoice_reference_does_not_merge_recurring_charges(self):
+        result = self.detector.is_duplicate(
+            {
+                "extracted_data": {
+                    "vendor_name": "T-Mobile",
+                    "invoice_number": "staat",
+                    "transaction_date": "2023-05-19",
+                    "total_amount": 37.68,
+                }
+            },
+            [
+                {
+                    "id": "previous-month",
+                    "extracted_data": {
+                        "vendor_name": "T-Mobile",
+                        "invoice_number": "staat",
+                        "transaction_date": "2023-04-21",
+                        "total_amount": 37.68,
+                    },
+                }
+            ],
+        )
+
+        self.assertFalse(result["is_duplicate"])
+
+    def test_valid_invoice_reference_can_corroborate_recurring_amount(self):
+        result = self.detector.is_duplicate(
+            {
+                "extracted_data": {
+                    "vendor_name": "Vendor BV",
+                    "invoice_number": "INV-2026-0042",
+                    "transaction_date": "2026-06-02",
+                    "total_amount": 37.68,
+                }
+            },
+            [
+                {
+                    "id": "same-invoice",
+                    "extracted_data": {
+                        "vendor_name": "Vendor BV",
+                        "invoice_number": "INV-2026-0042",
+                        "transaction_date": "2026-06-01",
+                        "total_amount": 37.68,
+                    },
+                }
+            ],
+        )
+
+        self.assertTrue(result["is_duplicate"])
+        self.assertEqual(result["reason"], "exact_fingerprint_match")
+
     def test_missing_dates_do_not_receive_similarity_credit(self):
         score = self.detector.similarity_score(
             {"extracted_data": {"vendor_name": "Vendor A", "total_amount": 10}},

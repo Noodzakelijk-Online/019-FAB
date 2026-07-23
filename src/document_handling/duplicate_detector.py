@@ -133,12 +133,16 @@ class DuplicateDetector:
         )
         self._append_exact_comparison(
             comparisons,
-            left_data.get("invoice_number")
-            or left_data.get("receipt_number")
-            or left_data.get("order_number"),
-            right_data.get("invoice_number")
-            or right_data.get("receipt_number")
-            or right_data.get("order_number"),
+            self._normalize_reference(
+                left_data.get("invoice_number")
+                or left_data.get("receipt_number")
+                or left_data.get("order_number")
+            ),
+            self._normalize_reference(
+                right_data.get("invoice_number")
+                or right_data.get("receipt_number")
+                or right_data.get("order_number")
+            ),
             0.35,
         )
         self._append_text_comparison(
@@ -191,12 +195,19 @@ class DuplicateDetector:
             "date": cls._normalize(extracted.get("transaction_date") or extracted.get("date")),
             "amount": cls._normalize_amount(extracted.get("total_amount") or extracted.get("amount")),
             "tax": cls._normalize_amount(extracted.get("vat_amount") or extracted.get("taxes")),
-            "invoice_number": cls._normalize(
+            "invoice_number": cls._normalize_reference(
                 extracted.get("invoice_number")
                 or extracted.get("receipt_number")
                 or extracted.get("order_number")
             ),
         }
+
+    @classmethod
+    def _normalize_reference(cls, value: Optional[Any]) -> str:
+        normalized = re.sub(r"[^a-z0-9]", "", cls._normalize(value))
+        if len(normalized) < 4 or not any(character.isdigit() for character in normalized):
+            return ""
+        return normalized
 
     @staticmethod
     def _supports_exact_match(left: Dict[str, str], right: Dict[str, str]) -> bool:

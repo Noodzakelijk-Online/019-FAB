@@ -1010,6 +1010,139 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertGreaterEqual(candidates[0]["confidence_score"], 0.9)
             self.assertEqual(ledger.list_review_items(status="pending")[0]["reason"], "duplicate_candidate")
 
+    def test_duplicate_reassessment_rejects_false_reference_and_canonicalizes_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            def register(source_id, vendor, date, amount, invoice):
+                return ledger.register_document({
+                    "source": "gmail",
+                    "sourceDocumentId": source_id,
+                    "originalFilename": f"{source_id}.pdf",
+                    "documentType": "vendor_invoice",
+                    "processingStatus": "needs_review",
+                    "vendorName": vendor,
+                    "transactionDate": date,
+                    "totalAmount": amount,
+                    "category": "Manual Review",
+                    "extractedData": {
+                        "vendor_name": vendor,
+                        "transaction_date": date,
+                        "total_amount": amount,
+                        "invoice_number": invoice,
+                    },
+                })
+
+            april_id = register("tmobile-april", "T-Mobile", "2023-04-21", 37.68, "staat")
+            may_id = register("tmobile-may", "T-Mobile", "2023-05-19", 37.68, "staat")
+            stale_id = ledger.record_duplicate_candidate({
+                "documentId": may_id,
+                "candidateDocumentId": april_id,
+                "matchType": "exact_fingerprint_match",
+                "confidenceScore": 1.0,
+                "status": "pending",
+            })
+            ledger.create_review_item({
+                "documentId": may_id,
+                "reason": "duplicate_candidate",
+                "details": "Stale recurring-charge match.",
+            })
+            ledger.create_review_item({
+                "documentId": may_id,
+                "reason": "manual_review_category",
+                "details": "Category still requires review.",
+            })
+
+            canonical_id = register(
+                "same-receipt-first",
+                "Praxis",
+                "2023-06-12",
+                6.39,
+                None,
+            )
+            subject_id = register(
+                "same-receipt-second",
+                "Praxis",
+                "2023-06-12",
+                6.39,
+                None,
+            )
+            forward_id = ledger.record_duplicate_candidate({
+                "documentId": canonical_id,
+                "candidateDocumentId": subject_id,
+                "matchType": "exact_fingerprint_match",
+                "confidenceScore": 1.0,
+                "status": "pending",
+            })
+            reverse_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.93,
+                "status": "pending",
+            })
+            for document_id in (canonical_id, subject_id):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "duplicate_candidate",
+                    "details": "Reciprocal duplicate evidence.",
+                })
+
+            summary = LocalDocumentProcessor(ledger).reassess_duplicate_candidates(
+                actor="test-reassessment",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["candidatePairs"], 2)
+            self.assertEqual(summary["rejectedPairs"], 1)
+            self.assertEqual(summary["retainedPairs"], 1)
+            self.assertFalse(summary["sourceFilesModified"])
+            self.assertFalse(summary["confirmedDuplicateLinksModified"])
+            candidates_by_id = {
+                item["id"]: item
+                for item in ledger.list_duplicate_candidates(limit=20)
+            }
+            self.assertEqual(candidates_by_id[stale_id]["status"], "rejected")
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in ledger.list_review_items(
+                        status=("pending", "in_review"),
+                        document_id=may_id,
+                    )
+                },
+                {"manual_review_category"},
+            )
+            self.assertEqual(ledger.get_document(may_id)["processing_status"], "needs_review")
+
+            open_candidates = ledger.list_duplicate_candidates(
+                status=("pending", "in_review"),
+                limit=20,
+            )
+            self.assertEqual(len(open_candidates), 1)
+            self.assertEqual(open_candidates[0]["document_id"], subject_id)
+            self.assertEqual(open_candidates[0]["candidate_document_id"], canonical_id)
+            self.assertEqual(open_candidates[0]["match_type"], "exact_fingerprint_match")
+            self.assertEqual(candidates_by_id[forward_id]["status"], "rejected")
+            self.assertEqual(candidates_by_id[reverse_id]["status"], "rejected")
+            self.assertEqual(
+                ledger.list_review_items(
+                    status=("pending", "in_review"),
+                    document_id=canonical_id,
+                ),
+                [],
+            )
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in ledger.list_review_items(
+                        status=("pending", "in_review"),
+                        document_id=subject_id,
+                    )
+                },
+                {"duplicate_candidate"},
+            )
+
     def test_duplicate_cycle_repair_clears_links_and_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

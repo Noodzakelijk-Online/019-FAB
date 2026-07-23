@@ -413,6 +413,53 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertEqual(ledger.dashboard_metrics()["open_duplicate_candidates"], 0)
             self.assertEqual(ledger.list_duplicate_candidates()[0]["status"], "rejected")
 
+    def test_resolves_one_duplicate_candidate_without_closing_other_pairs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_ids = [
+                ledger.register_document({
+                    "source": "gmail",
+                    "sourceDocumentId": f"candidate-{index}",
+                    "originalFilename": f"candidate-{index}.pdf",
+                })
+                for index in range(3)
+            ]
+            first_id = ledger.record_duplicate_candidate({
+                "documentId": document_ids[2],
+                "candidateDocumentId": document_ids[0],
+                "matchType": "fuzzy_document_match",
+                "status": "pending",
+                "evidence": {"original": True},
+            })
+            second_id = ledger.record_duplicate_candidate({
+                "documentId": document_ids[2],
+                "candidateDocumentId": document_ids[1],
+                "matchType": "fuzzy_document_match",
+                "status": "pending",
+            })
+
+            self.assertTrue(
+                ledger.resolve_duplicate_candidate(
+                    first_id,
+                    "rejected",
+                    "Pair no longer matches.",
+                    evidence={"reassessed": True},
+                )
+            )
+
+            candidates = {
+                item["id"]: item
+                for item in ledger.list_duplicate_candidates(limit=10)
+            }
+            self.assertEqual(candidates[first_id]["status"], "rejected")
+            self.assertTrue(candidates[first_id]["evidence"]["original"])
+            self.assertTrue(candidates[first_id]["evidence"]["reassessed"])
+            self.assertEqual(
+                candidates[first_id]["evidence"]["resolution"],
+                "Pair no longer matches.",
+            )
+            self.assertEqual(candidates[second_id]["status"], "pending")
+
     def test_document_groups_are_persisted_with_members_and_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

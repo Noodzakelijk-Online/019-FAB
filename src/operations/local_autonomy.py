@@ -18,6 +18,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_processing import (
     LocalDocumentProcessor,
+    duplicate_candidate_reassessment_plan,
     duplicate_link_cycles,
     trusted_category_suggestion_candidates,
 )
@@ -66,8 +67,9 @@ class LocalAutonomousService:
     The loop only executes low-risk local work: read-only connector collection,
     folder intake, local processing, Wave draft preparation, reconciliation
     candidate creation, and read-only Wave planning. External posting, review
-    resolution, credential changes, restore, deletion, and customer-facing
-    communication stay outside this executor.
+    decisions, credential changes, restore, deletion, and customer-facing
+    communication stay outside this executor. It may clear stale machine-created
+    gates when current deterministic evidence disproves the original condition.
     """
 
     def __init__(
@@ -170,7 +172,7 @@ class LocalAutonomousService:
             ),
             _action(
                 "process_imported",
-                "Process imported documents and apply trusted exact-vendor category policy",
+                "Process documents, repair duplicate evidence, and apply trusted categories",
                 "extract_validate",
                 "low",
                 "safe_auto",
@@ -178,19 +180,24 @@ class LocalAutonomousService:
                     counts["importedDocuments"] > 0
                     or counts["trustedCategorySuggestions"] > 0
                     or counts["duplicateLinkCycles"] > 0
+                    or counts["duplicateCandidateReassessments"] > 0
                 )
                 and not blocked,
-                "No imported documents, trusted category suggestions, or duplicate-link repairs are waiting."
+                "No imported documents or deterministic evidence repairs are waiting."
                 if (
                     counts["importedDocuments"] == 0
                     and counts["trustedCategorySuggestions"] == 0
                     and counts["duplicateLinkCycles"] == 0
+                    and counts["duplicateCandidateReassessments"] == 0
                 )
                 else None,
                 {
                     "candidateDocuments": counts["importedDocuments"],
                     "trustedCategorySuggestions": counts["trustedCategorySuggestions"],
                     "duplicateLinkCycles": counts["duplicateLinkCycles"],
+                    "duplicateCandidateReassessments": counts[
+                        "duplicateCandidateReassessments"
+                    ],
                     "limit": limit,
                     "externalSubmission": "not_executed",
                 },
@@ -940,6 +947,11 @@ class LocalAutonomousService:
             self.config,
             limit=limit,
         )
+        duplicate_candidate_reassessments = duplicate_candidate_reassessment_plan(
+            self.ledger,
+            self.config,
+            limit=500,
+        )
         routable_documents = self.ledger.list_documents(status=ROUTABLE_DOCUMENT_STATUSES, limit=limit)
         routable_records = [
             record for record in self.ledger.list_bookkeeping_records(
@@ -956,6 +968,9 @@ class LocalAutonomousService:
         return {
             "importedDocuments": len(self.ledger.list_documents(status=IMPORTED_DOCUMENT_STATUSES, limit=limit)),
             "duplicateLinkCycles": len(duplicate_link_cycles(self.ledger)),
+            "duplicateCandidateReassessments": len(
+                duplicate_candidate_reassessments
+            ),
             "trustedCategorySuggestions": len(trusted_category_suggestions),
             "routableDocuments": len(routable_documents),
             "routableBookkeepingRecords": len(routable_records),

@@ -299,6 +299,90 @@ class TestLocalAutonomousService(unittest.TestCase):
                 2,
             )
 
+    def test_autonomy_reassesses_stale_duplicate_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            first_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-april",
+                "originalFilename": "monthly-april.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-04-21",
+                "totalAmount": 37.68,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-04-21",
+                    "total_amount": 37.68,
+                    "invoice_number": "staat",
+                },
+            })
+            second_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-may",
+                "originalFilename": "monthly-may.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-05-19",
+                "totalAmount": 37.68,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-05-19",
+                    "total_amount": 37.68,
+                    "invoice_number": "staat",
+                },
+            })
+            ledger.record_duplicate_candidate({
+                "documentId": second_id,
+                "candidateDocumentId": first_id,
+                "matchType": "exact_fingerprint_match",
+                "confidenceScore": 1.0,
+                "status": "pending",
+            })
+            ledger.create_review_item({
+                "documentId": second_id,
+                "reason": "duplicate_candidate",
+                "details": "Stale machine-generated match.",
+            })
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_local_backup_dir": os.path.join(temp_dir, "backups")},
+                intake_paths=[],
+            )
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["duplicateCandidateReassessments"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            reassessment = processing["summary"]["duplicateCandidateReassessment"]
+            self.assertEqual(reassessment["rejectedPairs"], 1)
+            self.assertEqual(reassessment["resolvedReviewItems"], 1)
+            self.assertEqual(
+                ledger.list_duplicate_candidates(status=("pending", "in_review")),
+                [],
+            )
+            self.assertEqual(
+                ledger.list_review_items(status=("pending", "in_review")),
+                [],
+            )
+            self.assertEqual(ledger.get_document(second_id)["processing_status"], "processed")
+
     def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")
