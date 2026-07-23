@@ -118,6 +118,13 @@ class FinancialFieldExtractor:
         (r"\bziggo\b", "Ziggo"),
         (r"\bvisser\s+assen\b", "Visser Assen"),
         (r"\b(?:merchant|herchant)\s*[:.]?\s*1770001\b", "Lidl"),
+        (r"\bli(?:d|g)[l\]\|1]?\s+plus-?app", "Lidl"),
+        (r"\bchocolat\W*nation\b", "Chocolate Nation"),
+        (r"\bconnexxion(?:\.nl)?\b", "Connexxion"),
+        (
+            r"(?s)\A\s*ald[i1]?\s+.*\b(?:klantticket|scharreleieren|verse\s+melk)\b",
+            "Aldi",
+        ),
     )
     VENDOR_HEADER_PATTERNS = (
         (

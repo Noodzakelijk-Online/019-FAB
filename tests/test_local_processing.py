@@ -7,6 +7,7 @@ from unittest.mock import patch
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_processing import (
     LocalDocumentProcessor,
+    STORED_OCR_REASSESSMENT_VERSION,
     duplicate_link_cycles,
 )
 
@@ -842,7 +843,7 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["total_amount"], 1.98)
             self.assertEqual(
                 document["metadata"]["processing"]["storedOcrReassessment"]["version"],
-                "financial_validation_v7",
+                STORED_OCR_REASSESSMENT_VERSION,
             )
             open_reasons = {
                 item["reason"]

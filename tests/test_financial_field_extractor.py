@@ -251,6 +251,55 @@ class TestFinancialFieldExtractor(unittest.TestCase):
             "known_vendor_pattern",
         )
 
+    def test_known_vendor_footer_and_domain_signals_are_canonicalized(self):
+        cases = (
+            (
+                "LEDE\nAmsterdamseweg 109\nBespaar meer met de Lid] Plus-app!",
+                "Lidl",
+            ),
+            (
+                "FT SDE Glee i\nDANK U WEL\nBespaar meer met de Lig] Plus-app:",
+                "Lidl",
+            ),
+            (
+                "Chocolat: nation\nThe Belgian Chocolate Experience NV\n"
+                "www.chocolatenation.be",
+                "Chocolate Nation",
+            ),
+            (
+                "BN\nServicekantoor Arnhem\nwww.connexxion.nl",
+                "Connexxion",
+            ),
+            (
+                "ALD\nKronenburgpassage 124\nKLANTTICKET\n"
+                "VERSE MELK HALFVOL\nTOTAAL 5,89",
+                "Aldi",
+            ),
+        )
+        for text, expected_vendor in cases:
+            with self.subTest(expected_vendor=expected_vendor):
+                result = FinancialFieldExtractor().extract(text)
+                self.assertEqual(
+                    result["extracted_data"]["vendor_name"],
+                    expected_vendor,
+                )
+                self.assertEqual(
+                    result["field_confidences"]["vendor_name"],
+                    0.9,
+                )
+                self.assertEqual(
+                    result["field_evidence"]["vendor_name"]["source"],
+                    "known_vendor_pattern",
+                )
+
+    def test_aldi_header_without_grocery_ticket_context_is_not_assumed(self):
+        result = FinancialFieldExtractor().extract(
+            "ALD\nAutomotive lease statement\nTotaal 500,00"
+        )
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "ALD")
+        self.assertEqual(result["field_confidences"]["vendor_name"], 0.65)
+
     def test_payable_total_wins_over_discount_amount(self):
         result = FinancialFieldExtractor().extract(
             "T-Mobile\nKorting -9,99\n"
