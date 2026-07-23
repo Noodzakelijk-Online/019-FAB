@@ -1434,6 +1434,131 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 {"duplicate_candidate"},
             )
 
+    def test_duplicate_reassessment_clears_only_disproven_pending_pair_link(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            canonical_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "recurring-charge-april",
+                "originalFilename": "april.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-04-21",
+                "totalAmount": 37.68,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-04-21",
+                    "total_amount": 37.68,
+                    "invoice_number": "april-statement",
+                },
+            })
+            subject_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "recurring-charge-may",
+                "originalFilename": "may.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-05-19",
+                "totalAmount": 37.68,
+                "duplicateOfDocumentId": canonical_id,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-05-19",
+                    "total_amount": 37.68,
+                    "invoice_number": "may-statement",
+                },
+            })
+            candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.95,
+                "status": "pending",
+            })
+            duplicate_review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Provisional duplicate link requires review.",
+            })
+            manual_review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "manual_review_category",
+                "details": "Category remains a separate decision.",
+            })
+            confirmed_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "confirmed-duplicate",
+                "originalFilename": "confirmed.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "duplicate",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-05-19",
+                "totalAmount": 37.68,
+                "duplicateOfDocumentId": canonical_id,
+            })
+            confirmed_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": confirmed_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.95,
+                "status": "pending",
+            })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+            ).reassess_duplicate_candidates(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["candidatePairs"], 1)
+            self.assertEqual(summary["rejectedPairs"], 1)
+            self.assertEqual(summary["pendingDuplicateLinksCleared"], 1)
+            self.assertEqual(summary["resolvedReviewItems"], 1)
+            self.assertFalse(summary["confirmedDuplicateLinksModified"])
+            subject = ledger.get_document(subject_id)
+            self.assertIsNone(subject["duplicate_of_document_id"])
+            self.assertEqual(subject["processing_status"], "needs_review")
+            self.assertEqual(
+                {
+                    item["id"]: item["status"]
+                    for item in subject["review_items"]
+                },
+                {
+                    duplicate_review_id: "resolved",
+                    manual_review_id: "pending",
+                },
+            )
+            candidates = {
+                item["id"]: item
+                for item in ledger.list_duplicate_candidates(limit=20)
+            }
+            self.assertEqual(candidates[candidate_id]["status"], "rejected")
+            self.assertEqual(
+                candidates[confirmed_candidate_id]["status"],
+                "pending",
+            )
+            confirmed = ledger.get_document(confirmed_id)
+            self.assertEqual(
+                confirmed["duplicate_of_document_id"],
+                canonical_id,
+            )
+            self.assertEqual(confirmed["processing_status"], "duplicate")
+            audit_event = next(
+                event
+                for event in ledger.list_audit_events(limit=20)
+                if event["action"]
+                == "local_processing.duplicate_candidate_reassessed"
+            )
+            self.assertEqual(
+                audit_event["details"][
+                    "clearedPendingDuplicateLinkDocumentIds"
+                ],
+                [subject_id],
+            )
+
     def test_duplicate_cycle_repair_clears_links_and_preserves_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

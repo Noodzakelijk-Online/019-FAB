@@ -176,10 +176,29 @@ def duplicate_candidate_reassessment_plan(
         if not canonical or not subject:
             continue
         if (
-            canonical.get("duplicate_of_document_id")
-            or subject.get("duplicate_of_document_id")
-            or str(canonical.get("processing_status") or "") == "duplicate"
+            str(canonical.get("processing_status") or "") == "duplicate"
             or str(subject.get("processing_status") or "") == "duplicate"
+        ):
+            continue
+        pair_link_documents = [
+            (document, counterpart_id)
+            for document, counterpart_id in (
+                (canonical, subject_id),
+                (subject, canonical_id),
+            )
+            if _safe_int(document.get("duplicate_of_document_id")) == counterpart_id
+        ]
+        pending_pair_link_document_ids = [
+            int(document["id"])
+            for document, _ in pair_link_documents
+            if any(
+                str(item.get("reason") or "") == "duplicate_candidate"
+                for item in _open_reviews(document)
+            )
+        ]
+        if (
+            pair_link_documents
+            and len(pending_pair_link_document_ids) != len(pair_link_documents)
         ):
             continue
 
@@ -210,6 +229,22 @@ def duplicate_candidate_reassessment_plan(
                 _duplicate_comparison_document(subject),
                 [_duplicate_comparison_document(canonical)],
             )
+
+        if pending_pair_link_document_ids:
+            if result.get("is_duplicate"):
+                continue
+            plans.append({
+                "pair": [canonical_id, subject_id],
+                "canonicalDocument": canonical,
+                "subjectDocument": subject,
+                "candidateRows": rows,
+                "action": "reject_pending_link",
+                "pendingDuplicateLinkDocumentIds": pending_pair_link_document_ids,
+                "result": result,
+            })
+            continue
+        if canonical.get("duplicate_of_document_id") or subject.get("duplicate_of_document_id"):
+            continue
 
         desired_type = str(result.get("reason") or "")
         desired_row = next(
@@ -435,6 +470,7 @@ class LocalDocumentProcessor:
             "retainedPairs": 0,
             "candidateRowsClosed": 0,
             "candidateRowsOpened": 0,
+            "pendingDuplicateLinksCleared": 0,
             "resolvedReviewItems": 0,
             "reviewItemsCreated": 0,
             "affectedDocuments": 0,
@@ -494,9 +530,10 @@ class LocalDocumentProcessor:
                     },
                 ):
                     closed_ids.append(row_id)
-                    summary["candidateRowsClosed"] += 1
+                summary["candidateRowsClosed"] += 1
 
             opened_candidate_id = None
+            cleared_pending_link_document_ids = []
             if result.get("is_duplicate"):
                 had_subject_duplicate_review = any(
                     str(item.get("reason") or "") == "duplicate_candidate"
@@ -544,6 +581,32 @@ class LocalDocumentProcessor:
                 summary["candidateRowsOpened"] += 1
                 summary["retainedPairs"] += 1
             else:
+                for linked_document_id in plan.get(
+                    "pendingDuplicateLinkDocumentIds",
+                    [],
+                ):
+                    counterpart_id = (
+                        subject_id
+                        if int(linked_document_id) == canonical_id
+                        else canonical_id
+                    )
+                    linked_document = self.ledger.get_document(
+                        int(linked_document_id)
+                    )
+                    if (
+                        linked_document
+                        and _safe_int(
+                            linked_document.get("duplicate_of_document_id")
+                        )
+                        == counterpart_id
+                    ):
+                        self.ledger.clear_document_duplicate(
+                            int(linked_document_id)
+                        )
+                        cleared_pending_link_document_ids.append(
+                            int(linked_document_id)
+                        )
+                        summary["pendingDuplicateLinksCleared"] += 1
                 summary["rejectedPairs"] += 1
 
             affected_document_ids.update((canonical_id, subject_id))
@@ -558,6 +621,9 @@ class LocalDocumentProcessor:
                     "subjectDocumentId": subject_id,
                     "closedCandidateIds": closed_ids,
                     "openedCandidateId": opened_candidate_id,
+                    "clearedPendingDuplicateLinkDocumentIds": (
+                        cleared_pending_link_document_ids
+                    ),
                     "result": result,
                     "externalSubmission": "not_executed",
                     "sourceFilesModified": False,
