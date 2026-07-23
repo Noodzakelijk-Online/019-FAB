@@ -97,7 +97,7 @@ export function FabReviewWorkspace({
             <thead>
               <tr>
                 <th>{copy("Source", "Bron")}</th>
-                <th>{copy("Extracted transaction", "Uitgelezen transactie")}</th>
+                <th>{copy("Evidence / transaction", "Bewijs / transactie")}</th>
                 <th>{copy("Open decisions", "Open beslissingen")}</th>
                 <th>{copy("Duplicate evidence", "Duplicaatbewijs")}</th>
                 <th><span className="sr-only">{copy("Actions", "Acties")}</span></th>
@@ -108,6 +108,7 @@ export function FabReviewWorkspace({
                 const document = asRecord(item.document);
                 const reasons = Array.isArray(item.reasons) ? item.reasons.filter((reason): reason is string => typeof reason === "string") : [];
                 const duplicates = records(item.duplicateCandidates);
+                const postingEligible = document.postingEligible !== false;
                 return (
                   <tr key={text(item.id)}>
                     <td data-label={copy("Source", "Bron")}>
@@ -116,7 +117,7 @@ export function FabReviewWorkspace({
                     </td>
                     <td data-label={copy("Transaction", "Transactie")}>
                       <strong>{text(document.vendorName, copy("Vendor missing", "Leverancier ontbreekt"))}</strong>
-                      <span>{text(document.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {formatMoney(document.totalAmount, document.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span>
+                      <span>{text(document.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {postingEligible ? formatMoney(document.totalAmount, document.currency, copy("Amount missing", "Bedrag ontbreekt")) : reasons.includes("document_type_conflict") ? copy("Type decision required", "Typebeslissing vereist") : copy("Non-posting evidence", "Niet-boekingsbewijs")}</span>
                       <span>{text(document.category, copy("Category missing", "Categorie ontbreekt"))}</span>
                     </td>
                     <td data-label={copy("Open decisions", "Open beslissingen")}>

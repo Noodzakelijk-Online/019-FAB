@@ -316,6 +316,7 @@ class TestLocalOperationsApi(unittest.TestCase):
             )
             self.assertEqual(review_payload["workItems"][0]["documentId"], document_id)
             self.assertEqual(review_payload["workItems"][0]["document"]["vendorName"], "Vendor")
+            self.assertTrue(review_payload["workItems"][0]["document"]["postingEligible"])
             self.assertEqual(review_payload["workItems"][0]["reviewItems"][0]["id"], review_id)
 
             resolved = client.post(

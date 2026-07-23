@@ -14,6 +14,7 @@ from werkzeug.utils import secure_filename
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
 from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
@@ -7459,6 +7460,25 @@ def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dic
     extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
     ocr_text = str(document.get("ocr_text") or "").strip()
     target_system = str(metadata.get("targetSystem") or metadata.get("target_system") or "waveapps_business")
+    processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+    classification = (
+        processing.get("documentTypeClassification")
+        if isinstance(processing.get("documentTypeClassification"), dict)
+        else {}
+    )
+    classified_document_type = str(classification.get("documentType") or "").strip().lower()
+    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+    override = review_metadata.get("documentTypeOverride")
+    override_document_type = (
+        str(override.get("documentType") or "").strip().lower()
+        if isinstance(override, dict)
+        else ""
+    )
+    document_type = str(document.get("document_type") or "").strip().lower()
+    effective_document_type = override_document_type or document_type
+    posting_eligible = not is_non_posting_document_type(effective_document_type) and not (
+        not override_document_type and is_non_posting_document_type(classified_document_type)
+    )
     return {
         "id": document.get("id"),
         "filename": document.get("original_filename"),
@@ -7467,12 +7487,9 @@ def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dic
         "sourceDocumentId": document.get("source_document_id"),
         "sourceUrl": provider.get("web_view_link"),
         "processingStatus": document.get("processing_status"),
-        "documentType": document.get("document_type"),
-        "classifiedDocumentType": (
-            ((metadata.get("processing") or {}).get("documentTypeClassification") or {}).get("documentType")
-            if isinstance(metadata.get("processing"), dict)
-            else None
-        ),
+        "documentType": document_type,
+        "classifiedDocumentType": classified_document_type or None,
+        "postingEligible": posting_eligible,
         "vendorName": document.get("vendor_name"),
         "transactionDate": document.get("transaction_date"),
         "totalAmount": document.get("total_amount"),
