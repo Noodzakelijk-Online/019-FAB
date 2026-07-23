@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
 from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
@@ -336,6 +337,43 @@ class TestLocalOperationsApi(unittest.TestCase):
             audit = client.get("/api/audit")
             self.assertEqual(audit.status_code, 200)
             self.assertEqual(audit.get_json()["auditEvents"][0]["action"], "local_review.review_item.resolve")
+
+    def test_review_api_exposes_suppressed_financial_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "invalid-financial-fields",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "category": "Office Supplies",
+                "transactionDate": "3038-06-10",
+                "totalAmount": 59.6,
+                "vatAmount": 8075.08,
+                "confidenceScore": 0.9,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Confirm extracted financial fields.",
+            })
+            LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+
+            payload = create_app({"fab_local_ledger_path": ledger_path}).test_client().get(
+                "/api/review?status=open"
+            ).get_json()
+            document = payload["workItems"][0]["document"]
+
+            self.assertEqual(document["bookkeepingExportStatus"], "blocked_invalid_financial_fields")
+            self.assertIsNone(document["normalizedRecordDate"])
+            self.assertIsNone(document["normalizedVatAmount"])
+            self.assertEqual(
+                {issue["field"] for issue in document["financialFieldIssues"]},
+                {"recordDate", "vatAmount"},
+            )
 
     def test_review_api_can_apply_an_exact_vendor_category_batch(self):
         with tempfile.TemporaryDirectory() as temp_dir:

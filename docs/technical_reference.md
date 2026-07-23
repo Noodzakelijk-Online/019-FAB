@@ -133,6 +133,8 @@ graph TD
 
 `LocalGmailAuthorizationCoordinator` and `/api/connectors/gmail/*` provide a loopback-only desktop OAuth setup flow. Credential JSON is schema/endpoint validated, written atomically with private permissions, and audited by hash without persisting secret values in the ledger. Credential rotation creates a reauthorization marker that blocks unattended collection until fresh consent succeeds. The React operator dashboard proxies only the fixed credential-install and read-only authorization endpoints; OAuth remains a user-owned browser action.
 
+The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-Online/025-Scan-to-folder-automation` at source commit `e3078d9`. FAB retains the exact HP ePrint sender/query signal but performs direct, content-addressed intake with provider checkpoints, PDF signature validation, duplicate/revision controls, and downstream OCR and bookkeeping processing.
+
 ### 2.7. `src/document_fetchers/drive_fetcher.py` (`DriveFetcher`)
 
 *   **Purpose**: Fetches files from Google Drive using the Google Drive API.

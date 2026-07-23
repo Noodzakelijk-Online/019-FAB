@@ -142,6 +142,8 @@ Configuration for fetching documents from Gmail.
 
 Use the **Gmail scanner** activation step in the operator dashboard to install a desktop OAuth client and complete user-owned, read-only Gmail consent. FAB reads matching attachments directly into its durable ledger; it does not stage them through Drive, mark messages read, add labels, or delete source email. The worker then runs OCR, field extraction, validation, duplicate detection, learned vendor categorization, routing, and the existing Wave approval/readback gates. Disable the older Apps Script trigger after activation so it cannot create a second, racing Drive copy.
 
+Normalized bookkeeping records apply fail-closed financial consistency controls. Dutch day-first dates are canonicalized to ISO dates; impossible or ambiguous dates are retained only as evidence and block export. VAT and line-item tax amounts that lack a non-zero total, conflict in sign, or exceed the configured `vat_max_total_ratio` are retained as evidence but removed from normalized posting totals until an operator corrects the source-backed review item.
+
 ### 4.3. `[google_drive]` Section
 
 Configuration for fetching documents from Google Drive.

@@ -1854,6 +1854,30 @@ class LocalOperationsLedger:
                 (self._now(), record_id),
             )
 
+    def clear_bookkeeping_record_vat_amount(self, record_id: int) -> None:
+        """Remove invalid normalized VAT while retaining the transaction amount."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET vat_amount = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
+
+    def clear_bookkeeping_record_date(self, record_id: int) -> None:
+        """Remove an invalid normalized date while retaining source evidence."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET record_date = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
+
     def get_bookkeeping_record(self, record_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(

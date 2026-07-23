@@ -7397,7 +7397,16 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
         group = sorted(group, key=lambda item: int(item.get("id") or 0), reverse=True)
         document_id = group[0].get("document_id")
         document = ledger.get_document(int(document_id)) if document_id is not None else None
-        compact_document = _compact_review_document(document) if document else None
+        bookkeeping_record = (
+            ledger.get_bookkeeping_record_by_document(int(document_id))
+            if document_id is not None
+            else None
+        )
+        compact_document = (
+            _compact_review_document(document, bookkeeping_record)
+            if document
+            else None
+        )
         duplicate_candidates = []
         for candidate in (document or {}).get("duplicate_candidates") or []:
             if candidate.get("status") not in {"pending", "in_review"}:
@@ -7445,7 +7454,10 @@ def _review_work_items(ledger: LocalOperationsLedger, review_items: list) -> lis
     )
 
 
-def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _compact_review_document(
+    document: Optional[Dict[str, Any]],
+    bookkeeping_record: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     if not document:
         return None
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
@@ -7472,6 +7484,11 @@ def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dic
     posting_eligible = not is_non_posting_document_type(effective_document_type) and not (
         not override_document_type and is_non_posting_document_type(classified_document_type)
     )
+    record_metadata = (
+        bookkeeping_record.get("metadata")
+        if isinstance((bookkeeping_record or {}).get("metadata"), dict)
+        else {}
+    )
     return {
         "id": document.get("id"),
         "filename": document.get("original_filename"),
@@ -7487,6 +7504,11 @@ def _compact_review_document(document: Optional[Dict[str, Any]]) -> Optional[Dic
         "transactionDate": document.get("transaction_date"),
         "totalAmount": document.get("total_amount"),
         "vatAmount": document.get("vat_amount"),
+        "bookkeepingRecordId": (bookkeeping_record or {}).get("id"),
+        "bookkeepingExportStatus": (bookkeeping_record or {}).get("export_status"),
+        "normalizedRecordDate": (bookkeeping_record or {}).get("record_date"),
+        "normalizedVatAmount": (bookkeeping_record or {}).get("vat_amount"),
+        "financialFieldIssues": record_metadata.get("financialFieldIssues") or [],
         "currency": extracted.get("currency") or "EUR",
         "category": document.get("category"),
         "targetSystem": target_system,

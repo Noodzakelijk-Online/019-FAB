@@ -2,6 +2,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.validation.financial_consistency import valid_vat_amount
+
 
 class FinancialFieldExtractor:
     """Extract core bookkeeping fields from OCR text with confidence hints."""
@@ -87,7 +89,7 @@ class FinancialFieldExtractor:
         vendor_name, vendor_confidence = self._extract_vendor(text)
         date_value, date_confidence = self._extract_date(text)
         total_amount, currency, amount_confidence = self._extract_total_amount(text)
-        vat_amount, vat_confidence = self._extract_vat_amount(text)
+        vat_amount, vat_confidence = self._extract_vat_amount(text, total_amount)
         invoice_number, invoice_confidence = self._extract_reference(
             text,
             ["invoice", "factuur", "invoice no", "factuurnummer"],
@@ -252,16 +254,32 @@ class FinancialFieldExtractor:
                 chosen = max(finalists, key=lambda candidate: abs(candidate[0]))
         return chosen[0], chosen[1], chosen[2]
 
-    def _extract_vat_amount(self, text: str) -> Tuple[Optional[float], float]:
+    def _extract_vat_amount(
+        self,
+        text: str,
+        total_amount: Optional[float],
+    ) -> Tuple[Optional[float], float]:
         for line in text.splitlines():
-            if re.search(r"\b(?:btw|vat|tax|omzetbelasting)\b", line, flags=re.IGNORECASE):
-                amounts = [
-                    self._amount_from_match(match)
-                    for match in re.finditer(self.AMOUNT_PATTERN, line, flags=re.IGNORECASE)
-                ]
-                amounts = [amount for amount in amounts if amount is not None]
-                if amounts:
-                    return amounts[-1], 0.75
+            if not re.search(r"\b(?:btw|vat|tax|omzetbelasting)\b", line, flags=re.IGNORECASE):
+                continue
+            if re.search(
+                r"\b(?:btw|vat|tax)[\s-]*(?:nummer|number|nr|id)\b",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            candidates = []
+            for match in re.finditer(self.AMOUNT_PATTERN, line, flags=re.IGNORECASE):
+                if re.match(r"\s*%", line[match.end():]):
+                    continue
+                amount = self._amount_from_match(match)
+                if amount is None:
+                    continue
+                validated = valid_vat_amount(amount, total_amount)
+                if validated is not None:
+                    candidates.append(validated)
+            if candidates:
+                return candidates[-1], 0.75
         return None, 0.0
 
     def _extract_reference(self, text: str, labels: List[str]) -> Tuple[Optional[str], float]:

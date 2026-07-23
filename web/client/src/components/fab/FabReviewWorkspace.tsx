@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertTriangle,
   ArrowUpRight,
   CheckCircle2,
   ClipboardCheck,
@@ -108,6 +109,7 @@ export function FabReviewWorkspace({
                 const document = asRecord(item.document);
                 const reasons = Array.isArray(item.reasons) ? item.reasons.filter((reason): reason is string => typeof reason === "string") : [];
                 const duplicates = records(item.duplicateCandidates);
+                const financialIssues = records(document.financialFieldIssues);
                 const postingEligible = document.postingEligible !== false;
                 return (
                   <tr key={text(item.id)}>
@@ -123,6 +125,7 @@ export function FabReviewWorkspace({
                     <td data-label={copy("Open decisions", "Open beslissingen")}>
                       <div className="fab-review-reasons">
                         {reasons.map((reason) => <span key={reason} className={`fab-status-chip tone-${statusTone(reason)}`}>{humanize(reason)}</span>)}
+                        {financialIssues.map((issue, index) => <span key={`${text(issue.field)}-${index}`} className="fab-status-chip tone-warn">{financialIssueLabel(issue, copy)}</span>)}
                       </div>
                     </td>
                     <td data-label={copy("Duplicates", "Duplicaten")}>
@@ -178,11 +181,14 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   useEffect(() => {
     if (!item) return;
     const document = asRecord(item.document);
+    const financialIssues = records(document.financialFieldIssues);
+    const invalidDate = financialIssues.some((issue) => text(issue.field, "") === "recordDate");
+    const invalidVat = financialIssues.some((issue) => text(issue.field, "") === "vatAmount");
     setForm({
       vendorName: text(document.vendorName, ""),
-      transactionDate: text(document.transactionDate, ""),
+      transactionDate: invalidDate ? "" : text(document.normalizedRecordDate, text(document.transactionDate, "")),
       totalAmount: numericText(document.totalAmount),
-      vatAmount: numericText(document.vatAmount),
+      vatAmount: invalidVat ? "" : numericText(document.normalizedVatAmount ?? document.vatAmount),
       category: text(document.category, "") === "Manual Review" ? "" : text(document.category, ""),
       documentType: normalizedDocumentType(document.documentType),
       targetSystem: text(document.targetSystem, "waveapps_business") as ReviewForm["targetSystem"],
@@ -213,6 +219,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     || null;
   const duplicateReview = reviewItems.find((review) => text(review.reason, "") === "duplicate_candidate") || null;
   const duplicateCandidates = records(item.duplicateCandidates);
+  const financialIssues = records(document.financialFieldIssues);
   const duplicateCandidate = duplicateCandidates[0] || null;
   const candidateDocument = asRecord(duplicateCandidate?.document);
   const isBusy = resolvingReviewId !== null;
@@ -325,6 +332,20 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
             {reviewItems.map((review) => <div key={text(review.id)}><span className={`fab-status-chip tone-${statusTone(review.reason)}`}>{humanize(review.reason)}</span><p>{text(review.details, copy("Manual verification required.", "Handmatige verificatie vereist."))}</p></div>)}
           </div>
 
+          {financialIssues.length > 0 && (
+            <div className="fab-financial-warning" role="alert">
+              <AlertTriangle aria-hidden="true" />
+              <div>
+                <strong>{copy("Financial values held out of posting", "Financiele waarden niet meegenomen in boeking")}</strong>
+                {financialIssues.map((issue, index) => (
+                  <span key={`${text(issue.field)}-${index}`}>
+                    {financialIssueLabel(issue, copy)}: {copy("source evidence", "bronbewijs")} {formatEvidenceValue(issue.evidenceValue)}. {copy("Enter a verified replacement before approval.", "Voer voor goedkeuring een geverifieerde vervanging in.")}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
               <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
@@ -411,4 +432,17 @@ function formatMoney(value: unknown, currency: unknown, missingLabel: string): s
   } catch {
     return `${text(currency, "EUR")} ${value.toFixed(2)}`;
   }
+}
+
+function financialIssueLabel(issue: FabRecord, copy: (english: string, dutch: string) => string): string {
+  const field = text(issue.field, "");
+  if (field === "recordDate") return copy("Invalid transaction date", "Ongeldige transactiedatum");
+  if (field === "vatAmount") return copy("Invalid VAT amount", "Ongeldig btw-bedrag");
+  if (field.startsWith("lineItems[")) return copy("Invalid line-item tax", "Ongeldige btw op regel");
+  return copy("Invalid financial field", "Ongeldig financieel veld");
+}
+
+function formatEvidenceValue(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return text(value, "-");
 }

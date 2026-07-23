@@ -91,6 +91,29 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertEqual(data["total_amount"], 19.97)
         self.assertEqual(data["vat_amount"], 3.47)
 
+    def test_btw_registration_number_is_not_a_vat_amount(self):
+        result = FinancialFieldExtractor().extract(
+            "Hornbach\nBTW-nummer: NL8075.08.093.B.01\nTotaal EUR 59,60"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 59.6)
+        self.assertIsNone(result["extracted_data"]["vat_amount"])
+        self.assertEqual(result["field_confidences"]["vat_amount"], 0.0)
+
+    def test_vat_table_uses_plausible_tax_not_percentage_or_gross_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW 21,00 %: 1,12, totaal BTW: 5,36\nTotaal EUR 6,48"
+        )
+
+        self.assertEqual(result["extracted_data"]["vat_amount"], 1.12)
+
+    def test_impossible_vat_is_not_extracted(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW EUR 50,00\nTotaal EUR 50,00"
+        )
+
+        self.assertIsNone(result["extracted_data"]["vat_amount"])
+
     def test_total_savings_never_outranks_payable_total(self):
         result = FinancialFieldExtractor().extract(
             "Lidl Arnhem\nTotaal: 12,02 EUR\nTotaal prijsvoordeel 1,03"

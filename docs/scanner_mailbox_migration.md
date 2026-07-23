@@ -1,6 +1,6 @@
 # Scanner mailbox migration
 
-Repository `Noodzakelijk-Online/025-Scan-to-folder-automation` contains two different collectors: a bundled Apps Script that copies HP ePrint PDF attachments from Gmail to one fixed Drive folder, and a separate NestJS service that copies selected Freshdesk ticket content to Drive. FAB incorporates the useful Gmail scanner behavior as a first-class scanner profile. It does not import the legacy services or any credential material from that repository; FAB's existing Freshdesk connector remains separately configurable.
+Repository `Noodzakelijk-Online/025-Scan-to-folder-automation` at audited source commit `e3078d9` contains two different collectors: a bundled Apps Script that copies HP ePrint PDF attachments from Gmail to one fixed Drive folder, and a separate NestJS service that copies selected Freshdesk ticket content to Drive. FAB incorporates the useful Gmail scanner behavior as a first-class scanner profile. It does not import the legacy services or any credential material from that repository; FAB's existing Freshdesk connector remains separately configurable.
 
 ## Active data path
 
