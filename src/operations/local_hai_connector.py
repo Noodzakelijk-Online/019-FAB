@@ -9,6 +9,7 @@ DEFAULT_HAI_COMMAND_IDS = (
     "rescan_intake",
     "process_imported",
     "reprocess_incomplete",
+    "reprocess_review_queue",
     "sync_sources",
     "run_safe_cycle",
     "run_due_recovery",
@@ -78,6 +79,12 @@ HAI_COMMANDS = (
         "reprocess_incomplete",
         "Recover incomplete OCR",
         "Retry only review-gated documents with blank OCR after creating a local ledger backup.",
+        _bounded_limit_schema(25, 100),
+    ),
+    HaiCommand(
+        "reprocess_review_queue",
+        "Reassess machine-gated review documents",
+        "Back up the ledger, then rerun extraction and validation from retained OCR without external submission.",
         _bounded_limit_schema(25, 100),
     ),
     HaiCommand(
@@ -475,6 +482,7 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         "rescan_intake": set(),
         "process_imported": {"limit"},
         "reprocess_incomplete": {"limit"},
+        "reprocess_review_queue": {"limit"},
         "sync_sources": {"sources"},
         "run_safe_cycle": {"limit", "dryRun"},
         "run_due_recovery": {"limit"},

@@ -290,6 +290,22 @@ describe("FAB local API gateway", () => {
     });
   });
 
+  it("maps review reassessment to its backed-up local endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({ status: "completed", path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runFabOperatorCommand("reprocess_review_queue", "operator-14", { limit: 20 });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      path: "/api/documents/reprocess-review-queue",
+      body: { limit: 20, actor: "operator-14" },
+    });
+  });
+
   it("uploads intake files only through the fixed local API path", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
       JSON.stringify({

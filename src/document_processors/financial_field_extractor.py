@@ -22,6 +22,8 @@ class FinancialFieldExtractor:
     DATE_PATTERNS = [
         r"\b(?P<date>\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
         r"\b(?P<date>\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b",
+        r"\b(?P<date>\d{1,2}\.\d{1,2}\.\d{2,4})\b",
+        rf"\b(?P<date>\d{{4}}[-\s]+(?:{MONTH_NAMES})[-\s]+\d{{1,2}})\b",
         rf"\b(?P<date>\d{{1,2}}\s+(?:{MONTH_NAMES})\s+\d{{2,4}})\b",
         rf"\b(?P<date>(?:{MONTH_NAMES})\s+\d{{1,2}},?\s+\d{{2,4}})\b",
     ]
@@ -36,6 +38,31 @@ class FinancialFieldExtractor:
         "te betalen",
         "grand total",
         "saldo",
+    ]
+    PAYMENT_TOTAL_LABELS = [
+        "pin",
+        "vpay",
+        "amount charged",
+        "amount paid",
+        "paid today",
+        "betaald",
+    ]
+    ROUNDING_TOTAL_LABELS = [
+        "totaal na afronding",
+        "total after rounding",
+    ]
+    REFUND_TOTAL_LABELS = [
+        "terug (",
+        "terug {",
+        "terugbetaling",
+        "refund",
+        "refunded",
+    ]
+    NON_PAYABLE_TOTAL_PHRASES = [
+        "totaal prijsvoordeel",
+        "totale korting",
+        "total discount",
+        "total savings",
     ]
     NON_PAYABLE_AMOUNT_LABELS = [
         "discount",
@@ -81,6 +108,12 @@ class FinancialFieldExtractor:
         (r"\bgetimg\.ai\b", "getimg.ai"),
         (r"\bslack\b", "Slack"),
         (r"\bt-?mobile\b", "T-Mobile"),
+        (r"\bpraxis\b", "Praxis"),
+        (r"\bhornbach(?:\s+b(?:ouwmarkt)?\.?\s*v\.?)?\b", "Hornbach Bouwmarkt B.V."),
+        (r"\baction\b", "Action"),
+        (r"\bodido\b", "Odido"),
+        (r"\bvodafone\b", "Vodafone"),
+        (r"\bziggo\b", "Ziggo"),
         (r"\bvisser\s+assen\b", "Visser Assen"),
     )
 
@@ -201,25 +234,24 @@ class FinancialFieldExtractor:
                 previous_nonempty = line
         if candidates:
             chosen = max(candidates, key=lambda candidate: (candidate[1], -candidate[2]))
-            return chosen[0], chosen[1]
+            confidence = chosen[1]
+            distinct_dates = {candidate[0] for candidate in candidates}
+            if confidence == 0.65 and len(distinct_dates) == 1:
+                confidence = 0.8
+            return chosen[0], confidence
         return None, 0.0
 
     def _extract_total_amount(self, text: str) -> Tuple[Optional[float], Optional[str], float]:
-        candidates: List[Tuple[float, Optional[str], float, int]] = []
+        candidates: List[Tuple[float, Optional[str], float, int, int]] = []
         previous_nonempty = ""
+        pending_total_label = False
         has_total_label = any(label in text.lower() for label in self.TOTAL_LABELS)
         for line_index, line in enumerate(text.splitlines()):
             lowered = line.lower()
-            context = f"{previous_nonempty} {lowered}"
-            if any(label in lowered for label in self.NON_PAYABLE_AMOUNT_LABELS):
-                line_weight = 0.2
-            elif any(label in lowered for label in self.TOTAL_LABELS):
-                line_weight = 0.95
-            elif any(label in context for label in self.TOTAL_LABELS):
-                line_weight = 0.88
-            else:
-                line_weight = 0.55
+            line_amounts: List[Tuple[float, Optional[str], int]] = []
             for match in re.finditer(self.AMOUNT_PATTERN, line, flags=re.IGNORECASE):
+                if re.match(r"\s*%", line[match.end():]):
+                    continue
                 amount = self._amount_from_match(match)
                 if amount is None:
                     continue
@@ -227,32 +259,153 @@ class FinancialFieldExtractor:
                     match.group("currency_code"),
                     match.group("currency_symbol"),
                 )
-                candidates.append((amount, currency, line_weight, line_index))
+                line_amounts.append((amount, currency, match.start()))
+            if not line_amounts:
+                if line.strip():
+                    pending_total_label = any(
+                        label in lowered
+                        for label in self.TOTAL_LABELS + self.PAYMENT_TOTAL_LABELS
+                    )
+                    previous_nonempty = lowered
+                continue
+
+            had_pending_total_label = pending_total_label
+            pending_total_label = False
+            has_line_total_label = any(label in lowered for label in self.TOTAL_LABELS)
+            non_payable_total = any(
+                phrase in lowered for phrase in self.NON_PAYABLE_TOTAL_PHRASES
+            )
+            if non_payable_total or (
+                not has_line_total_label
+                and any(label in lowered for label in self.NON_PAYABLE_AMOUNT_LABELS)
+            ):
+                if line.strip():
+                    previous_nonempty = lowered
+                continue
+
+            has_rounding_label = any(label in lowered for label in self.ROUNDING_TOTAL_LABELS)
+            has_payment_label = any(
+                re.search(rf"\b{re.escape(label)}\b", lowered)
+                for label in self.PAYMENT_TOTAL_LABELS
+            )
+            has_refund_label = any(label in lowered for label in self.REFUND_TOTAL_LABELS)
+            vat_summary_line = bool(
+                re.search(r"\b(?:btw|vat)\b|\b\d{1,2}(?:[.,]\d+)?\s*%", lowered)
+            )
+            vat_summary_context = vat_summary_line or bool(
+                re.search(r"\b(?:btw|vat)\b|\b\d{1,2}(?:[.,]\d+)?\s*%", previous_nonempty)
+            )
+
+            if has_rounding_label:
+                amount, currency, position = line_amounts[-1]
+                candidates.append((amount, currency, 1.0, line_index, position))
+            elif has_refund_label:
+                amount, currency, position = line_amounts[-1]
+                candidates.append((-abs(amount), currency, 0.997, line_index, position))
+            elif has_payment_label:
+                amount, currency, position = line_amounts[-1]
+                candidates.append((amount, currency, 0.997, line_index, position))
+            elif has_line_total_label and not vat_summary_line and len(line_amounts) == 1:
+                amount, currency, position = line_amounts[0]
+                candidates.append((amount, currency, 0.999, line_index, position))
+            elif has_line_total_label or vat_summary_context:
+                vat_candidate = self._vat_summary_total(
+                    line_amounts,
+                    line_text=lowered,
+                    previous_line=previous_nonempty,
+                )
+                if vat_candidate:
+                    amount, currency, confidence, position = vat_candidate
+                    candidates.append((amount, currency, confidence, line_index, position))
+            elif had_pending_total_label and len(line_amounts) == 1:
+                amount, currency, position = line_amounts[0]
+                candidates.append((amount, currency, 0.88, line_index, position))
+            else:
+                candidates.extend(
+                    (amount, currency, 0.55, line_index, position)
+                    for amount, currency, position in line_amounts
+                )
             if line.strip():
                 previous_nonempty = lowered
 
         if not candidates:
             return None, None, 0.0
 
-        candidates = [candidate for candidate in candidates if candidate[2] >= 0.5]
-        if not candidates:
-            return None, None, 0.0
-
-        labelled = [candidate for candidate in candidates if candidate[2] >= 0.85]
-        if labelled:
-            highest_confidence = max(candidate[2] for candidate in labelled)
-            finalists = [candidate for candidate in labelled if candidate[2] == highest_confidence]
-            chosen = max(finalists, key=lambda candidate: candidate[3])
-        else:
+        highest_confidence = max(candidate[2] for candidate in candidates)
+        finalists = [candidate for candidate in candidates if candidate[2] == highest_confidence]
+        if highest_confidence < 0.85:
             unique_amounts = {round(abs(candidate[0]), 2) for candidate in candidates}
-            if has_total_label and len(unique_amounts) == 1:
-                amount, currency, _, line_index = candidates[-1]
-                chosen = (amount, currency, 0.85, line_index)
-            else:
-                highest_confidence = max(candidate[2] for candidate in candidates)
-                finalists = [candidate for candidate in candidates if candidate[2] == highest_confidence]
-                chosen = max(finalists, key=lambda candidate: abs(candidate[0]))
+            if not has_total_label or len(unique_amounts) != 1:
+                return None, None, 0.0
+            amount, currency, _, line_index, token_index = candidates[-1]
+            chosen = (amount, currency, 0.85, line_index, token_index)
+        else:
+            chosen = max(finalists, key=lambda candidate: (candidate[3], candidate[4]))
         return chosen[0], chosen[1], chosen[2]
+
+    @staticmethod
+    def _vat_summary_total(
+        line_amounts: List[Tuple[float, Optional[str], int]],
+        *,
+        line_text: str = "",
+        previous_line: str = "",
+    ) -> Optional[Tuple[float, Optional[str], float, int]]:
+        # OCR often renders VAT-column separators as minus signs. VAT, net, and
+        # gross columns are magnitudes; refund direction comes from the payable
+        # or refund line instead.
+        values = [abs(amount) for amount, _, _ in line_amounts]
+        if len(values) >= 3:
+            vat_amount, net_amount, gross_amount = values[-3:]
+            tolerance = max(0.02, abs(gross_amount) * 0.01)
+            if (
+                vat_amount >= 0
+                and net_amount >= 0
+                and gross_amount > 0
+                and abs((vat_amount + net_amount) - gross_amount) <= tolerance
+            ):
+                return (
+                    gross_amount,
+                    line_amounts[-1][1],
+                    0.99,
+                    line_amounts[-1][2],
+                )
+            if 0 < vat_amount <= net_amount * 0.3:
+                return (
+                    round(vat_amount + net_amount, 2),
+                    line_amounts[-2][1] or line_amounts[-3][1],
+                    0.94,
+                    line_amounts[-2][2],
+                )
+            return None
+        if len(values) == 2:
+            first_amount, second_amount = values
+            header_context = f"{previous_line} {line_text}"
+            if (
+                second_amount > first_amount > 0
+                and re.search(r"\b(?:bruto|gross)\b", header_context)
+            ):
+                return (
+                    second_amount,
+                    line_amounts[-1][1],
+                    0.92,
+                    line_amounts[-1][2],
+                )
+            difference = second_amount - first_amount
+            if second_amount > first_amount > 0 and 0 < difference <= second_amount * 0.25:
+                return (
+                    second_amount,
+                    line_amounts[-1][1],
+                    0.92,
+                    line_amounts[-1][2],
+                )
+            if 0 < first_amount <= second_amount * 0.3:
+                return (
+                    round(first_amount + second_amount, 2),
+                    line_amounts[-1][1] or line_amounts[0][1],
+                    0.94,
+                    line_amounts[-1][2],
+                )
+        return None
 
     def _extract_vat_amount(
         self,
@@ -365,12 +518,16 @@ class FinancialFieldExtractor:
             "%Y/%m/%d",
             "%d-%m-%Y",
             "%d/%m/%Y",
+            "%d.%m.%Y",
             "%d-%m-%y",
             "%d/%m/%y",
+            "%d.%m.%y",
             "%m-%d-%Y",
             "%m/%d/%Y",
             "%m-%d-%y",
             "%m/%d/%y",
+            "%Y-%B-%d",
+            "%Y-%b-%d",
             "%d %B %Y",
             "%d %b %Y",
             "%B %d, %Y",

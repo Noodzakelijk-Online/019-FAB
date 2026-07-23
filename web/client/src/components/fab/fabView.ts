@@ -11,6 +11,7 @@ export type FabCommandId =
   | "rescan_intake"
   | "process_imported"
   | "reprocess_incomplete"
+  | "reprocess_review_queue"
   | "sync_sources"
   | "run_due_recovery"
   | "run_reconciliation"

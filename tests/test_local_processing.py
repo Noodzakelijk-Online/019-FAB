@@ -579,6 +579,110 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             metadata = document.get("metadata") or {}
             self.assertNotIn("ocrRecovery", metadata.get("processing") or {})
 
+    def test_reprocess_review_queue_reuses_retained_ocr_once_and_clears_stale_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "action.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "action-review",
+                "originalFilename": "action.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": (
+                    "ACTION\n12-07-2023\nTOTAAL 1.98\n"
+                    "BTW-SPECIFICATIE BTW Excl. Incl.\nTOTAAL 0.16 1.82 1.98"
+                ),
+                "vendorName": "ACTION",
+                "category": "Manual Review",
+                "transactionDate": "2023-07-12",
+                "totalAmount": 0.16,
+            })
+            for reason in (
+                "validation_failed",
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Machine review gate.",
+                })
+
+            processor = LocalDocumentProcessor(ledger, processor_pipeline=RaisingPipeline())
+            first = processor.reprocess_review_queue(
+                actor="test-operator",
+                create_backup=False,
+            )
+            second = processor.reprocess_review_queue(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(first["requested"], 1)
+            self.assertEqual(first["reprocessed"], 1)
+            self.assertEqual(first["resolvedReviewItems"], 1)
+            self.assertFalse(first["ocrRerun"])
+            self.assertEqual(second["requested"], 0)
+            self.assertEqual(second["skippedPreviouslyAttempted"], 1)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["total_amount"], 1.98)
+            self.assertEqual(
+                document["metadata"]["processing"]["storedOcrReassessment"]["version"],
+                "financial_extraction_v3",
+            )
+            open_reasons = {
+                item["reason"]
+                for item in document["review_items"]
+                if item["status"] in {"pending", "in_review"}
+            }
+            self.assertEqual(
+                open_reasons,
+                {"low_confidence_categorization", "manual_review_category"},
+            )
+
+    def test_reprocess_review_queue_clears_unsupported_stale_amounts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "ambiguous.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "ambiguous-review",
+                "originalFilename": "ambiguous.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": (
+                    "Praxis\nBTW DETAIL BTW Excl. Incl.\n"
+                    "21% 1,59 unreadable\nTOTAAL 1,59 1,51 16"
+                ),
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "totalAmount": 1.59,
+                "vatAmount": 50.0,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Unsupported stale amount.",
+            })
+
+            LocalDocumentProcessor(
+                ledger,
+                processor_pipeline=RaisingPipeline(),
+            ).reprocess_review_queue(create_backup=False)
+
+            document = ledger.get_document(document_id)
+            self.assertIsNone(document["total_amount"])
+            self.assertIsNone(document["vat_amount"])
+
     def test_process_text_document_flags_fuzzy_duplicate_candidate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             first_path = os.path.join(temp_dir, "first.txt")

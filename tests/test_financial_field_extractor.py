@@ -149,6 +149,133 @@ class TestFinancialFieldExtractor(unittest.TestCase):
 
         self.assertIsNone(result["extracted_data"]["total_amount"])
 
+    def test_gross_total_wins_when_tax_table_shares_the_final_total_row(self):
+        result = FinancialFieldExtractor().extract(
+            "ACTION\n12-07-2023\nTOTAAL 1.98\n"
+            "BTW-SPECIFICATIE BTW Excl. Incl.\nTOTAAL 0.16 1.82 1.98"
+        )
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "Action")
+        self.assertEqual(result["extracted_data"]["total_amount"], 1.98)
+        self.assertGreaterEqual(result["field_confidences"]["vendor_name"], 0.9)
+        self.assertGreaterEqual(result["field_confidences"]["transaction_date"], 0.8)
+
+    def test_payable_total_wins_over_discount_amount(self):
+        result = FinancialFieldExtractor().extract(
+            "T-Mobile\nKorting -9,99\n"
+            "Totaal maandelijkse kosten na activatie Klantvoordeel korting EUR 25,00"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 25.0)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
+    def test_payment_line_wins_over_vat_amount(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nBTW 21% 4,33\nPin 24,95"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 24.95)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.9)
+
+    def test_corrupted_gross_vat_value_is_recomputed_from_valid_parts(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW 21% 5,40 25,72 934,12"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 31.12)
+        self.assertEqual(result["field_confidences"]["total_amount"], 0.94)
+
+    def test_ambiguous_descending_vat_row_does_not_become_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW 21% 31,12 25,72 5,40"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+        self.assertEqual(result["field_confidences"]["total_amount"], 0.0)
+
+    def test_explicit_total_outranks_vat_summary_rows(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nTotaal 14,82\n"
+            "BTW 9% 0,86 9,50 10,36\n"
+            "BTW 21% 0,77 3,69 4,46"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 14.82)
+        self.assertEqual(result["field_confidences"]["total_amount"], 0.999)
+
+    def test_total_context_does_not_leak_to_unrelated_next_line(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW DETAIL BTW Excl. Incl.\n"
+            "21% 1,59 unreadable\nTOTAAL 1,59 1,51 16\n"
+            "Wij zijn geopend van 10.00 tot 17.00 uur"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+
+    def test_two_column_vat_row_uses_header_evidence_for_gross(self):
+        result = FinancialFieldExtractor().extract(
+            "Shop\nBTW-BEDRAG BRUTO\n0,49 5,89"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 5.89)
+
+    def test_refund_payment_is_negative(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nTERUGBETALING\nTerug (Vpay) 25,00"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], -25.0)
+
+    def test_cash_given_does_not_outrank_receipt_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Hornbach\nTotaal EUR 125,40\n"
+            "GEGEVEN Contant EUR 150,00\nWisselgeld EUR -24,60"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 125.4)
+
+    def test_total_discount_does_not_become_payable_total(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nTOTALE KORTING: 7,00 EUR\n"
+            "BTW DETAIL BTW Excl. Incl.\n21% 4,86 23,13 27,99"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 27.99)
+
+    def test_explicit_total_outranks_partial_refund_tender(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nTOTAAL 6,39\nRetourcheque 8,91\nTerug (Vpay) 2,82"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 6.39)
+
+    def test_vat_column_separators_are_not_refund_signs(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nBTW DETAIL BTW Excl. Incl.\n"
+            "TOTAAL - 5,40 - 25,72 934,12"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], 31.12)
+
+    def test_extracts_dutch_dotted_and_year_month_dates(self):
+        dotted = FinancialFieldExtractor().extract(
+            "Hornbach\nDatum: 10.07.2023\nTotaal EUR 25,00"
+        )
+        year_month = FinancialFieldExtractor().extract(
+            "Praxis\n2023-jul-07 17:52\nTotaal EUR 25,00"
+        )
+
+        self.assertEqual(dotted["extracted_data"]["transaction_date"], "2023-07-10")
+        self.assertEqual(year_month["extracted_data"]["transaction_date"], "2023-07-07")
+
+    def test_unique_unlabelled_valid_date_has_review_threshold_confidence(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nAmsterdamseweg 127\n07-07-2023\nTotaal EUR 25,00"
+        )
+
+        self.assertEqual(result["extracted_data"]["transaction_date"], "2023-07-07")
+        self.assertEqual(result["field_confidences"]["transaction_date"], 0.8)
+
 
 if __name__ == "__main__":
     unittest.main()

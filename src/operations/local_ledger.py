@@ -1247,6 +1247,19 @@ class LocalOperationsLedger:
         }
         self._update("bookkeeping_documents", document_id, fields)
 
+    def clear_document_financial_fields(self, document_id: int, field_names: Any) -> None:
+        """Explicitly clear unsupported extracted values without broad null updates."""
+        allowed = {"total_amount", "vat_amount"}
+        selected = sorted({str(field) for field in (field_names or [])} & allowed)
+        if not selected:
+            return
+        assignments = ", ".join(f"{field} = NULL" for field in selected)
+        with self._connection() as connection:
+            connection.execute(
+                f"UPDATE bookkeeping_documents SET {assignments}, updated_at = ? WHERE id = ?",
+                (self._now(), int(document_id)),
+            )
+
     def clear_document_duplicate(self, document_id: int) -> None:
         with self._connection() as connection:
             connection.execute(

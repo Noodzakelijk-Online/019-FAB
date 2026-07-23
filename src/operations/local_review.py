@@ -397,17 +397,21 @@ class LocalReviewService:
             "category": category,
             "targetSystem": _target_system(document),
             "confidenceScore": 1.0,
-            "status": "suggested",
+            "status": "approved",
             "sourceDocumentId": document.get("source_document_id"),
             "metadata": {
-                "source": "manual_review_correction",
+                "source": "operator_approved_review_correction",
+                "approval": {
+                    "reviewItemId": review_item_id,
+                    "correctionId": correction_id,
+                },
                 "documentId": document.get("id"),
                 "reviewItemId": review_item_id,
                 "correctionId": correction_id,
             },
         })
         self.ledger.record_audit_event({
-            "action": "local_review.vendor_category_rule.suggested",
+            "action": "local_review.vendor_category_rule.approved",
             "entityType": "vendor_category_rule",
             "entityId": str(rule_id),
             "details": {

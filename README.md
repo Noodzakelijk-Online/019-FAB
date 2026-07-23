@@ -252,6 +252,15 @@ user. The token is never returned to the browser, ledger, audit log, or API
 status response. Environment variables remain supported and take precedence
 over dashboard settings.
 
+The review workspace prefills explainable category intents only for exact
+normalized matches to FAB's conservative vendor taxonomy. The suggestion is
+never applied until the source-backed decision is approved. When **Teach FAB**
+is checked, that explicit approval becomes an approved exact-vendor rule for
+future documents instead of requiring a second approval. **Reassess review
+queue** creates a ledger backup, reruns current extraction and validation
+against retained OCR once per algorithm version, preserves manual corrections
+and duplicate gates, and never reruns OCR or submits externally.
+
 For manual startup or development:
 
 1. Start the Python ledger API from the repository root:

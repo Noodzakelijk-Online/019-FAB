@@ -115,10 +115,10 @@ class TestLocalReviewService(unittest.TestCase):
             rule = ledger.list_vendor_category_rules()[0]
             self.assertEqual(rule["vendor_name"], "Correct Vendor")
             self.assertEqual(rule["category"], "Office Supplies")
-            self.assertEqual(rule["status"], "suggested")
+            self.assertEqual(rule["status"], "approved")
             audit_actions = [event["action"] for event in ledger.list_audit_events()]
             self.assertIn("local_review.correction_applied", audit_actions)
-            self.assertIn("local_review.vendor_category_rule.suggested", audit_actions)
+            self.assertIn("local_review.vendor_category_rule.approved", audit_actions)
 
     def test_duplicate_review_rejects_duplicate_without_deleting_document(self):
         with tempfile.TemporaryDirectory() as temp_dir:

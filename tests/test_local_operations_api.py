@@ -376,6 +376,35 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(payload["summary"]["evidenceOnlyReviewItems"], 1)
             self.assertFalse(payload["workItems"][0]["document"]["postingEligible"])
 
+    def test_review_api_prefills_but_does_not_apply_exact_vendor_category_suggestion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "telecom-suggestion",
+                "originalFilename": "invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "category": "Manual Review",
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+            })
+
+            payload = create_app({"fab_local_ledger_path": ledger_path}).test_client().get(
+                "/api/review?status=open"
+            ).get_json()
+
+            suggestion = payload["workItems"][0]["document"]["categorySuggestion"]
+            self.assertEqual(suggestion["category"], "Telecommunications")
+            self.assertTrue(suggestion["requiresApproval"])
+            self.assertEqual(payload["summary"]["categorySuggestions"], 1)
+            self.assertEqual(ledger.get_document(document_id)["category"], "Manual Review")
+
     def test_review_api_exposes_suppressed_financial_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -854,7 +883,7 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(detail["review_corrections"][0]["corrected_data"]["category"], "Office Supplies")
             rules = client.get("/api/rules").get_json()["vendorCategoryRules"]
             self.assertEqual(rules[0]["vendor_name"], "Correct Vendor")
-            self.assertEqual(rules[0]["status"], "suggested")
+            self.assertEqual(rules[0]["status"], "approved")
             corrections = client.get(f"/api/corrections?documentId={document_id}").get_json()["reviewCorrections"]
             self.assertEqual(corrections[0]["corrected_data"]["vendorName"], "Correct Vendor")
             records = client.get("/api/bookkeeping-records?status=ready_to_route").get_json()["bookkeepingRecords"]
@@ -2472,6 +2501,29 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json(), expected)
             reprocess.assert_called_once_with(limit=2, actor="dashboard-operator")
+
+    def test_api_reprocess_review_queue_is_bounded_and_actor_audited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({"fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3")})
+            client = app.test_client()
+            expected = {
+                "requested": 3,
+                "reprocessed": 3,
+                "resolvedReviewItems": 2,
+                "externalSubmission": "not_executed",
+            }
+            with patch(
+                "src.operations.local_api.LocalDocumentProcessor.reprocess_review_queue",
+                return_value=expected,
+            ) as reprocess:
+                response = client.post("/api/documents/reprocess-review-queue", json={
+                    "limit": 3,
+                    "actor": "dashboard-operator",
+                })
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), expected)
+            reprocess.assert_called_once_with(limit=3, actor="dashboard-operator")
 
     def test_api_exposes_wave_control_center_without_external_submission(self):
         with tempfile.TemporaryDirectory() as temp_dir:

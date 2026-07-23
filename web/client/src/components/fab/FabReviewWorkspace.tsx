@@ -8,6 +8,7 @@ import {
   CopyCheck,
   FileSearch,
   Scale,
+  Sparkles,
   X,
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
@@ -110,6 +111,7 @@ export function FabReviewWorkspace({
                 const reasons = Array.isArray(item.reasons) ? item.reasons.filter((reason): reason is string => typeof reason === "string") : [];
                 const duplicates = records(item.duplicateCandidates);
                 const financialIssues = records(document.financialFieldIssues);
+                const categorySuggestion = asRecord(document.categorySuggestion);
                 const postingEligible = document.postingEligible !== false;
                 return (
                   <tr key={text(item.id)}>
@@ -120,7 +122,9 @@ export function FabReviewWorkspace({
                     <td data-label={copy("Transaction", "Transactie")}>
                       <strong>{text(document.vendorName, copy("Vendor missing", "Leverancier ontbreekt"))}</strong>
                       <span>{text(document.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {postingEligible ? formatMoney(document.totalAmount, document.currency, copy("Amount missing", "Bedrag ontbreekt")) : reasons.includes("document_type_conflict") ? copy("Type decision required", "Typebeslissing vereist") : copy("Non-posting evidence", "Niet-boekingsbewijs")}</span>
-                      <span>{text(document.category, copy("Category missing", "Categorie ontbreekt"))}</span>
+                      <span>{text(categorySuggestion.category, "")
+                        ? copy(`Suggested: ${text(categorySuggestion.category)}`, `Voorgesteld: ${text(categorySuggestion.category)}`)
+                        : text(document.category, copy("Category missing", "Categorie ontbreekt"))}</span>
                     </td>
                     <td data-label={copy("Open decisions", "Open beslissingen")}>
                       <div className="fab-review-reasons">
@@ -181,6 +185,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   useEffect(() => {
     if (!item) return;
     const document = asRecord(item.document);
+    const categorySuggestion = asRecord(document.categorySuggestion);
     const financialIssues = records(document.financialFieldIssues);
     const invalidDate = financialIssues.some((issue) => text(issue.field, "") === "recordDate");
     const invalidVat = financialIssues.some((issue) => text(issue.field, "") === "vatAmount");
@@ -189,10 +194,17 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
       transactionDate: invalidDate ? "" : text(document.normalizedRecordDate, text(document.transactionDate, "")),
       totalAmount: numericText(document.totalAmount),
       vatAmount: invalidVat ? "" : numericText(document.normalizedVatAmount ?? document.vatAmount),
-      category: text(document.category, "") === "Manual Review" ? "" : text(document.category, ""),
+      category: text(document.category, "") === "Manual Review"
+        ? text(categorySuggestion.category, "")
+        : text(document.category, ""),
       documentType: normalizedDocumentType(document.documentType),
       targetSystem: text(document.targetSystem, "waveapps_business") as ReviewForm["targetSystem"],
-      resolution: copy("Verified against the source document in FAB.", "Geverifieerd aan de hand van het brondocument in FAB."),
+      resolution: text(categorySuggestion.category, "")
+        ? copy(
+          `Verified FAB's exact-vendor suggestion: ${text(categorySuggestion.category)}.`,
+          `FAB's exacte leveranciersvoorstel geverifieerd: ${text(categorySuggestion.category)}.`,
+        )
+        : copy("Verified against the source document in FAB.", "Geverifieerd aan de hand van het brondocument in FAB."),
       learnRule: true,
       applyToMatchingVendor: false,
     });
@@ -213,6 +225,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
   if (!item) return null;
   const document = asRecord(item.document);
+  const categorySuggestion = asRecord(document.categorySuggestion);
   const reviewItems = records(item.reviewItems);
   const detailReview = reviewItems.find((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")))
     || reviewItems.find((review) => text(review.reason, "") !== "duplicate_candidate")
@@ -346,6 +359,17 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
             </div>
           )}
 
+          {text(categorySuggestion.category, "") && !selectedNonPosting && (
+            <div className="fab-category-suggestion">
+              <Sparkles aria-hidden="true" />
+              <div>
+                <strong>{copy(`Suggested category: ${text(categorySuggestion.category)}`, `Voorgestelde categorie: ${text(categorySuggestion.category)}`)}</strong>
+                <span>{copy(text(categorySuggestion.rationale), text(categorySuggestion.rationale))} {copy("This is prefilled but is not applied until you approve it.", "Dit is vooraf ingevuld, maar wordt pas toegepast na uw goedkeuring.")}</span>
+              </div>
+              <span>{formatPercent(categorySuggestion.confidenceScore)}</span>
+            </div>
+          )}
+
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
               <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
@@ -366,7 +390,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
                 <label><span>{copy("Destination", "Bestemming")}</span><select value={form.targetSystem} onChange={(event) => setForm({ ...form, targetSystem: event.target.value as ReviewForm["targetSystem"] })}><option value="waveapps_business">Wave - Noodzakelijk Online</option><option value="waveapps_personal">Wave - Personal</option><option value="mijngeldzaken">MijnGeldzaken</option></select></label>
               </>}
               <label><span>{copy("Decision note", "Beslisnotitie")}</span><textarea value={form.resolution} onChange={(event) => setForm({ ...form, resolution: event.target.value })} rows={3} required /></label>
-              {!selectedNonPosting && <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span>{copy("Suggest this vendor/category rule for future receipts", "Stel deze leverancier/categorieregel voor toekomstige bonnen voor")}</span></label>}
+              {!selectedNonPosting && <label className="fab-review-checkbox"><input type="checkbox" checked={form.learnRule} onChange={(event) => setForm({ ...form, learnRule: event.target.checked })} /><span><strong>{copy("Teach FAB this exact vendor/category rule", "Leer FAB deze exacte leverancier/categorieregel")}</strong><small>{copy("Your approved source-backed decision becomes reusable for future exact-vendor matches.", "Uw goedgekeurde, brongestuurde beslissing wordt herbruikbaar voor toekomstige exacte leveranciersmatches.")}</small></span></label>}
               {!selectedNonPosting && matchingVendorDocuments > 0 && <label className="fab-review-checkbox fab-review-batch"><input type="checkbox" checked={form.applyToMatchingVendor} onChange={(event) => setForm({ ...form, applyToMatchingVendor: event.target.checked })} /><span><strong>{copy(`Apply this category to ${matchingVendorDocuments} other exact vendor match${matchingVendorDocuments === 1 ? "" : "es"}`, `Pas deze categorie toe op ${matchingVendorDocuments} andere exacte leveranciersmatch${matchingVendorDocuments === 1 ? "" : "es"}`)}</strong><small>{copy("Dates and amounts stay unchanged. Duplicate and missing-field reviews remain open.", "Datums en bedragen blijven ongewijzigd. Controles voor duplicaten en ontbrekende velden blijven open.")}</small></span></label>}
               <button className="fab-primary-button" type="submit" disabled={isBusy}><CheckCircle2 aria-hidden="true" /> {selectedNonPosting ? copy("Keep as supporting evidence", "Bewaren als ondersteunend bewijs") : copy("Approve verified details", "Goedgekeurde gegevens bevestigen")}</button>
             </form>
@@ -437,6 +461,11 @@ function formatMoney(value: unknown, currency: unknown, missingLabel: string): s
   } catch {
     return `${text(currency, "EUR")} ${value.toFixed(2)}`;
   }
+}
+
+function formatPercent(value: unknown): string {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? `${Math.round(numeric * 100)}%` : "";
 }
 
 function financialIssueLabel(issue: FabRecord, copy: (english: string, dutch: string) => string): string {

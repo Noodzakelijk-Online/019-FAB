@@ -26,6 +26,6 @@ logs/
 dist/
 build/
 
-# Local browser QA artifacts
+# Local QA artifacts
 .playwright-cli/
-output/playwright/
+output/

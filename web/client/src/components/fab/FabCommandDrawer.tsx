@@ -26,6 +26,7 @@ const commandGroups: Array<{ label: string; labelNl: string; commands: Array<{ i
       { id: "rescan_intake", label: "Rescan intake", labelNl: "Inname opnieuw scannen", description: "Register files from configured local and scanner folders.", descriptionNl: "Registreer bestanden uit ingestelde lokale en scannermappen.", icon: FolderSearch2 },
       { id: "process_imported", label: "Process imported", labelNl: "Import verwerken", description: "Run OCR, validation, duplicate checks, and classification.", descriptionNl: "Voer OCR, validatie, duplicaatcontrole en classificatie uit.", icon: FileScan },
       { id: "reprocess_incomplete", label: "Recover unread scans", labelNl: "Onleesbare scans herstellen", description: "Back up the ledger, then retry only review-gated documents with blank OCR.", descriptionNl: "Maak een back-up en probeer alleen controledocumenten met lege OCR opnieuw.", icon: ScanSearch },
+      { id: "reprocess_review_queue", label: "Reassess review queue", labelNl: "Controlewachtrij opnieuw beoordelen", description: "Back up the ledger, then apply the latest extraction and validation logic to retained OCR.", descriptionNl: "Maak een back-up en pas de nieuwste extractie- en validatielogica toe op bewaarde OCR.", icon: RefreshCw },
       { id: "sync_sources", label: "Sync sources", labelNl: "Bronnen synchroniseren", description: "Collect from configured Gmail, Drive, Photos, and Freshdesk sources.", descriptionNl: "Verzamel uit ingestelde Gmail-, Drive-, Photos- en Freshdesk-bronnen.", icon: RefreshCw },
     ],
   },

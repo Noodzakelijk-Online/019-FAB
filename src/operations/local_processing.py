@@ -9,6 +9,7 @@ from src.document_processors.document_type_classifier import (
     DocumentTypeClassifier,
     is_non_posting_document_type,
 )
+from src.document_processors.financial_field_extractor import FinancialFieldExtractor
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
@@ -41,6 +42,13 @@ PROCESSING_REVIEW_REASONS = {
     "validation_failed",
 }
 OCR_RECOVERY_VERSION = "illumination_normalization_v1"
+STORED_OCR_REASSESSMENT_VERSION = "financial_extraction_v3"
+STORED_OCR_REASSESSMENT_REASONS = {
+    "document_type_conflict",
+    "low_confidence_categorization",
+    "manual_review_category",
+    "validation_failed",
+}
 
 
 class LocalDocumentProcessor:
@@ -227,6 +235,114 @@ class LocalDocumentProcessor:
                 "backup": summary.get("backup"),
                 "externalSubmission": "not_executed",
                 "sourceFilesModified": False,
+            },
+        })
+        return summary
+
+    def reprocess_review_queue(
+        self,
+        limit: int = 25,
+        actor: str = "fab_local_processing",
+        create_backup: bool = True,
+    ) -> Dict[str, Any]:
+        """Reassess machine-gated documents from retained OCR without rerunning OCR."""
+        bounded_limit = max(1, min(_safe_int(limit) or 25, 100))
+        review_documents = [
+            self.ledger.get_document(int(document["id"])) or document
+            for document in self.ledger.list_documents(status="needs_review", limit=500)
+        ]
+        candidates = [
+            document
+            for document in review_documents
+            if _eligible_for_stored_ocr_reassessment(document)
+        ]
+        previously_attempted = [
+            document
+            for document in candidates
+            if _stored_ocr_reassessment_version(document) == STORED_OCR_REASSESSMENT_VERSION
+        ]
+        documents = [
+            document
+            for document in candidates
+            if _stored_ocr_reassessment_version(document) != STORED_OCR_REASSESSMENT_VERSION
+        ][:bounded_limit]
+        summary: Dict[str, Any] = {
+            "candidates": len(candidates),
+            "requested": len(documents),
+            "reprocessed": 0,
+            "processed": 0,
+            "needsReview": 0,
+            "failed": 0,
+            "skipped": len(review_documents) - len(candidates) + len(previously_attempted),
+            "skippedPreviouslyAttempted": len(previously_attempted),
+            "reviewItemsBefore": _open_review_count(documents),
+            "reviewItemsAfter": 0,
+            "resolvedReviewItems": 0,
+            "externalSubmission": "not_executed",
+            "sourceFilesModified": False,
+            "ocrRerun": False,
+            "documents": [],
+        }
+        if documents and create_backup:
+            backup = LocalBackupService(self.ledger, self.config).create_backup(
+                note="Automatic pre-reassessment backup before stored OCR review reprocessing"
+            )
+            manifest = backup.get("manifest") or {}
+            summary["backup"] = {
+                "status": backup.get("status"),
+                "backupFilename": backup.get("backupFilename"),
+                "ledgerSha256": manifest.get("ledgerSha256"),
+                "ledgerBytes": manifest.get("ledgerBytes"),
+            }
+
+        for document in documents:
+            document_id = int(document["id"])
+            before_count = len(_open_reviews(document))
+            result = self.process_document(document_id, reuse_stored_ocr=True)
+            refreshed = self.ledger.get_document(document_id) or document
+            after_count = len(_open_reviews(refreshed))
+            reassessment = {
+                "version": STORED_OCR_REASSESSMENT_VERSION,
+                "actor": actor,
+                "completedAt": _now(),
+                "previousStatus": document.get("processing_status"),
+                "status": result.get("status"),
+                "reviewItemsBefore": before_count,
+                "reviewItemsAfter": after_count,
+                "resolvedReviewItems": max(0, before_count - after_count),
+                "ocrRerun": False,
+                "externalSubmission": "not_executed",
+            }
+            self.ledger.update_document(document_id, {
+                "metadata": self._metadata(
+                    refreshed,
+                    {"processing": {"storedOcrReassessment": reassessment}},
+                ),
+            })
+            summary["reprocessed"] += 1
+            summary["reviewItemsAfter"] += after_count
+            summary["resolvedReviewItems"] += reassessment["resolvedReviewItems"]
+            status = result.get("status")
+            if status == "processed":
+                summary["processed"] += 1
+            elif status == "failed":
+                summary["failed"] += 1
+            else:
+                summary["needsReview"] += 1
+            summary["documents"].append({
+                **result,
+                "reviewItemsBefore": before_count,
+                "reviewItemsAfter": after_count,
+                "resolvedReviewItems": reassessment["resolvedReviewItems"],
+            })
+
+        self.ledger.record_audit_event({
+            "action": "local_processing.review_queue_reassessed",
+            "entityType": "bookkeeping_document",
+            "details": {
+                key: value
+                for key, value in summary.items()
+                if key != "documents"
             },
         })
         return summary
@@ -449,7 +565,12 @@ class LocalDocumentProcessor:
             self._resolve_processing_failed_reviews(document_id, actor)
         return result
 
-    def process_document(self, document_id: int) -> Dict[str, Any]:
+    def process_document(
+        self,
+        document_id: int,
+        *,
+        reuse_stored_ocr: bool = False,
+    ) -> Dict[str, Any]:
         document = self.ledger.get_document(document_id)
         if not document:
             return {"documentId": document_id, "status": "not_found", "error": "Document not found"}
@@ -478,7 +599,11 @@ class LocalDocumentProcessor:
             )
 
         try:
-            processed_data = self._process_path(path, document)
+            processed_data = (
+                self._process_stored_ocr(document)
+                if reuse_stored_ocr and str(document.get("ocr_text") or "").strip()
+                else self._process_path(path, document)
+            )
             extracted_data = _sanitize_extracted_data(processed_data.get("extracted_data") or {})
             document_type_classification = self.document_type_classifier.classify(
                 processed_data.get("ocr_text", ""),
@@ -606,6 +731,19 @@ class LocalDocumentProcessor:
             },
             "metadata": metadata,
         })
+        if reuse_stored_ocr:
+            unsupported_amount_fields = [
+                field_name
+                for field_name, extracted_key in (
+                    ("total_amount", "total_amount"),
+                    ("vat_amount", "vat_amount"),
+                )
+                if extracted_data.get(extracted_key) is None
+            ]
+            self.ledger.clear_document_financial_fields(
+                document_id,
+                unsupported_amount_fields,
+            )
         self.ledger.replace_extracted_fields(
             document_id,
             _extracted_field_records(
@@ -742,6 +880,25 @@ class LocalDocumentProcessor:
         if self._processor_pipeline is None:
             self._processor_pipeline = ProcessorPipeline(self.config)
         return self._processor_pipeline.process_document(path)
+
+    @staticmethod
+    def _process_stored_ocr(document: Dict[str, Any]) -> Dict[str, Any]:
+        ocr_text = str(document.get("ocr_text") or "")
+        extraction = FinancialFieldExtractor().extract(ocr_text)
+        existing = document.get("extracted_data")
+        if not isinstance(existing, dict):
+            existing = {}
+        return {
+            "document_path": document.get("storage_path"),
+            "ocr_text": ocr_text,
+            "extracted_data": extraction.get("extracted_data") or {},
+            "field_confidences": extraction.get("field_confidences") or {},
+            "language": existing.get("language") or "unknown",
+            "ocr_confidence": 1.0,
+            "ocr_strategy": "stored_ocr_reassessment",
+            "ocr_fallback_pages": 0,
+            "ocr_fallback_recovered_pages": 0,
+        }
 
     def _review_reasons(
         self,
@@ -941,6 +1098,43 @@ def _ocr_recovery_version(document: Dict[str, Any]) -> str:
     processing = metadata.get("processing") or {}
     recovery = processing.get("ocrRecovery") or {}
     return str(recovery.get("version") or "")
+
+
+def _stored_ocr_reassessment_version(document: Dict[str, Any]) -> str:
+    metadata = document.get("metadata") or {}
+    processing = metadata.get("processing") or {}
+    reassessment = processing.get("storedOcrReassessment") or {}
+    return str(reassessment.get("version") or "")
+
+
+def _eligible_for_stored_ocr_reassessment(document: Dict[str, Any]) -> bool:
+    if not str(document.get("ocr_text") or "").strip():
+        return False
+    if not _has_source_file(document):
+        return False
+    if document.get("duplicate_of_document_id"):
+        return False
+    if document.get("review_corrections"):
+        return False
+    open_reviews = _open_reviews(document)
+    if any(str(item.get("reason") or "") == "duplicate_candidate" for item in open_reviews):
+        return False
+    return any(
+        str(item.get("reason") or "") in STORED_OCR_REASSESSMENT_REASONS
+        for item in open_reviews
+    )
+
+
+def _open_reviews(document: Dict[str, Any]) -> list:
+    return [
+        item
+        for item in document.get("review_items") or []
+        if item.get("status") in {"pending", "in_review"}
+    ]
+
+
+def _open_review_count(documents: list) -> int:
+    return sum(len(_open_reviews(document)) for document in documents)
 
 
 def _has_source_file(document: Dict[str, Any]) -> bool:

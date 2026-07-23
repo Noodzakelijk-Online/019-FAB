@@ -26,6 +26,7 @@ from src.operations.local_bookkeeping_records import (
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_categories import fab_category_options
+from src.operations.local_category_suggestions import suggest_category_intent
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.drive_relay_intake import DriveRelayIntakeService
@@ -4182,6 +4183,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 actor=actor,
             )
 
+        def reprocess_review_queue_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalDocumentProcessor(ledger, config).reprocess_review_queue(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+            )
+
         def sync_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
             return LocalConnectorIntakeService(ledger, config).sync(
                 sources=payload.get("sources"),
@@ -4246,6 +4253,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "rescan_intake": rescan_intake_command,
                 "process_imported": process_imported_command,
                 "reprocess_incomplete": reprocess_incomplete_command,
+                "reprocess_review_queue": reprocess_review_queue_command,
                 "sync_sources": sync_sources_command,
                 "run_safe_cycle": run_safe_cycle_command,
                 "run_due_recovery": run_due_recovery_command,
@@ -6028,6 +6036,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             actor=actor,
         ))
 
+    @app.post("/api/documents/reprocess-review-queue")
+    def reprocess_review_queue():
+        payload = request.get_json(silent=True) or {}
+        limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
+        actor = str(payload.get("actor") or "fab_local_api")
+        return jsonify(LocalDocumentProcessor(ledger, config).reprocess_review_queue(
+            limit=limit,
+            actor=actor,
+        ))
+
     @app.post("/documents/process-imported")
     def process_imported_form():
         session["fab_last_processing_summary"] = LocalDocumentProcessor(ledger, config).process_imported(limit=25)
@@ -6886,6 +6904,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     item for item in work_items
                     if "duplicate_candidate" in (item.get("reasons") or [])
                 ]),
+                "categorySuggestions": len([
+                    item for item in work_items
+                    if ((item.get("document") or {}).get("categorySuggestion") or {}).get("category")
+                ]),
             },
         })
 
@@ -7547,6 +7569,7 @@ def _compact_review_document(
         "financialFieldIssues": record_metadata.get("financialFieldIssues") or [],
         "currency": extracted.get("currency") or "EUR",
         "category": document.get("category"),
+        "categorySuggestion": suggest_category_intent(document),
         "targetSystem": target_system,
         "invoiceNumber": extracted.get("invoice_number"),
         "receiptNumber": extracted.get("receipt_number"),
