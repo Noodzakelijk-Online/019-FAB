@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import hashlib
 import os
 import re
+import tempfile
 from typing import List, Dict, Any
 
 class BaseFetcher(ABC):
@@ -42,11 +43,7 @@ class BaseFetcher(ABC):
         Returns:
             The local path where the document was saved.
         """
-        local_path = self._download_path("/tmp", filename, filename)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "wb") as f:
-            f.write(content)
-        return local_path
+        return self._store_content("/tmp", filename, filename, content)
 
     def _start_run(self) -> None:
         self.last_error = None
@@ -89,6 +86,72 @@ class BaseFetcher(ABC):
     ) -> str:
         content_hash = hashlib.sha256(content).hexdigest()
         return self._download_path(directory, filename, f"{identity}:{content_hash}")
+
+    def _store_content(
+        self,
+        directory: str,
+        filename: str,
+        identity: Any,
+        content: bytes,
+    ) -> str:
+        """Persist immutable connector evidence through an atomic verified write."""
+        if not isinstance(content, bytes):
+            raise TypeError("Connector evidence content must be bytes.")
+
+        destination_dir = os.path.abspath(directory)
+        os.makedirs(destination_dir, exist_ok=True)
+        local_path = self._content_download_path(
+            destination_dir,
+            filename,
+            identity,
+            content,
+        )
+        expected_sha256 = hashlib.sha256(content).hexdigest()
+        expected_size = len(content)
+        if os.path.lexists(local_path):
+            self._verify_stored_content(local_path, expected_sha256, expected_size)
+            return local_path
+
+        descriptor, staged_path = tempfile.mkstemp(
+            prefix=".fab-evidence-",
+            suffix=".tmp",
+            dir=destination_dir,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._verify_stored_content(staged_path, expected_sha256, expected_size)
+
+            if os.path.lexists(local_path):
+                self._verify_stored_content(local_path, expected_sha256, expected_size)
+                return local_path
+            os.replace(staged_path, local_path)
+            staged_path = ""
+            self._verify_stored_content(local_path, expected_sha256, expected_size)
+            return local_path
+        finally:
+            if staged_path and os.path.exists(staged_path):
+                os.remove(staged_path)
+
+    @staticmethod
+    def _verify_stored_content(
+        path: str,
+        expected_sha256: str,
+        expected_size: int,
+    ) -> None:
+        if os.path.islink(path) or not os.path.isfile(path):
+            raise OSError("Connector evidence destination is not a regular file.")
+        if os.path.getsize(path) != expected_size:
+            raise OSError("Retained connector evidence size does not match the source.")
+
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise OSError("Retained connector evidence checksum does not match the source.")
 
     def _request_timeout(self, default: float = 30.0) -> float:
         for key in (

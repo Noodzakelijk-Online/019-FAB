@@ -17,6 +17,7 @@ import {
   createCheckoutSession,
   retrieveCheckoutSession,
   getCustomerSubscriptions,
+  getCustomerPaymentMethods,
   listCustomerInvoices,
 } from "../stripe/stripe";
 import { getDefaultProduct, FAB_PRODUCTS } from "../stripe/products";
@@ -71,11 +72,6 @@ export const stripeRouter = router({
           userName: user.name,
           stripeCustomerId: customerId,
           origin: input.origin,
-          priceAmount: product.priceAmountCents,
-          currency: product.currency,
-          interval: product.interval,
-          productName: product.name,
-          productDescription: product.description,
         });
 
         log.info("Checkout session created", {
@@ -136,13 +132,13 @@ export const stripeRouter = router({
     }),
 
   /**
-   * Get the current user's subscription status.
-   * Returns a safe default if no subscription exists.
+   * Get usage-billing readiness. Legacy subscription fields remain for compatibility.
    */
   subscriptionStatus: protectedProcedure.query(async ({ ctx }) => {
     const user = ctx.user;
     const noSub = {
       hasSubscription: false,
+      billingReady: false,
       status: "none" as const,
       subscription: null,
     };
@@ -152,9 +148,19 @@ export const stripeRouter = router({
     }
 
     try {
-      const subscriptions = await getCustomerSubscriptions(
-        user.stripeCustomerId
-      );
+      const [paymentMethods, subscriptions] = await Promise.all([
+        getCustomerPaymentMethods(user.stripeCustomerId),
+        getCustomerSubscriptions(user.stripeCustomerId),
+      ]);
+
+      if (paymentMethods.data.length > 0) {
+        return {
+          hasSubscription: false,
+          billingReady: true,
+          status: "ready" as const,
+          subscription: null,
+        };
+      }
 
       if (subscriptions.data.length === 0) {
         return noSub;
@@ -165,6 +171,7 @@ export const stripeRouter = router({
 
       return {
         hasSubscription: true,
+        billingReady: true,
         status: sub.status as string,
         subscription: {
           id: sub.id,
@@ -230,8 +237,8 @@ export const stripeRouter = router({
       try {
         const session = await retrieveCheckoutSession(input.sessionId);
         return {
-          success: session.payment_status === "paid",
-          status: session.payment_status,
+          success: (session.mode === "setup" && session.status === "complete") || session.payment_status === "paid",
+          status: session.mode === "setup" ? session.status : session.payment_status,
           customerEmail: session.customer_details?.email || null,
         };
       } catch (err) {
@@ -261,6 +268,7 @@ export const stripeRouter = router({
       description: product.description,
       descriptionNl: product.descriptionNl,
       priceAmountCents: product.priceAmountCents,
+      usageMultiplier: product.usageMultiplier,
       currency: product.currency,
       interval: product.interval,
       features: product.features,

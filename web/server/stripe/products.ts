@@ -11,7 +11,8 @@ export interface FABProduct {
   nameNl: string;
   description: string;
   descriptionNl: string;
-  priceAmountCents: number; // in cents (EUR)
+  priceAmountCents: number; // Deprecated compatibility field; FAB has no fixed fee.
+  usageMultiplier: number;
   currency: string;
   interval: "month" | "year";
   features: string[];
@@ -28,7 +29,8 @@ export const FAB_PRODUCTS: Record<string, FABProduct> = {
       "Full access to FAB's financial orchestration platform with usage-based pricing.",
     descriptionNl:
       "Volledige toegang tot FAB's financiële orkestratieplatform met prijzen op basis van gebruik.",
-    priceAmountCents: 499, // €4.99/month base fee
+    priceAmountCents: 0,
+    usageMultiplier: 2.5,
     currency: "eur",
     interval: "month",
     features: [

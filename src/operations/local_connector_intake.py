@@ -7,9 +7,16 @@ from uuid import uuid4
 
 from src.document_fetchers.drive_fetcher import DriveFetcher
 from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
-from src.document_fetchers.gmail_fetcher import GmailFetcher
+from src.document_fetchers.gmail_fetcher import (
+    CUSTOM_SCANNER_PROFILE_ID,
+    HP_EPRINT_PROFILE_ID,
+    HP_EPRINT_SENDER,
+    GmailFetcher,
+)
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 CONNECTOR_SOURCES = ("gmail", "google_drive", "freshdesk", "google_photos")
@@ -18,6 +25,7 @@ SOURCE_ALIASES = {
     "drive": "google_drive",
     "photos": "google_photos",
 }
+CONNECTOR_TARGET_SYSTEMS = {"waveapps_business", "waveapps_personal", "mijngeldzaken"}
 
 
 class LocalConnectorIntakeService:
@@ -171,6 +179,7 @@ class LocalConnectorIntakeService:
                 "configured": source_plan.get("configured"),
                 "enabled": source_plan.get("enabled"),
                 "canSync": source_plan.get("canSync"),
+                "targetSystem": source_plan.get("targetSystem"),
                 "externalSubmission": "not_executed",
             }
             workflow_step_id = self.ledger.create_workflow_step({
@@ -220,7 +229,12 @@ class LocalConnectorIntakeService:
         failures = [item for item in results if item["status"] in {"failed", "partial"}]
         attention = [
             item for item in results
-            if item["status"] in {"needs_configuration", "disabled", "supervision_required"}
+            if item["status"] in {
+                "needs_authorization",
+                "needs_configuration",
+                "disabled",
+                "supervision_required",
+            }
         ]
         if failures:
             status = "failed" if len(failures) == len(results) else "completed_with_errors"
@@ -278,6 +292,16 @@ class LocalConnectorIntakeService:
 
     def _sync_source(self, source: str) -> Dict[str, Any]:
         plan = self._source_plan(source)
+        existing_source = next((
+            item
+            for item in self.ledger.list_source_accounts(source_type=source, limit=100)
+            if str(item.get("source_identifier") or "") == str(plan["sourceIdentifier"])
+        ), None)
+        previous_metadata = (
+            dict(existing_source.get("metadata") or {})
+            if isinstance(existing_source, dict) and isinstance(existing_source.get("metadata"), dict)
+            else {}
+        )
         source_account_id = self.ledger.upsert_source_account({
             "sourceType": source,
             "sourceIdentifier": plan["sourceIdentifier"],
@@ -285,11 +309,14 @@ class LocalConnectorIntakeService:
             "status": "syncing" if plan["canSync"] else plan["status"],
             "lastScanAt": _now(),
             "metadata": {
+                **previous_metadata,
                 "configured": plan["configured"],
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
+                "scannerProfile": plan.get("scannerProfile"),
                 "nextAction": plan.get("nextAction"),
                 "externalSubmission": "not_executed",
+                **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
             },
         })
         if not plan["canSync"]:
@@ -309,20 +336,46 @@ class LocalConnectorIntakeService:
 
         scan_started_at = _now()
         try:
-            fetcher = self.fetcher_factories[source](self.config)
+            fetcher_config = dict(self.config)
+            if source == "gmail":
+                checkpoint = _epoch_seconds(previous_metadata.get("lastSuccessfulSyncAt"))
+                overlap_seconds = int(_positive_float_config(
+                    self.config,
+                    "gmail_incremental_overlap_seconds",
+                    default=86400.0,
+                ))
+                if checkpoint:
+                    fetcher_config["gmail_incremental_after_epoch"] = max(
+                        1,
+                        checkpoint - overlap_seconds,
+                    )
+            fetcher = self.fetcher_factories[source](fetcher_config)
         except Exception as exc:
-            return self._source_failure(plan, source_account_id, exc, scan_started_at)
+            return self._source_failure(
+                plan,
+                source_account_id,
+                exc,
+                scan_started_at,
+                previous_metadata=previous_metadata,
+            )
 
         try:
             documents = fetcher.fetch_documents()
         except Exception as exc:
-            return self._source_failure(plan, source_account_id, exc, scan_started_at)
+            return self._source_failure(
+                plan,
+                source_account_id,
+                exc,
+                scan_started_at,
+                previous_metadata=previous_metadata,
+            )
         if not isinstance(documents, list):
             return self._source_failure(
                 plan,
                 source_account_id,
                 TypeError("Connector returned a non-list document payload"),
                 scan_started_at,
+                previous_metadata=previous_metadata,
             )
         registrar = LocalFolderIntake(self.ledger, allowed_extensions={"*"}, source=source)
         counters = {
@@ -332,6 +385,7 @@ class LocalConnectorIntakeService:
             "revisions": 0,
             "alreadyRegistered": 0,
             "skipped": 0,
+            "targetBackfills": 0,
         }
         registered_documents = []
         registration_errors = []
@@ -340,9 +394,10 @@ class LocalConnectorIntakeService:
                 counters["skipped"] += 1
                 continue
             root = self._download_root(source, document)
+            routed_document = _with_default_target_system(document, plan.get("targetSystem"))
             try:
                 result = registrar.register_fetched_document(
-                    document,
+                    routed_document,
                     source_account_id=source_account_id,
                     root=root,
                 )
@@ -367,6 +422,24 @@ class LocalConnectorIntakeService:
                 elif result_status == "revision":
                     counters["revisions"] += 1
             registered_documents.append(result.get("document"))
+            registered_document = result.get("document") or {}
+            document_id = registered_document.get("id")
+            if registered_document.get("targetBackfilled"):
+                counters["targetBackfills"] += 1
+            if (
+                document_id
+                and registered_document.get("targetBackfilled")
+                and self.ledger.get_bookkeeping_record_by_document(int(document_id))
+            ):
+                LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(
+                    int(document_id)
+                )
+
+        counters["targetBackfills"] += self._backfill_source_target(
+            source,
+            source_account_id,
+            plan.get("targetSystem"),
+        )
 
         diagnostics = getattr(fetcher, "last_run", {})
         fetch_error = getattr(fetcher, "last_error", None) or getattr(fetcher, "auth_error", None)
@@ -386,13 +459,17 @@ class LocalConnectorIntakeService:
             "documentsImported": counters["registered"],
             "duplicatesDetected": counters["duplicates"],
             "metadata": {
+                **previous_metadata,
                 "configured": True,
                 "enabled": True,
                 "mode": plan["mode"],
+                "scannerProfile": plan.get("scannerProfile"),
                 "diagnostics": diagnostics,
                 "run": counters,
                 "error": error,
+                "lastSuccessfulSyncAt": _now() if status == "ready" else previous_metadata.get("lastSuccessfulSyncAt"),
                 "externalSubmission": "not_executed",
+                **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
             },
         })
         if errors:
@@ -425,6 +502,7 @@ class LocalConnectorIntakeService:
         source_account_id: int,
         error: Exception,
         scan_started_at: str,
+        previous_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         message = _safe_error(error, self.config)
         self.ledger.upsert_source_account({
@@ -434,6 +512,7 @@ class LocalConnectorIntakeService:
             "status": "failed",
             "lastScanAt": scan_started_at,
             "metadata": {
+                **(previous_metadata or {}),
                 "configured": plan["configured"],
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
@@ -468,6 +547,8 @@ class LocalConnectorIntakeService:
 
     def _source_plan(self, source: str) -> Dict[str, Any]:
         configured = self._configured(source)
+        target_system = _configured_target_system(self.config, source)
+        target_system_valid = target_system in CONNECTOR_TARGET_SYSTEMS if target_system else True
         enabled = _configured_bool(
             self.config,
             f"{source}_enabled",
@@ -475,8 +556,16 @@ class LocalConnectorIntakeService:
             default=False,
         )
         source_identifier = self._source_identifier(source)
+        gmail_scanner_mode = _configured_bool(
+            self.config,
+            "gmail_scanner_mode",
+            default=False,
+        )
+        gmail_scanner_policy_ready = bool(
+            _list_config_value(self.config.get("gmail_trusted_senders"))
+        )
         label = {
-            "gmail": "Gmail",
+            "gmail": "Gmail scanner inbox" if gmail_scanner_mode else "Gmail",
             "google_drive": "Google Drive",
             "freshdesk": "Freshdesk",
             "google_photos": "Google Photos Picker",
@@ -504,9 +593,16 @@ class LocalConnectorIntakeService:
                     if status == "supervision_required"
                     else "Enable the supervised Google Photos Picker integration when needed."
                 ),
+                "targetSystem": target_system if target_system_valid else None,
             }
         if not enabled:
             status = "disabled"
+        elif source == "gmail" and gmail_scanner_mode and not gmail_scanner_policy_ready:
+            status = "needs_configuration"
+        elif source in {"gmail", "google_drive"} and self._reauthorization_required(source):
+            status = "needs_authorization"
+        elif not target_system_valid:
+            status = "needs_configuration"
         elif not configured:
             status = "needs_configuration"
         else:
@@ -519,9 +615,62 @@ class LocalConnectorIntakeService:
             "enabled": enabled,
             "canSync": status == "ready",
             "status": status,
-            "mode": "read_only_connector",
-            "nextAction": _next_action(source, status),
+            "mode": "scanner_mailbox_read_only" if source == "gmail" and gmail_scanner_mode else "read_only_connector",
+            "scannerProfile": self._gmail_scanner_profile() if source == "gmail" else None,
+            "nextAction": (
+                f"Set {source}.target_system to waveapps_business, waveapps_personal, or mijngeldzaken."
+                if not target_system_valid
+                else _next_action(source, status)
+            ),
+            "targetSystem": target_system if target_system_valid else None,
         }
+
+    def _backfill_source_target(
+        self,
+        source: str,
+        source_account_id: int,
+        target_system: Any,
+    ) -> int:
+        target = str(target_system or "").strip()
+        if not target:
+            return 0
+        backfilled = 0
+        after_id = 0
+        while True:
+            documents = self.ledger.list_documents_for_source_account(
+                source_account_id,
+                after_id=after_id,
+                limit=500,
+            )
+            if not documents:
+                break
+            for document in documents:
+                document_id = int(document["id"])
+                after_id = max(after_id, document_id)
+                if _document_target_system(document):
+                    continue
+                metadata = dict(document.get("metadata") or {})
+                metadata["targetSystem"] = target
+                self.ledger.update_document(document_id, {"metadata": metadata})
+                if self.ledger.get_bookkeeping_record_by_document(document_id):
+                    LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(
+                        document_id
+                    )
+                self.ledger.record_audit_event({
+                    "action": "local_connector_intake.target_system_backfilled",
+                    "entityType": "bookkeeping_document",
+                    "entityId": str(document_id),
+                    "details": {
+                        "source": source,
+                        "sourceAccountId": source_account_id,
+                        "targetSystem": target,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                backfilled += 1
+            if len(documents) < 500:
+                break
+        return backfilled
 
     def _configured(self, source: str) -> bool:
         if source == "gmail":
@@ -557,6 +706,44 @@ class LocalConnectorIntakeService:
             "google_photos_credentials_file",
             "photos_credentials_path",
         ) and bool(token_path and token_path.lower().endswith(".json") and os.path.isfile(token_path))
+
+    def _reauthorization_required(self, source: str) -> bool:
+        token_keys = {
+            "gmail": ("gmail_token_file", "gmail_token_path"),
+            "google_drive": ("google_drive_token_file", "drive_token_path"),
+        }.get(source, ())
+        token_path = _config_path(self.config, *token_keys)
+        return bool(token_path and os.path.isfile(f"{token_path}.reauthorize"))
+
+    def _gmail_scanner_profile(self) -> Dict[str, Any]:
+        trusted_senders = _list_config_value(self.config.get("gmail_trusted_senders"))
+        is_hp_eprint = trusted_senders == [HP_EPRINT_SENDER]
+        return {
+            "enabled": _configured_bool(self.config, "gmail_scanner_mode", default=False),
+            "profileId": (
+                HP_EPRINT_PROFILE_ID
+                if is_hp_eprint
+                else CUSTOM_SCANNER_PROFILE_ID
+            ),
+            "trustedSenders": trusted_senders,
+            "query": str(
+                self.config.get("gmail_query")
+                or self.config.get("gmail_search_query")
+                or "has:attachment"
+            ),
+            "documentPolicy": "pdf_only_magic_verified",
+            "originalRetention": "email_unchanged",
+            "deliveryPath": "gmail_to_fab_direct",
+            "sourceProvenance": (
+                {
+                    "repository": "Noodzakelijk-Online/025-Scan-to-folder-automation",
+                    "auditedCommit": "e3078d92c214aa3b17d98a8687f16e73f52f71ba",
+                    "legacyTransport": "gmail_to_google_drive_apps_script",
+                }
+                if is_hp_eprint
+                else None
+            ),
+        }
 
     def _source_identifier(self, source: str) -> str:
         if source == "gmail":
@@ -594,6 +781,39 @@ def _normalize_sources(values: Optional[Iterable[str]]) -> list:
     return normalized
 
 
+def _configured_target_system(config: Dict[str, Any], source: str) -> str:
+    nested = config.get(source) if isinstance(config.get(source), dict) else {}
+    value = config.get(f"{source}_target_system") or nested.get("target_system") or ""
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _with_default_target_system(document: Dict[str, Any], target_system: Any) -> Dict[str, Any]:
+    result = dict(document)
+    metadata = dict(result.get("metadata") or {}) if isinstance(result.get("metadata"), dict) else {}
+    existing = resolve_document_target_system(result)
+    if not existing and str(target_system or "").strip():
+        metadata["targetSystem"] = str(target_system).strip()
+        result["targetSystem"] = str(target_system).strip()
+    result["metadata"] = metadata
+    return result
+
+
+def _document_target_system(document: Dict[str, Any]) -> str:
+    return resolve_document_target_system(document)
+
+
+def _list_config_value(value: Any) -> list:
+    if isinstance(value, (list, tuple, set)):
+        values = value
+    else:
+        values = str(value or "").replace(";", ",").split(",")
+    return list(dict.fromkeys(
+        str(item or "").strip().lower()
+        for item in values
+        if str(item or "").strip()
+    ))
+
+
 def _empty_summary() -> Dict[str, int]:
     return {
         "sources": 0,
@@ -603,6 +823,7 @@ def _empty_summary() -> Dict[str, int]:
         "revisions": 0,
         "alreadyRegistered": 0,
         "skipped": 0,
+        "targetBackfills": 0,
         "failedSources": 0,
     }
 
@@ -611,7 +832,9 @@ def _summarize(results: list) -> Dict[str, int]:
     summary = _empty_summary()
     summary["sources"] = len(results)
     for item in results:
-        for key in ("seen", "registered", "duplicates", "revisions", "alreadyRegistered", "skipped"):
+        for key in (
+            "seen", "registered", "duplicates", "revisions", "alreadyRegistered", "skipped", "targetBackfills"
+        ):
             summary[key] += int(item.get(key) or 0)
         if item.get("status") in {"failed", "partial"}:
             summary["failedSources"] += 1
@@ -638,6 +861,7 @@ def _compact_connector_step_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "revisions",
         "alreadyRegistered",
         "skipped",
+        "targetBackfills",
         "nextAction",
         "externalSubmission",
     )
@@ -690,7 +914,15 @@ def _next_action(source: str, status: str) -> Optional[str]:
     if status == "disabled":
         return f"Enable {source} after its read-only credentials and approved source scope are configured."
     if source == "google_drive":
-        return "Configure read-only Drive credentials, a token, and the approved folder_id."
+        return (
+            "Open Google Drive setup in the FAB operator dashboard, complete the desktop "
+            "OAuth consent flow, and confirm the approved folder_id."
+        )
+    if source == "gmail":
+        return (
+            "Open Gmail scanner setup in the FAB operator dashboard and complete the "
+            "read-only desktop OAuth consent flow."
+        )
     return f"Configure the read-only credentials and token required for {source}."
 
 
@@ -724,3 +956,16 @@ def _safe_error(error: Any, config: Dict[str, Any]) -> Optional[str]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _epoch_seconds(value: Any) -> int:
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0, int(parsed.timestamp()))

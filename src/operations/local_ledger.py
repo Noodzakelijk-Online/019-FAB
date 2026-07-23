@@ -109,6 +109,7 @@ class LocalOperationsLedger:
                     document_type TEXT NOT NULL DEFAULT 'unknown',
                     processing_status TEXT NOT NULL DEFAULT 'imported',
                     duplicate_fingerprint TEXT,
+                    content_sha256 TEXT,
                     duplicate_of_document_id INTEGER,
                     vendor_name TEXT,
                     category TEXT,
@@ -842,6 +843,19 @@ class LocalOperationsLedger:
                 "reconciliation_status",
                 "TEXT NOT NULL DEFAULT 'not_started'",
             )
+            self._ensure_column(
+                connection,
+                "bookkeeping_documents",
+                "content_sha256",
+                "TEXT",
+            )
+            self._backfill_document_content_hashes(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_local_docs_content_sha256
+                    ON bookkeeping_documents(content_sha256)
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_local_docs_reconciliation
@@ -854,6 +868,7 @@ class LocalOperationsLedger:
             self._ensure_export_attempt_schema(connection)
             self._ensure_wave_operation_snapshot_schema(connection)
             self._ensure_wave_entity_mirror_schema(connection)
+            self._ensure_review_item_schema(connection)
 
     def acquire_runtime_lease(
         self,
@@ -935,6 +950,43 @@ class LocalOperationsLedger:
                 (str(lease_name or "").strip(), str(owner_token or "").strip()),
             )
             return int(cursor.rowcount) == 1
+
+    def force_release_runtime_lease(
+        self,
+        lease_name: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> bool:
+        """Release a lease after its owning FAB services have been stopped."""
+        normalized_name = str(lease_name or "").strip()
+        normalized_actor = str(actor or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if not normalized_name or not normalized_actor or not normalized_reason:
+            raise ValueError("lease_name, actor, and reason are required")
+
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT owner_token FROM runtime_leases WHERE lease_name = ? LIMIT 1",
+                (normalized_name,),
+            ).fetchone()
+        if not row:
+            return False
+
+        owner_token = str(row["owner_token"] or "").strip()
+        if not owner_token or not self.release_runtime_lease(normalized_name, owner_token):
+            return False
+        self.record_audit_event({
+            "action": "runtime_lease.force_released",
+            "entityType": "runtime_lease",
+            "entityId": normalized_name,
+            "details": {
+                "actor": normalized_actor,
+                "reason": normalized_reason,
+                "externalSubmission": "not_executed",
+            },
+        })
+        return True
 
     def get_runtime_lease(self, lease_name: str) -> Optional[Dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -1180,6 +1232,7 @@ class LocalOperationsLedger:
             "document_type": payload.get("documentType", "unknown"),
             "processing_status": payload.get("processingStatus", "imported"),
             "duplicate_fingerprint": payload.get("duplicateFingerprint"),
+            "content_sha256": payload.get("contentSha256"),
             "duplicate_of_document_id": payload.get("duplicateOfDocumentId"),
             "vendor_name": payload.get("vendorName"),
             "category": payload.get("category"),
@@ -1215,6 +1268,7 @@ class LocalOperationsLedger:
             "document_type": payload.get("documentType"),
             "processing_status": payload.get("processingStatus"),
             "duplicate_fingerprint": payload.get("duplicateFingerprint"),
+            "content_sha256": payload.get("contentSha256"),
             "duplicate_of_document_id": payload.get("duplicateOfDocumentId"),
             "vendor_name": payload.get("vendorName"),
             "category": payload.get("category"),
@@ -1230,6 +1284,19 @@ class LocalOperationsLedger:
         }
         self._update("bookkeeping_documents", document_id, fields)
 
+    def clear_document_financial_fields(self, document_id: int, field_names: Any) -> None:
+        """Explicitly clear unsupported extracted values without broad null updates."""
+        allowed = {"total_amount", "vat_amount"}
+        selected = sorted({str(field) for field in (field_names or [])} & allowed)
+        if not selected:
+            return
+        assignments = ", ".join(f"{field} = NULL" for field in selected)
+        with self._connection() as connection:
+            connection.execute(
+                f"UPDATE bookkeeping_documents SET {assignments}, updated_at = ? WHERE id = ?",
+                (self._now(), int(document_id)),
+            )
+
     def clear_document_duplicate(self, document_id: int) -> None:
         with self._connection() as connection:
             connection.execute(
@@ -1243,19 +1310,74 @@ class LocalOperationsLedger:
 
     def create_review_item(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         now = self._now()
-        return self._insert(
-            "review_items",
-            {
-                "id": preferred_id,
-                "document_id": payload.get("documentId"),
-                "reason": payload.get("reason", "manual_review"),
-                "details": payload.get("details"),
-                "status": payload.get("status", "pending"),
-                "corrected_data_json": self._json(payload.get("correctedData")),
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
+        document_id = self._optional_int(payload.get("documentId"))
+        reason = str(payload.get("reason") or "manual_review").strip() or "manual_review"
+        status = str(payload.get("status") or "pending").strip() or "pending"
+        with self._connection() as connection:
+            def refresh_existing(row: sqlite3.Row) -> int:
+                corrected_data = self._json_load(row["corrected_data_json"]) or {}
+                if not isinstance(corrected_data, dict):
+                    corrected_data = {}
+                incoming = payload.get("correctedData")
+                if isinstance(incoming, dict):
+                    corrected_data.update(incoming)
+                existing_id = int(row["id"])
+                self._update_with_connection(
+                    connection,
+                    "review_items",
+                    existing_id,
+                    {
+                        "details": payload.get("details"),
+                        "corrected_data_json": self._json(corrected_data) if corrected_data else None,
+                        "updated_at": now,
+                    },
+                )
+                return existing_id
+
+            if document_id is not None and status in {"pending", "in_review"}:
+                existing = connection.execute(
+                    """
+                    SELECT id, corrected_data_json FROM review_items
+                    WHERE document_id = ? AND reason = ?
+                      AND status IN ('pending', 'in_review')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (document_id, reason),
+                ).fetchone()
+                if existing:
+                    return refresh_existing(existing)
+            try:
+                return self._insert_with_connection(
+                    connection,
+                    "review_items",
+                    {
+                        "id": preferred_id,
+                        "document_id": document_id,
+                        "reason": reason,
+                        "details": payload.get("details"),
+                        "status": status,
+                        "corrected_data_json": self._json(payload.get("correctedData")),
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+            except sqlite3.IntegrityError:
+                if document_id is None or status not in {"pending", "in_review"}:
+                    raise
+                existing = connection.execute(
+                    """
+                    SELECT id, corrected_data_json FROM review_items
+                    WHERE document_id = ? AND reason = ?
+                      AND status IN ('pending', 'in_review')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (document_id, reason),
+                ).fetchone()
+                if not existing:
+                    raise
+                return refresh_existing(existing)
 
     def record_duplicate_candidate(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         document_id = self._optional_int(payload.get("documentId") or payload.get("document_id"))
@@ -1324,6 +1446,14 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_duplicate_candidate(self, candidate_id: int) -> Optional[Dict[str, Any]]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM duplicate_candidates WHERE id = ? LIMIT 1",
+                (int(candidate_id),),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
     def resolve_duplicate_candidates_for_document(
         self,
         document_id: int,
@@ -1356,6 +1486,39 @@ class LocalOperationsLedger:
                 )
                 updated += 1
             return updated
+
+    def resolve_duplicate_candidate(
+        self,
+        candidate_id: int,
+        status: str,
+        resolution: Optional[str] = None,
+        evidence: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM duplicate_candidates WHERE id = ? LIMIT 1",
+                (int(candidate_id),),
+            ).fetchone()
+            if not row:
+                return False
+            current_evidence = self._row_to_dict(row).get("evidence") or {}
+            updated_evidence = {
+                **current_evidence,
+                **(evidence or {}),
+            }
+            if resolution:
+                updated_evidence["resolution"] = resolution
+            self._update_with_connection(
+                connection,
+                "duplicate_candidates",
+                int(candidate_id),
+                {
+                    "status": status,
+                    "evidence_json": self._json(updated_evidence),
+                    "updated_at": self._now(),
+                },
+            )
+        return True
 
     def upsert_document_group(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         group_key = str(payload.get("groupKey") or payload.get("group_key") or "").strip()
@@ -1769,6 +1932,42 @@ class LocalOperationsLedger:
         values = self._bookkeeping_record_values(payload, now=self._now(), include_defaults=False)
         values["updated_at"] = self._now()
         self._update("bookkeeping_records", record_id, values)
+
+    def clear_bookkeeping_record_financial_values(self, record_id: int) -> None:
+        """Remove transaction-only values when a record becomes supporting evidence."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET amount = NULL, vat_amount = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
+
+    def clear_bookkeeping_record_vat_amount(self, record_id: int) -> None:
+        """Remove invalid normalized VAT while retaining the transaction amount."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET vat_amount = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
+
+    def clear_bookkeeping_record_date(self, record_id: int) -> None:
+        """Remove an invalid normalized date while retaining source evidence."""
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE bookkeeping_records
+                SET record_date = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (self._now(), record_id),
+            )
 
     def get_bookkeeping_record(self, record_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
@@ -3648,6 +3847,220 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_document_delivery_context(
+        self,
+        document_ids: Sequence[int],
+        evidence_action: str,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Load the fields needed to build source delivery work orders in one snapshot."""
+        bounded_ids = []
+        seen_ids = set()
+        for value in document_ids:
+            document_id = self._optional_int(value)
+            if document_id is None or document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            bounded_ids.append(document_id)
+            if len(bounded_ids) >= 500:
+                break
+        if not bounded_ids:
+            return {}
+
+        placeholders = ", ".join("?" for _ in bounded_ids)
+        context = {
+            document_id: {
+                "review_items": [],
+                "bookkeeping_record": None,
+                "export_attempts": [],
+                "evidence_event": None,
+            }
+            for document_id in bounded_ids
+        }
+        with self._connection() as connection:
+            review_rows = connection.execute(
+                f"""
+                SELECT * FROM review_items
+                WHERE document_id IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                bounded_ids,
+            ).fetchall()
+            record_rows = connection.execute(
+                f"""
+                SELECT * FROM bookkeeping_records
+                WHERE document_id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                bounded_ids,
+            ).fetchall()
+            export_rows = connection.execute(
+                f"""
+                SELECT * FROM export_attempts
+                WHERE document_id IN ({placeholders})
+                ORDER BY updated_at DESC, id DESC
+                """,
+                bounded_ids,
+            ).fetchall()
+            evidence_rows = connection.execute(
+                f"""
+                SELECT * FROM audit_events
+                WHERE action = ?
+                  AND entity_type = 'bookkeeping_document'
+                  AND entity_id IN ({placeholders})
+                ORDER BY created_at DESC, id DESC
+                """,
+                [str(evidence_action), *[str(document_id) for document_id in bounded_ids]],
+            ).fetchall()
+
+            records_by_id = {}
+            for row in record_rows:
+                record = self._row_to_dict(row)
+                record["line_items"] = []
+                record["line_item_count"] = 0
+                records_by_id[int(record["id"])] = record
+                document_id = int(record["document_id"])
+                if context[document_id]["bookkeeping_record"] is None:
+                    context[document_id]["bookkeeping_record"] = record
+
+            if records_by_id:
+                record_ids = list(records_by_id)
+                record_placeholders = ", ".join("?" for _ in record_ids)
+                line_rows = connection.execute(
+                    f"""
+                    SELECT * FROM bookkeeping_record_line_items
+                    WHERE bookkeeping_record_id IN ({record_placeholders})
+                    ORDER BY bookkeeping_record_id ASC, line_index ASC, id ASC
+                    """,
+                    record_ids,
+                ).fetchall()
+                for row in line_rows:
+                    line_item = self._row_to_dict(row)
+                    record = records_by_id.get(int(line_item["bookkeeping_record_id"]))
+                    if record is not None:
+                        record["line_items"].append(line_item)
+                        record["line_item_count"] += 1
+
+        for row in review_rows:
+            review = self._row_to_dict(row)
+            document_id = int(review["document_id"])
+            context[document_id]["review_items"].append(review)
+        for row in export_rows:
+            export = self._row_to_dict(row)
+            document_id = int(export["document_id"])
+            if len(context[document_id]["export_attempts"]) < 10:
+                context[document_id]["export_attempts"].append(export)
+        for row in evidence_rows:
+            evidence = self._row_to_dict(row)
+            document_id = int(evidence["entity_id"])
+            if context[document_id]["evidence_event"] is None:
+                context[document_id]["evidence_event"] = evidence
+        return context
+
+    def get_review_work_item_context(
+        self,
+        document_ids: Sequence[int],
+    ) -> Dict[str, Any]:
+        """Load compact review documents, records, and duplicate links in bounded batches."""
+        source_ids = []
+        seen_ids = set()
+        for value in document_ids:
+            document_id = self._optional_int(value)
+            if document_id is None or document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            source_ids.append(document_id)
+            if len(source_ids) >= 500:
+                break
+        if not source_ids:
+            return {
+                "documents": {},
+                "bookkeeping_records": {},
+                "duplicate_candidates": {},
+            }
+
+        duplicate_rows_by_id = {}
+        with self._connection() as connection:
+            for chunk_start in range(0, len(source_ids), 250):
+                chunk = source_ids[chunk_start:chunk_start + 250]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM duplicate_candidates
+                    WHERE document_id IN ({placeholders})
+                       OR candidate_document_id IN ({placeholders})
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                    [*chunk, *chunk],
+                ).fetchall()
+                for row in rows:
+                    duplicate_rows_by_id[int(row["id"])] = row
+
+            related_ids = set(source_ids)
+            for row in duplicate_rows_by_id.values():
+                related_ids.add(int(row["document_id"]))
+                related_ids.add(int(row["candidate_document_id"]))
+
+            document_rows = []
+            ordered_related_ids = sorted(related_ids)
+            for chunk_start in range(0, len(ordered_related_ids), 500):
+                chunk = ordered_related_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                document_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT * FROM bookkeeping_documents
+                        WHERE id IN ({placeholders})
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+
+            record_rows = []
+            for chunk_start in range(0, len(source_ids), 500):
+                chunk = source_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                record_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT * FROM bookkeeping_records
+                        WHERE document_id IN ({placeholders})
+                        ORDER BY id ASC
+                        """,
+                        chunk,
+                    ).fetchall()
+                )
+
+        documents = {
+            int(row["id"]): self._row_to_dict(row)
+            for row in document_rows
+        }
+        bookkeeping_records = {}
+        for row in record_rows:
+            record = self._row_to_dict(row)
+            bookkeeping_records.setdefault(int(record["document_id"]), record)
+        duplicate_candidates = {document_id: [] for document_id in source_ids}
+        for row in duplicate_rows_by_id.values():
+            candidate = self._row_to_dict(row)
+            for document_id in (
+                int(candidate["document_id"]),
+                int(candidate["candidate_document_id"]),
+            ):
+                if document_id in duplicate_candidates:
+                    duplicate_candidates[document_id].append(candidate)
+        for candidates in duplicate_candidates.values():
+            candidates.sort(
+                key=lambda item: (
+                    str(item.get("updated_at") or ""),
+                    int(item.get("id") or 0),
+                ),
+                reverse=True,
+            )
+        return {
+            "documents": documents,
+            "bookkeeping_records": bookkeeping_records,
+            "duplicate_candidates": duplicate_candidates,
+        }
+
     def get_document_by_source(self, source: str, source_document_id: str) -> Optional[Dict[str, Any]]:
         if not source_document_id:
             return None
@@ -3782,8 +4195,10 @@ class LocalOperationsLedger:
         status: Optional[Any] = None,
         limit: int = 100,
         document_id: Optional[int] = None,
+        offset: int = 0,
     ) -> list:
         limit = self._bounded_limit(limit)
+        offset = max(0, self._int(offset, 0))
         query = "SELECT * FROM review_items"
         params = []
         where = []
@@ -3802,8 +4217,8 @@ class LocalOperationsLedger:
             params.append(document_id)
         if where:
             query = f"{query} WHERE {' AND '.join(where)}"
-        query = f"{query} ORDER BY created_at DESC, id DESC LIMIT ?"
-        params.append(limit)
+        query = f"{query} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
@@ -4321,6 +4736,26 @@ class LocalOperationsLedger:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_documents_for_source_account(
+        self,
+        source_account_id: int,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list:
+        bounded_limit = self._bounded_limit(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM bookkeeping_documents
+                WHERE source_account_id = ? AND id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (int(source_account_id), max(0, int(after_id)), bounded_limit),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def find_audit_event(
         self,
         action: str,
@@ -4338,6 +4773,98 @@ class LocalOperationsLedger:
                 (str(action), str(entity_type), str(entity_id)),
             ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def find_document_by_content_hash(
+        self,
+        content_sha256: str,
+        exclude_source_document_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not content_sha256:
+            return None
+        query = """
+            SELECT * FROM bookkeeping_documents
+            WHERE content_sha256 = ?
+        """
+        params = [content_sha256]
+        if exclude_source_document_id:
+            query = f"{query} AND COALESCE(source_document_id, '') != ?"
+            params.append(exclude_source_document_id)
+        query = f"{query} ORDER BY id ASC LIMIT 1"
+        with self._connection() as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def repair_false_source_revisions(self, actor: str = "local_operator") -> Dict[str, Any]:
+        """Remove unprocessed revision rows whose bytes equal their source parent."""
+
+        repaired = []
+        skipped = []
+        with self._connection() as connection:
+            revisions = connection.execute(
+                """
+                SELECT * FROM bookkeeping_documents
+                WHERE source_document_id LIKE '%:revision:%'
+                ORDER BY id ASC
+                """
+            ).fetchall()
+            for row in revisions:
+                child = self._row_to_dict(row)
+                metadata = child.get("metadata") if isinstance(child.get("metadata"), dict) else {}
+                source_revision = (
+                    metadata.get("sourceRevision")
+                    if isinstance(metadata.get("sourceRevision"), dict)
+                    else {}
+                )
+                parent_id = source_revision.get("revisionOfDocumentId")
+                parent = connection.execute(
+                    "SELECT * FROM bookkeeping_documents WHERE id = ? LIMIT 1",
+                    (parent_id,),
+                ).fetchone() if parent_id else None
+                reason = self._false_revision_repair_reason(connection, child, parent)
+                if reason:
+                    skipped.append({"documentId": child["id"], "reason": reason})
+                    continue
+
+                review_rows = connection.execute(
+                    "SELECT id FROM review_items WHERE document_id = ?",
+                    (child["id"],),
+                ).fetchall()
+                connection.execute("DELETE FROM review_items WHERE document_id = ?", (child["id"],))
+                connection.execute("DELETE FROM bookkeeping_documents WHERE id = ?", (child["id"],))
+                details = {
+                    "actor": str(actor or "local_operator")[:200],
+                    "removedDocumentId": child["id"],
+                    "retainedDocumentId": int(parent["id"]),
+                    "source": child.get("source"),
+                    "sourceDocumentId": child.get("source_document_id"),
+                    "contentSha256": child.get("content_sha256"),
+                    "removedReviewItemIds": [int(item["id"]) for item in review_rows],
+                    "localEvidenceDeleted": False,
+                    "externalSubmission": "not_executed",
+                }
+                connection.execute(
+                    """
+                    INSERT INTO audit_events
+                      (action, entity_type, entity_id, details_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "local_ledger.false_source_revision_repaired",
+                        "bookkeeping_document",
+                        str(child["id"]),
+                        self._json(self._redact_sensitive(details)),
+                        self._now(),
+                    ),
+                )
+                repaired.append(details)
+        return {
+            "success": True,
+            "candidates": len(repaired) + len(skipped),
+            "repaired": len(repaired),
+            "skipped": skipped,
+            "repairs": repaired,
+            "externalSubmission": "not_executed",
+        }
 
     def _insert(self, table: str, values: Dict[str, Any]) -> int:
         with self._connection() as connection:
@@ -4457,6 +4984,148 @@ class LocalOperationsLedger:
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @classmethod
+    def _backfill_document_content_hashes(cls, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT id, metadata_json
+            FROM bookkeeping_documents
+            WHERE content_sha256 IS NULL OR content_sha256 = ''
+            """
+        ).fetchall()
+        for row in rows:
+            metadata = cls._json_load(row["metadata_json"])
+            content_hash = metadata.get("contentSha256") if isinstance(metadata, dict) else None
+            if isinstance(content_hash, str) and re.fullmatch(r"[0-9a-fA-F]{64}", content_hash):
+                connection.execute(
+                    "UPDATE bookkeeping_documents SET content_sha256 = ? WHERE id = ?",
+                    (content_hash.lower(), int(row["id"])),
+                )
+
+    @classmethod
+    def _false_revision_repair_reason(
+        cls,
+        connection: sqlite3.Connection,
+        child: Dict[str, Any],
+        parent_row: Optional[sqlite3.Row],
+    ) -> Optional[str]:
+        if parent_row is None:
+            return "parent_missing"
+        parent = cls._row_to_dict(parent_row)
+        child_hash = str(child.get("content_sha256") or "").lower()
+        parent_hash = str(parent.get("content_sha256") or "").lower()
+        expected_id = f"{parent.get('source_document_id')}:revision:{child_hash[:16]}"
+        if not child_hash or child_hash != parent_hash:
+            return "content_differs"
+        if child.get("source") != parent.get("source") or child.get("source_document_id") != expected_id:
+            return "source_identity_mismatch"
+        if child.get("processing_status") != "needs_review" or child.get("ocr_text"):
+            return "document_already_processed"
+        if child.get("extracted_data"):
+            return "document_already_processed"
+        if child.get("duplicate_of_document_id") is not None:
+            return "duplicate_relationship_present"
+
+        reviews = connection.execute(
+            "SELECT reason, status FROM review_items WHERE document_id = ?",
+            (child["id"],),
+        ).fetchall()
+        if not reviews or any(
+            review["reason"] != "source_revision_detected"
+            or review["status"] not in {"pending", "in_review"}
+            for review in reviews
+        ):
+            return "review_state_not_repairable"
+
+        reference_checks = (
+            ("bookkeeping_records", "document_id"),
+            ("compliance_findings", "document_id"),
+            ("document_group_members", "document_id"),
+            ("duplicate_candidates", "document_id"),
+            ("duplicate_candidates", "candidate_document_id"),
+            ("export_attempts", "document_id"),
+            ("extracted_fields", "document_id"),
+            ("reconciliation_matches", "document_id"),
+            ("retention_records", "document_id"),
+            ("review_corrections", "document_id"),
+            ("routing_attempts", "document_id"),
+            ("bookkeeping_documents", "duplicate_of_document_id"),
+        )
+        for table, column in reference_checks:
+            if connection.execute(
+                f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+                (child["id"],),
+            ).fetchone():
+                return f"referenced_by_{table}"
+        return None
+
+    def _ensure_review_item_schema(self, connection: sqlite3.Connection) -> None:
+        duplicate_groups = connection.execute(
+            """
+            SELECT document_id, reason, MAX(id) AS keep_id, COUNT(*) AS item_count
+            FROM review_items
+            WHERE document_id IS NOT NULL
+              AND status IN ('pending', 'in_review')
+            GROUP BY document_id, reason
+            HAVING COUNT(*) > 1
+            """
+        ).fetchall()
+        for group in duplicate_groups:
+            superseded_rows = connection.execute(
+                """
+                SELECT id, corrected_data_json
+                FROM review_items
+                WHERE document_id = ? AND reason = ?
+                  AND status IN ('pending', 'in_review') AND id != ?
+                ORDER BY id ASC
+                """,
+                (group["document_id"], group["reason"], group["keep_id"]),
+            ).fetchall()
+            superseded_ids = []
+            for row in superseded_rows:
+                corrected_data = self._json_load(row["corrected_data_json"]) or {}
+                if not isinstance(corrected_data, dict):
+                    corrected_data = {"previousCorrectedData": corrected_data}
+                corrected_data.update({
+                    "resolution": "Superseded by the newest equivalent open review item.",
+                    "supersededByReviewItemId": int(group["keep_id"]),
+                })
+                connection.execute(
+                    """
+                    UPDATE review_items
+                    SET status = 'resolved', corrected_data_json = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (self._json(corrected_data), self._now(), row["id"]),
+                )
+                superseded_ids.append(int(row["id"]))
+            if superseded_ids:
+                connection.execute(
+                    """
+                    INSERT INTO audit_events
+                      (action, entity_type, entity_id, details_json, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "local_ledger.open_reviews_deduplicated",
+                        "bookkeeping_document",
+                        str(group["document_id"]),
+                        self._json({
+                            "reason": group["reason"],
+                            "keptReviewItemId": int(group["keep_id"]),
+                            "supersededReviewItemIds": superseded_ids,
+                        }),
+                        self._now(),
+                    ),
+                )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_local_review_open_document_reason
+            ON review_items(document_id, reason)
+            WHERE document_id IS NOT NULL AND status IN ('pending', 'in_review')
+            """
+        )
 
     def _ensure_export_attempt_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute(

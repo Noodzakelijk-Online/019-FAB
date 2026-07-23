@@ -42,11 +42,11 @@ export default function TermsOfService() {
         </p>
         <h3>4.2 Betaal per Gebruik</h3>
         <p>
-          Het betaalde abonnement biedt uitgebreide functionaliteit. Betalingen worden verwerkt via Stripe. Abonnementen worden maandelijks gefactureerd en automatisch verlengd tenzij u annuleert.
+          De betaalde dienst biedt uitgebreide functionaliteit op basis van gebruik. FAB factureert geverifieerde resourcekosten maal 2,5 via Stripe en rekent geen vast maandbedrag.
         </p>
         <h3>4.3 Annulering en Restitutie</h3>
         <p>
-          U kunt uw abonnement op elk moment annuleren via uw accountinstellingen. Na annulering blijft uw abonnement actief tot het einde van de huidige factureringsperiode. Restituties worden per geval beoordeeld.
+          U kunt uw betaalmethode op elk moment beheren via uw accountinstellingen. Alleen daadwerkelijk geregistreerd gebruik wordt gefactureerd. Betwiste gebruikskosten en restituties worden per geval beoordeeld.
         </p>
 
         <h2>5. Aanvaardbaar Gebruik</h2>
@@ -146,11 +146,11 @@ export default function TermsOfService() {
       </p>
       <h3>4.2 Pay-As-You-Go</h3>
       <p>
-        The paid plan offers extended functionality. Payments are processed through Stripe. Subscriptions are billed monthly and automatically renewed unless you cancel.
+        The paid service offers extended functionality based on usage. FAB invoices verified resource cost multiplied by 2.5 through Stripe and charges no fixed monthly fee.
       </p>
       <h3>4.3 Cancellation and Refunds</h3>
       <p>
-        You can cancel your subscription at any time through your account settings. After cancellation, your subscription remains active until the end of the current billing period. Refunds are assessed on a case-by-case basis.
+        You can manage your payment method at any time through account settings. Only recorded usage is invoiced. Disputed usage charges and refunds are assessed case by case.
       </p>
 
       <h2>5. Acceptable Use</h2>

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Set
 
 from src.document_handling.source_identity import source_document_id
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 DEFAULT_ALLOWED_EXTENSIONS = {
@@ -185,6 +186,7 @@ class LocalFolderIntake:
 
         source_document = dict(source_document or {})
         source_metadata = source_document.get("metadata") if isinstance(source_document.get("metadata"), dict) else {}
+        target_system = _source_document_target_system(source_document)
         mime_type = (
             source_document.get("mime_type")
             or source_metadata.get("mime_type")
@@ -206,7 +208,7 @@ class LocalFolderIntake:
         source_id = source_document_id(identity_document)
         existing = self.ledger.get_document_by_source(self.source, source_id) if source_id else None
         if existing:
-            existing_hash = str(existing.get("duplicate_fingerprint") or "")
+            existing_hash = _document_content_hash(existing)
             if existing_hash and existing_hash != content_hash:
                 revision_source_id = source_document_id({
                     "id": f"{source_id}:revision:{content_hash[:16]}",
@@ -231,8 +233,29 @@ class LocalFolderIntake:
             revision_of_document_id = None
 
         if existing and revision_of_document_id is None:
+            update_payload: Dict[str, Any] = {}
+            target_backfilled = False
             if source_account_id and not existing.get("source_account_id"):
-                self.ledger.update_document(int(existing["id"]), {"sourceAccountId": source_account_id})
+                update_payload["sourceAccountId"] = source_account_id
+            if target_system and not _stored_document_target_system(existing):
+                existing_metadata = dict(existing.get("metadata") or {})
+                existing_metadata["targetSystem"] = target_system
+                update_payload["metadata"] = existing_metadata
+                target_backfilled = True
+            if update_payload:
+                self.ledger.update_document(int(existing["id"]), update_payload)
+            if target_backfilled:
+                self.ledger.record_audit_event({
+                    "action": "local_intake.target_system_backfilled",
+                    "entityType": "bookkeeping_document",
+                    "entityId": str(existing["id"]),
+                    "details": {
+                        "source": self.source,
+                        "sourceAccountId": source_account_id or existing.get("source_account_id"),
+                        "targetSystem": target_system,
+                        "externalSubmission": "not_executed",
+                    },
+                })
             return {
                 "status": "already_registered",
                 "document": {
@@ -241,10 +264,12 @@ class LocalFolderIntake:
                     "sourceAccountId": source_account_id or existing.get("source_account_id"),
                     "sourceDocumentId": source_id,
                     "status": existing["processing_status"],
+                    "targetSystem": target_system or _stored_document_target_system(existing),
+                    "targetBackfilled": target_backfilled,
                 },
             }
 
-        duplicate = self.ledger.find_document_by_fingerprint(
+        duplicate = self.ledger.find_document_by_content_hash(
             content_hash,
             exclude_source_document_id=source_id,
         )
@@ -254,6 +279,28 @@ class LocalFolderIntake:
             relative_path = os.path.relpath(path, root)
         except ValueError:
             relative_path = original_filename
+        document_metadata = {
+            "contentSha256": content_hash,
+            "folder": root,
+            "relativePath": relative_path,
+            "sizeBytes": stat.st_size,
+            "modifiedAt": modified_at,
+            "intakeSource": self.source,
+            "sourceAccountId": source_account_id,
+            "sourceIdentifier": root,
+            "providerMetadata": source_metadata,
+            "providerTimestamp": source_document.get("timestamp"),
+            "sourceRevision": (
+                {
+                    "revisionOfDocumentId": revision_of_document_id,
+                    "baseSourceDocumentId": source_document_id(identity_document),
+                }
+                if revision_of_document_id
+                else None
+            ),
+        }
+        if target_system:
+            document_metadata["targetSystem"] = target_system
         payload = {
             "sourceAccountId": source_account_id,
             "source": self.source,
@@ -264,27 +311,9 @@ class LocalFolderIntake:
             "documentType": _document_type(path, mime_type),
             "processingStatus": processing_status,
             "duplicateFingerprint": content_hash,
+            "contentSha256": content_hash,
             "duplicateOfDocumentId": duplicate_of_document_id,
-            "metadata": {
-                "contentSha256": content_hash,
-                "folder": root,
-                "relativePath": relative_path,
-                "sizeBytes": stat.st_size,
-                "modifiedAt": modified_at,
-                "intakeSource": self.source,
-                "sourceAccountId": source_account_id,
-                "sourceIdentifier": root,
-                "providerMetadata": source_metadata,
-                "providerTimestamp": source_document.get("timestamp"),
-                "sourceRevision": (
-                    {
-                        "revisionOfDocumentId": revision_of_document_id,
-                        "baseSourceDocumentId": source_document_id(identity_document),
-                    }
-                    if revision_of_document_id
-                    else None
-                ),
-            },
+            "metadata": document_metadata,
         }
         document_id = self.ledger.register_document(payload)
 
@@ -372,6 +401,8 @@ class LocalFolderIntake:
                 "sourceDocumentId": source_id,
                 "status": processing_status,
                 "duplicateOfDocumentId": duplicate_of_document_id,
+                "targetSystem": target_system,
+                "targetBackfilled": False,
             },
         }
 
@@ -401,6 +432,31 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _document_content_hash(document: Dict[str, Any]) -> str:
+    direct = str(document.get("content_sha256") or "").strip().lower()
+    if direct:
+        return direct
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    recorded = str(metadata.get("contentSha256") or "").strip().lower()
+    if recorded:
+        return recorded
+    storage_path = str(document.get("storage_path") or "").strip()
+    if storage_path and os.path.isfile(storage_path):
+        try:
+            return _sha256_file(storage_path)
+        except OSError:
+            return ""
+    return ""
+
+
+def _source_document_target_system(source_document: Dict[str, Any]) -> str:
+    return resolve_document_target_system(source_document)
+
+
+def _stored_document_target_system(document: Dict[str, Any]) -> str:
+    return resolve_document_target_system(document)
 
 
 def _document_type(path: str, mime_type: str) -> str:

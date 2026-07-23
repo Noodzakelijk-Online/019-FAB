@@ -1,14 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, LockKeyhole } from "lucide-react";
+import { AlertCircle, ChevronDown, LockKeyhole } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { FabCommandDrawer } from "@/components/fab/FabCommandDrawer";
+import { FabActivationChecklist } from "@/components/fab/FabActivationChecklist";
 import { FabConnections } from "@/components/fab/FabConnections";
 import { FabControlOverview } from "@/components/fab/FabControlOverview";
+import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
+import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
+import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
+import { FabGmailSetupDrawer } from "@/components/fab/FabGmailSetupDrawer";
+import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupDrawer";
+import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
+import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
+import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
-import { humanize, text } from "@/components/fab/fabView";
+import { asRecord, count, humanize, text } from "@/components/fab/fabView";
+import { useFabLocale } from "@/components/fab/fabLocale";
 import { trpc } from "@/lib/trpc";
 import "@/components/fab/fab-operator.css";
 
@@ -21,13 +31,18 @@ type CommandPayload = {
   targetSystem?: string;
 };
 
-const MAX_LOCAL_UPLOAD_BYTES = 6 * 1024 * 1024;
-
 export default function AdminOperations() {
+  const { copy } = useFabLocale();
   const { user, loading: authLoading } = useAuth();
   const [search, setSearch] = useState("");
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
+  const [intakeDrawerOpen, setIntakeDrawerOpen] = useState(false);
+  const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
+  const [driveSetupOpen, setDriveSetupOpen] = useState(false);
+  const [waveSetupOpen, setWaveSetupOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
+  const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
+  const [lastCommand, setLastCommand] = useState<{ id: FabCommandId; status: string; startedAt: string | null; finishedAt: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const isAdmin = user?.role === "admin";
   const operatorAccess = trpc.fab.access.useQuery(undefined, {
@@ -44,48 +59,124 @@ export default function AdminOperations() {
   const runCommand = trpc.fab.runCommand.useMutation({
     onSuccess: async (result) => {
       const status = text(result.status, text(result.result && typeof result.result === "object" ? (result.result as FabRecord).status : "", "completed"));
+      if (pendingCommand) setLastCommand({ id: pendingCommand, status, startedAt: commandStartedAt, finishedAt: new Date().toISOString() });
       toast.success(`${pendingCommand ? humanize(pendingCommand) : "Command"}: ${humanize(status)}`);
       setPendingCommand(null);
+      setCommandStartedAt(null);
       await controlCenter.refetch();
     },
     onError: (error) => {
-      toast.error(error.message || "FAB command failed");
+      toast.error(error.message || copy("FAB command failed", "FAB-opdracht mislukt"));
+      if (pendingCommand) setLastCommand({ id: pendingCommand, status: "failed", startedAt: commandStartedAt, finishedAt: new Date().toISOString() });
       setPendingCommand(null);
+      setCommandStartedAt(null);
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
+  const installGmailCredentials = trpc.fab.installGmailCredentials.useMutation();
+  const startGmailAuthorization = trpc.fab.startGmailAuthorization.useMutation();
+  const installGoogleDriveCredentials = trpc.fab.installGoogleDriveCredentials.useMutation();
+  const startGoogleDriveAuthorization = trpc.fab.startGoogleDriveAuthorization.useMutation();
+  const saveWaveSetup = trpc.fab.saveWaveSetup.useMutation();
+  const validateWaveSetup = trpc.fab.validateWaveSetup.useMutation();
+  const resolveReview = trpc.fab.resolveReview.useMutation();
 
   const executeCommand = useCallback((commandId: FabCommandId, payload: FabRecord = {}) => {
     if (!controlCenter.data?.connection.connected || pendingCommand) return;
     setPendingCommand(commandId);
+    setCommandStartedAt(new Date().toISOString());
     runCommand.mutate({ commandId, payload: payload as CommandPayload });
   }, [controlCenter.data?.connection.connected, pendingCommand, runCommand]);
 
-  const uploadDocuments = useCallback(async (files: File[]) => {
-    if (!controlCenter.data?.connection.connected || uploading || pendingCommand) return;
-    const oversized = files.find((file) => file.size > MAX_LOCAL_UPLOAD_BYTES);
-    if (oversized) {
-      toast.error(`${oversized.name} exceeds the 6 MB local upload limit.`);
-      return;
-    }
-    setUploading(true);
+  const uploadDocument = useCallback(async (file: File) => {
+    if (!controlCenter.data?.connection.connected) throw new Error(copy("FAB local API is disconnected.", "De lokale FAB-API is niet verbonden."));
+    await uploadIntake.mutateAsync({
+      filename: file.name,
+      mimeType: file.type || "application/octet-stream",
+      contentBase64: await readFileBase64(file),
+    });
+  }, [controlCenter.data?.connection.connected, uploadIntake]);
+
+  const finishIntake = useCallback(async (uploadedCount: number) => {
+    toast.success(`${uploadedCount} ${copy(uploadedCount === 1 ? "document added to FAB intake." : "documents added to FAB intake.", uploadedCount === 1 ? "document toegevoegd aan FAB-inname." : "documenten toegevoegd aan FAB-inname.")}`);
+    await controlCenter.refetch();
+    executeCommand("process_imported");
+  }, [controlCenter, executeCommand]);
+
+  const installDriveCredentials = useCallback(async (file: File, replace: boolean) => {
+    await installGoogleDriveCredentials.mutateAsync({
+      filename: file.name,
+      contentBase64: await readFileBase64(file),
+      replace,
+    });
+    toast.success(copy("Google OAuth client installed locally.", "Google OAuth-client lokaal geïnstalleerd."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, installGoogleDriveCredentials]);
+
+  const installScannerCredentials = useCallback(async (file: File, replace: boolean) => {
+    await installGmailCredentials.mutateAsync({
+      filename: file.name,
+      contentBase64: await readFileBase64(file),
+      replace,
+    });
+    toast.success(copy("Gmail OAuth client installed locally.", "Gmail OAuth-client lokaal geinstalleerd."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, installGmailCredentials]);
+
+  const authorizeScanner = useCallback(async () => {
+    await startGmailAuthorization.mutateAsync();
+    toast.info(copy("Read-only Gmail authorization opened in your default browser.", "Alleen-lezen Gmail-autorisatie is geopend in je standaardbrowser."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, startGmailAuthorization]);
+
+  const authorizeDrive = useCallback(async () => {
+    await startGoogleDriveAuthorization.mutateAsync();
+    toast.info(copy("Google authorization opened in your default browser.", "Google-autorisatie is geopend in je standaardbrowser."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, startGoogleDriveAuthorization]);
+
+  const saveWaveConnection = useCallback(async (input: FabWaveSetupSaveInput) => {
+    const result = await saveWaveSetup.mutateAsync(input);
+    toast.success(result.ready === true
+      ? copy("Wave is connected and mapped.", "Wave is gekoppeld en toegewezen.")
+      : copy("Wave setup was saved locally.", "Wave-instellingen zijn lokaal opgeslagen."));
+    await controlCenter.refetch();
+  }, [controlCenter, copy, saveWaveSetup]);
+
+  const validateWaveConnection = useCallback(async () => {
+    const result = await validateWaveSetup.mutateAsync({ targetSystem: "waveapps_business" });
+    const discovery = result.discovery && typeof result.discovery === "object" ? result.discovery as FabRecord : {};
+    const accounts = Array.isArray(discovery.accounts) ? discovery.accounts.length : 0;
+    toast.success(`${copy("Wave business validated", "Wave-bedrijf gevalideerd")}: ${accounts} ${copy("accounts", "rekeningen")}`);
+    await controlCenter.refetch();
+  }, [controlCenter, copy, validateWaveSetup]);
+
+  const resolveReviewItem = useCallback(async (input: FabReviewResolution) => {
     try {
-      for (const file of files) {
-        await uploadIntake.mutateAsync({
-          filename: file.name,
-          mimeType: file.type || "application/octet-stream",
-          contentBase64: await readFileBase64(file),
-        });
-      }
-      toast.success(`${files.length} receipt${files.length === 1 ? "" : "s"} added to FAB intake.`);
+      const result = await resolveReview.mutateAsync(input);
+      const batch = asRecord(result.batchPropagation);
+      const propagated = count(batch.appliedDocuments);
+      const remainingDuplicateCandidates = Array.isArray(result.remainingDuplicateCandidateIds)
+        ? result.remainingDuplicateCandidateIds.length
+        : 0;
+      toast.success(text(result.status, "") === "candidate_rejected"
+        ? copy(
+          `Candidate rejected; ${remainingDuplicateCandidates} duplicate match${remainingDuplicateCandidates === 1 ? "" : "es"} still require review.`,
+          `Kandidaat afgewezen; ${remainingDuplicateCandidates} duplicaatmatch${remainingDuplicateCandidates === 1 ? "" : "es"} moet${remainingDuplicateCandidates === 1 ? "" : "en"} nog worden gecontroleerd.`,
+        )
+        : propagated > 0
+        ? copy(
+          `Verified details saved and category applied to ${propagated} other exact vendor match${propagated === 1 ? "" : "es"}.`,
+          `Geverifieerde gegevens opgeslagen en categorie toegepast op ${propagated} andere exacte leveranciersmatch${propagated === 1 ? "" : "es"}.`,
+        )
+        : `${copy("Review updated", "Controle bijgewerkt")}: ${humanize(text(result.processingStatus, text(result.status)))}`);
       await controlCenter.refetch();
-      executeCommand("process_imported");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Receipt upload failed");
-    } finally {
-      setUploading(false);
+      const message = error instanceof Error ? error.message : copy("Review update failed", "Bijwerken van controle mislukt");
+      toast.error(message);
+      throw error;
     }
-  }, [controlCenter, executeCommand, pendingCommand, uploadIntake, uploading]);
+  }, [controlCenter, copy, resolveReview]);
 
   const operatorLabel = user?.name || user?.email || operatorAccess.data?.operatorLabel || "Operator";
   const data = controlCenter.data;
@@ -99,7 +190,7 @@ export default function AdminOperations() {
   return (
     <FabOperatorShell
       connected={connected}
-      connectionStatus={authLoading ? "Checking access" : text(data?.connection.status, "Local API offline")}
+      connectionStatus={authLoading ? copy("Checking access", "Toegang controleren") : text(data?.connection.status, copy("Local API offline", "Lokale API offline"))}
       organization="FAB Local Ledger"
       operatorLabel={operatorLabel}
       search={search}
@@ -111,8 +202,8 @@ export default function AdminOperations() {
       {!authLoading && !operatorAccess.isLoading && !hasOperatorAccess ? (
         <div className="fab-access-state">
           <LockKeyhole aria-hidden="true" />
-          <h1>Operator access required</h1>
-          <p>Sign in with an administrator account to operate the authoritative FAB ledger.</p>
+          <h1>{copy("Operator access required", "Operatortoegang vereist")}</h1>
+          <p>{copy("Sign in with an administrator account to operate the authoritative FAB ledger.", "Log in met een beheerdersaccount om het gezaghebbende FAB-grootboek te bedienen.")}</p>
         </div>
       ) : controlCenter.isLoading || authLoading || operatorAccess.isLoading ? (
         <FabLoadingState />
@@ -121,35 +212,89 @@ export default function AdminOperations() {
           {!connected && (
             <div className="fab-system-banner tone-bad">
               <AlertCircle aria-hidden="true" />
-              <div><strong>FAB local API is disconnected</strong><span>{text(data?.connection.error, "Start the local FAB API and verify the server-side URL and token.")}</span></div>
-              <button className="fab-secondary-button compact" onClick={() => { void controlCenter.refetch(); }}>Retry</button>
+              <div><strong>{copy("FAB local API is disconnected", "De lokale FAB-API is niet verbonden")}</strong><span>{text(data?.connection.error, copy("Start the local FAB API and verify the server-side URL and token.", "Start de lokale FAB-API en controleer de server-URL en het token."))}</span></div>
+              <button className="fab-secondary-button compact" onClick={() => { void controlCenter.refetch(); }}>{copy("Retry", "Opnieuw proberen")}</button>
             </div>
           )}
           {Boolean(data?.partialErrors.length) && connected && (
-            <div className="fab-system-banner tone-warn">
-              <AlertCircle aria-hidden="true" />
-              <div><strong>Some control-center resources are unavailable</strong><span>{data?.partialErrors.map((item) => item.resource).join(", ")}</span></div>
-            </div>
+            <details className="fab-system-details tone-warn">
+              <summary><AlertCircle aria-hidden="true" /><span><strong>{copy("Some control-center resources are retained or unavailable", "Sommige bronnen zijn bewaard of niet beschikbaar")}</strong><small>{copy("Inspect", "Bekijk")} {data?.partialErrors.length} {copy(data?.partialErrors.length === 1 ? "technical detail" : "technical details", data?.partialErrors.length === 1 ? "technisch detail" : "technische details")}</small></span><ChevronDown aria-hidden="true" /></summary>
+              <div>{data?.partialErrors.map((item) => <p key={item.resource}><strong>{humanize(item.resource)} - {humanize(item.state)}</strong><span>{item.error}{item.updatedAt ? ` Last valid response: ${item.updatedAt}.` : ""}</span></p>)}</div>
+            </details>
           )}
+          {connected && <FabActivationChecklist
+            waveSetup={data?.waveSetup || {}}
+            gmailAuthorization={data?.gmailAuthorization || {}}
+            driveAuthorization={data?.driveAuthorization || {}}
+            reviewSummary={data?.reviews.summary || {}}
+            onOpenWave={() => setWaveSetupOpen(true)}
+            onOpenGmail={() => setGmailSetupOpen(true)}
+            onOpenDrive={() => setDriveSetupOpen(true)}
+            onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          />}
           <FabControlOverview
             connected={connected}
-            metrics={data?.metrics || { documents: 0, pendingReview: 0, unreconciled: 0, exceptions: 0, failedDocuments: 0 }}
+            metrics={data?.metrics || { documents: null, pendingReview: null, pendingReviewDocuments: null, unreconciled: null, unreconciledDocuments: null, unreconciledBankTransactions: null, exceptions: null, failedDocuments: null }}
             health={data?.health || {}}
             autonomy={data?.autonomy || {}}
             closeReadiness={data?.closeReadiness || {}}
+            metricResource={data?.resourceStates.metrics}
+            healthResource={data?.resourceStates.health}
+            exceptionResource={data?.resourceStates.exceptions}
+            closeResource={data?.resourceStates.closeReadiness}
+            checkedAt={data?.connection.checkedAt}
+            latencyMs={data?.connection.latencyMs}
             commandPending={Boolean(pendingCommand) || uploading}
+            pendingCommand={pendingCommand}
             uploading={uploading}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
-            onUpload={uploadDocuments}
+            onOpenIntake={() => setIntakeDrawerOpen(true)}
             onOpenCommands={() => setCommandDrawerOpen(true)}
           />
+          <FabReviewWorkspace
+            workItems={data?.reviews.workItems || []}
+            categoryOptions={data?.reviews.categoryOptions || []}
+            summary={data?.reviews.summary || {}}
+            resource={data?.resourceStates.reviewQueue}
+            search={search}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
+            onResolve={resolveReviewItem}
+          />
+          <div className="fab-priority-grid">
+            <FabExceptionsPanel
+              exceptions={data?.exceptions || []}
+              exceptionSummary={data?.exceptionSummary || {}}
+              resource={data?.resourceStates.exceptions}
+              closeReadiness={data?.closeReadiness || {}}
+              closeResource={data?.resourceStates.closeReadiness}
+              search={search}
+              localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            />
+            <FabAutomationPanel
+              autonomy={data?.autonomy || {}}
+              workflows={data?.workflows || []}
+              autonomyResource={data?.resourceStates.autonomy}
+              workflowResource={data?.resourceStates.workflows}
+              pendingCommand={pendingCommand}
+              connected={connected}
+              onCommand={executeCommand}
+            />
+          </div>
           <FabOperationsPanels
-            exceptions={data?.exceptions || []}
-            exceptionSummary={data?.exceptionSummary || {}}
             recovery={data?.recovery || {}}
             activity={data?.activity || []}
             workflows={data?.workflows || []}
+            recoveryResource={data?.resourceStates.recovery}
+            activityResource={data?.resourceStates.activity}
+            workflowResource={data?.resourceStates.workflows}
+            search={search}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+          />
+          <FabDeliveryQueue
+            delivery={data?.delivery || { status: {}, summary: {}, workOrders: [], count: null }}
+            resource={data?.resourceStates.driveWaveWorkOrders}
             search={search}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
           />
@@ -157,16 +302,63 @@ export default function AdminOperations() {
             connections={data?.connections || []}
             search={search}
             commandPending={Boolean(pendingCommand)}
+            resource={data?.resourceStates.settings}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
+            onSetupConnection={(connectionId) => {
+              if (connectionId === "gmail") setGmailSetupOpen(true);
+              if (connectionId === "google_drive") setDriveSetupOpen(true);
+              if (connectionId === "waveapps_business") setWaveSetupOpen(true);
+            }}
           />
         </>
       )}
       <FabCommandDrawer
-        open={commandDrawerOpen && connected}
+        open={commandDrawerOpen}
+        connected={connected}
         pendingCommand={pendingCommand}
+        commandStartedAt={commandStartedAt}
+        lastCommand={lastCommand}
         onClose={() => setCommandDrawerOpen(false)}
         onCommand={executeCommand}
+      />
+      <FabIntakeDrawer
+        open={intakeDrawerOpen}
+        connected={connected}
+        onClose={() => setIntakeDrawerOpen(false)}
+        onUploadFile={uploadDocument}
+        onFinished={finishIntake}
+        onBusyChange={setUploading}
+      />
+      <FabGmailSetupDrawer
+        open={gmailSetupOpen}
+        connected={connected}
+        authorization={data?.gmailAuthorization || {}}
+        busy={installGmailCredentials.isPending || startGmailAuthorization.isPending}
+        onClose={() => setGmailSetupOpen(false)}
+        onInstallCredentials={installScannerCredentials}
+        onStartAuthorization={authorizeScanner}
+        onRefresh={async () => { await controlCenter.refetch(); }}
+      />
+      <FabGoogleDriveSetupDrawer
+        open={driveSetupOpen}
+        connected={connected}
+        authorization={data?.driveAuthorization || {}}
+        busy={installGoogleDriveCredentials.isPending || startGoogleDriveAuthorization.isPending}
+        onClose={() => setDriveSetupOpen(false)}
+        onInstallCredentials={installDriveCredentials}
+        onStartAuthorization={authorizeDrive}
+        onRefresh={async () => { await controlCenter.refetch(); }}
+      />
+      <FabWaveSetupDrawer
+        open={waveSetupOpen}
+        connected={connected}
+        setup={data?.waveSetup || {}}
+        busy={saveWaveSetup.isPending || validateWaveSetup.isPending}
+        onClose={() => setWaveSetupOpen(false)}
+        onSave={saveWaveConnection}
+        onValidate={validateWaveConnection}
+        onRefresh={async () => { await controlCenter.refetch(); }}
       />
     </FabOperatorShell>
   );

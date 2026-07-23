@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from src.config_loader import ConfigLoader
+from src.security.local_secret_store import LocalSecretStore
 
 
 class TestConfigLoader(unittest.TestCase):
@@ -74,6 +75,32 @@ class TestConfigLoader(unittest.TestCase):
         self.assertEqual(config["waveapps_business_id"], "business-123")
         self.assertEqual(config["waveapps_business"]["access_token"], "environment-token")
         self.assertEqual(config["waveapps_default_target"], "waveapps_business")
+
+    def test_wave_settings_can_be_loaded_from_encrypted_local_store(self):
+        os.environ.pop("FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN", None)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = os.path.join(temp_dir, "config")
+            os.makedirs(config_dir)
+            config_path = os.path.join(config_dir, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[waveapps_business]\n")
+            store_config = {
+                "fab_local_secret_store_path": os.path.join(temp_dir, "credentials", "fab-local-secrets.enc"),
+                "fab_local_secret_key_path": os.path.join(temp_dir, "credentials", "fab-local-secrets.key"),
+            }
+            LocalSecretStore(store_config).update_wave_target("waveapps_business", {
+                "access_token": "encrypted-local-token",
+                "business_id": "business-local",
+                "anchor_account_id": "anchor-local",
+                "default_category_account_id": "expense-local",
+            })
+
+            config = ConfigLoader(config_file=config_path).get_all_config()
+
+        self.assertEqual(config["waveapps_business_access_token"], "encrypted-local-token")
+        self.assertEqual(config["waveapps_business_id"], "business-local")
+        self.assertEqual(config["waveapps_business_anchor_account_id"], "anchor-local")
+        self.assertEqual(config["waveapps_business_default_category_account_id"], "expense-local")
 
     def test_template_keeps_web_api_and_connector_settings_in_their_own_sections(self):
         template_path = os.path.abspath(

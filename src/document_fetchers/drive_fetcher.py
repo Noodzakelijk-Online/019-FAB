@@ -140,14 +140,12 @@ class DriveFetcher(BaseFetcher):
                     status, done = downloader.next_chunk()
 
                 file_content = fh.getvalue()
-                local_path = self._content_download_path(
+                local_path = self._store_content(
                     attachments_dir,
                     file_name,
                     file_id,
                     file_content,
                 )
-                with open(local_path, "wb") as f:
-                    f.write(file_content)
 
                 documents.append(
                     {

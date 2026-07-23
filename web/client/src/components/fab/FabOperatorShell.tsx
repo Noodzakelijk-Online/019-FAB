@@ -1,32 +1,31 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
-  BookOpenText,
   Bot,
-  ChartNoAxesCombined,
   ChevronLeft,
+  FileWarning,
   FileCheck2,
-  FileStack,
+  History,
   LayoutDashboard,
   Menu,
   PlugZap,
+  SendToBack,
   RefreshCw,
-  Scale,
+  RotateCcw,
   Search,
   Settings2,
-  ShieldCheck,
   X,
 } from "lucide-react";
+import { useFabLocale } from "./fabLocale";
 
 const navigation = [
-  { id: "control-room", label: "Control room", icon: LayoutDashboard },
-  { id: "documents", label: "Documents", icon: FileStack },
-  { id: "exceptions", label: "Review queue", icon: FileCheck2 },
-  { id: "ledger", label: "Ledger", icon: BookOpenText },
-  { id: "reconciliation", label: "Reconciliation", icon: Scale },
-  { id: "reports", label: "Reports", icon: ChartNoAxesCombined },
-  { id: "connections", label: "Connections", icon: PlugZap },
-  { id: "audit", label: "Audit", icon: ShieldCheck },
+  { id: "control-room", label: "Overview", labelNl: "Overzicht", icon: LayoutDashboard },
+  { id: "review-workspace", label: "Review queue", labelNl: "Controlewachtrij", icon: FileCheck2 },
+  { id: "automation", label: "Automation", labelNl: "Automatisering", icon: FileWarning },
+  { id: "audit", label: "Activity", labelNl: "Activiteit", icon: History },
+  { id: "recovery", label: "Recovery", labelNl: "Herstel", icon: RotateCcw },
+  { id: "delivery", label: "Delivery", labelNl: "Levering", icon: SendToBack },
+  { id: "connections", label: "Connections", labelNl: "Koppelingen", icon: PlugZap },
 ];
 
 type FabOperatorShellProps = {
@@ -54,8 +53,45 @@ export function FabOperatorShell({
   refreshing,
   onOpenCommands,
 }: FabOperatorShellProps) {
+  const { lang, setLang, copy } = useFabLocale();
   const [navOpen, setNavOpen] = useState(false);
   const [activeSection, setActiveSection] = useState("control-room");
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    document.body.classList.add("fab-dialog-open");
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNavOpen(false);
+      if (event.key !== "Tab") return;
+      const sidebar = closeButtonRef.current?.closest<HTMLElement>("#fab-sidebar");
+      const focusable = sidebar ? Array.from(sidebar.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]")) : [];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.classList.remove("fab-dialog-open");
+      menuButtonRef.current?.focus();
+    };
+  }, [navOpen]);
+
+  useEffect(() => {
+    const sections = navigation.map(({ id }) => document.getElementById(id)).filter((element): element is HTMLElement => Boolean(element));
+    if (!sections.length || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible?.target.id) setActiveSection(visible.target.id);
+    }, { rootMargin: "-15% 0px -70%", threshold: [0, 0.2, 0.6] });
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, [children]);
 
   function navigate(sectionId: string) {
     setActiveSection(sectionId);
@@ -65,53 +101,54 @@ export function FabOperatorShell({
 
   return (
     <div className="fab-operator">
-      <aside className={`fab-sidebar ${navOpen ? "is-open" : ""}`} aria-label="FAB navigation">
+      <aside id="fab-sidebar" className={`fab-sidebar ${navOpen ? "is-open" : ""}`} aria-label={copy("FAB navigation", "FAB-navigatie")} role={navOpen ? "dialog" : undefined} aria-modal={navOpen || undefined}>
         <div className="fab-brand">
           <div className="fab-brand-mark"><Bot aria-hidden="true" /></div>
           <div><strong>FAB</strong><span>Bookkeeping OS</span></div>
-          <button className="fab-icon-button fab-nav-close" onClick={() => setNavOpen(false)} aria-label="Close navigation" title="Close navigation">
+          <button ref={closeButtonRef} className="fab-icon-button fab-nav-close" onClick={() => setNavOpen(false)} aria-label={copy("Close navigation", "Navigatie sluiten")} title={copy("Close navigation", "Navigatie sluiten")}>
             <ChevronLeft aria-hidden="true" />
           </button>
         </div>
         <nav className="fab-nav">
-          <span className="fab-nav-label">Workspace</span>
-          {navigation.map(({ id, label, icon: Icon }) => (
-            <button key={id} className={activeSection === id ? "is-active" : ""} onClick={() => navigate(id)} aria-current={activeSection === id ? "page" : undefined}>
-              <Icon aria-hidden="true" /><span>{label}</span>
+          <span className="fab-nav-label">{copy("Workspace", "Werkruimte")}</span>
+          {navigation.map(({ id, label, labelNl, icon: Icon }) => (
+            <button key={id} className={activeSection === id ? "is-active" : ""} onClick={() => navigate(id)} aria-current={activeSection === id ? "location" : undefined}>
+              <Icon aria-hidden="true" /><span>{lang === "nl" ? labelNl : label}</span>
             </button>
           ))}
         </nav>
         <div className="fab-sidebar-footer">
-          <button onClick={() => { setNavOpen(false); onOpenCommands(); }}><Settings2 aria-hidden="true" /><span>Safe commands</span></button>
-          <div className="fab-operator-id"><Activity aria-hidden="true" /><span><strong>{operatorLabel}</strong><small>Authenticated operator</small></span></div>
+          <div className="fab-language-switch" aria-label={copy("Language", "Taal")}><button className={lang === "en" ? "is-active" : ""} onClick={() => setLang("en")} aria-pressed={lang === "en"}>EN</button><button className={lang === "nl" ? "is-active" : ""} onClick={() => setLang("nl")} aria-pressed={lang === "nl"}>NL</button></div>
+          <button onClick={() => { setNavOpen(false); onOpenCommands(); }}><Settings2 aria-hidden="true" /><span>{copy("Safe commands", "Veilige opdrachten")}</span></button>
+          <div className="fab-operator-id"><Activity aria-hidden="true" /><span><strong>{operatorLabel}</strong><small>{copy("Authenticated operator", "Geverifieerde operator")}</small></span></div>
         </div>
       </aside>
 
-      {navOpen && <button className="fab-nav-scrim" onClick={() => setNavOpen(false)} aria-label="Close navigation overlay" />}
+      {navOpen && <button className="fab-nav-scrim" onClick={() => setNavOpen(false)} aria-label={copy("Close navigation overlay", "Navigatie-overlay sluiten")} />}
 
       <div className="fab-workspace">
         <header className="fab-topbar">
-          <button className="fab-icon-button fab-menu-button" onClick={() => setNavOpen(true)} aria-label="Open navigation" title="Open navigation">
+          <button ref={menuButtonRef} className="fab-icon-button fab-menu-button" onClick={() => setNavOpen(true)} aria-label={copy("Open navigation", "Navigatie openen")} title={copy("Open navigation", "Navigatie openen")} aria-expanded={navOpen} aria-controls="fab-sidebar">
             <Menu aria-hidden="true" />
           </button>
           <div className="fab-organization">
-            <span>Organization</span>
+            <span>{(() => { const current = navigation.find((item) => item.id === activeSection); return current ? (lang === "nl" ? current.labelNl : current.label) : copy("Workspace", "Werkruimte"); })()}</span>
             <strong>{organization}</strong>
           </div>
           <div className={`fab-connection-pill tone-${connected ? "good" : "bad"}`}>
             <span className="fab-status-dot" />
-            {connected ? "Local API connected" : connectionStatus}
+            {connected ? copy("Local API connected", "Lokale API verbonden") : connectionStatus}
           </div>
           <label className="fab-search">
             <Search aria-hidden="true" />
-            <span className="sr-only">Search control center</span>
-            <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Search exceptions, sources, activity" />
-            {search && <button type="button" onClick={() => onSearchChange("")} aria-label="Clear search" title="Clear search"><X aria-hidden="true" /></button>}
+            <span className="sr-only">{copy("Search control center", "Zoek in het controlecentrum")}</span>
+            <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder={copy("Search exceptions, sources, activity", "Zoek uitzonderingen, bronnen, activiteit")} />
+            {search && <button type="button" onClick={() => onSearchChange("")} aria-label={copy("Clear search", "Zoekopdracht wissen")} title={copy("Clear search", "Zoekopdracht wissen")}><X aria-hidden="true" /></button>}
           </label>
-          <button className="fab-icon-button" onClick={onRefresh} disabled={refreshing} aria-label="Refresh control center" title="Refresh control center">
+          <button className="fab-icon-button" onClick={onRefresh} disabled={refreshing} aria-label={copy("Refresh control center", "Controlecentrum vernieuwen")} title={copy("Refresh control center", "Controlecentrum vernieuwen")}>
             <RefreshCw className={refreshing ? "is-spinning" : ""} aria-hidden="true" />
           </button>
-          <div className="fab-avatar" aria-label={`Signed in as ${operatorLabel}`}>{operatorLabel.slice(0, 2).toUpperCase()}</div>
+          <div className="fab-avatar" aria-label={`${copy("Signed in as", "Ingelogd als")} ${operatorLabel}`}>{operatorLabel.slice(0, 2).toUpperCase()}</div>
         </header>
         <main>{children}</main>
       </div>

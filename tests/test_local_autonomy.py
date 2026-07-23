@@ -27,6 +27,7 @@ class TestLocalAutonomousService(unittest.TestCase):
 
             response = client.get("/api/autonomy/plan")
             wave_sync_disabled = client.get("/api/autonomy/plan?includeWaveSync=false")
+            connector_sync_disabled = client.get("/api/autonomy/plan?includeConnectorSync=false")
             page = client.get("/")
 
             self.assertEqual(response.status_code, 200)
@@ -36,11 +37,17 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertIn("rescan_intake", payload["runnableActionIds"])
             self.assertIn("plan_wave_daily_reconciliation", payload["runnableActionIds"])
             self.assertIn("refresh_wave_entity_mirror", {action["id"] for action in payload["actions"]})
+            self.assertIn("sync_connector_sources", {action["id"] for action in payload["actions"]})
             disabled_action = next(
                 action for action in wave_sync_disabled.get_json()["actions"]
                 if action["id"] == "refresh_wave_entity_mirror"
             )
             self.assertIn("disabled for this request", disabled_action["blockedReason"])
+            disabled_connector_action = next(
+                action for action in connector_sync_disabled.get_json()["actions"]
+                if action["id"] == "sync_connector_sources"
+            )
+            self.assertIn("disabled for this request", disabled_connector_action["blockedReason"])
             self.assertIn("review_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("exception_queue", {action["id"] for action in payload["actions"]})
             self.assertIn("approve_export_attempts", {action["id"] for action in payload["actions"]})
@@ -173,6 +180,289 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(result["status"], "dry_run")
             self.assertIsNone(ledger.get_runtime_lease("local_autonomous_cycle"))
 
+    def test_autonomy_applies_waiting_trusted_category_without_new_intake(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-waiting",
+                "originalFilename": "praxis.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Category requires review.",
+                })
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["importedDocuments"], 0)
+            self.assertEqual(plan["counts"]["trustedCategorySuggestions"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(
+                processing["summary"]["trustedCategoryAutomation"]["readyDocuments"],
+                1,
+            )
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["category"], "Construction Materials & Tools")
+            self.assertNotEqual(document["processing_status"], "needs_review")
+            self.assertEqual(
+                ledger.list_review_items(
+                    status=("pending", "in_review"),
+                    document_id=document_id,
+                ),
+                [],
+            )
+
+    def test_trusted_category_keeps_duplicate_decision_open(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            original_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-original",
+                "originalFilename": "original.pdf",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+            })
+            candidate_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-duplicate-candidate",
+                "originalFilename": "candidate.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "duplicateOfDocumentId": original_id,
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+                "duplicate_candidate",
+            ):
+                ledger.create_review_item({
+                    "documentId": candidate_id,
+                    "reason": reason,
+                    "details": "Review required.",
+                })
+
+            result = LocalAutonomousService(
+                ledger,
+                {},
+                intake_paths=[],
+            ).run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            trusted = processing["summary"]["trustedCategoryAutomation"]
+            backup = trusted.pop("preMutationBackup")
+            self.assertEqual(
+                trusted,
+                {
+                    "candidates": 1,
+                    "updatedDocuments": 1,
+                    "resolvedReviewItems": 2,
+                    "stillNeedsReview": 1,
+                    "readyDocuments": 0,
+                    "documentIds": [candidate_id],
+                    "externalSubmission": "not_executed",
+                },
+            )
+            self.assertEqual(backup["status"], "valid")
+            self.assertTrue(backup["backupFilename"].endswith(".zip"))
+            self.assertEqual(len(backup["ledgerSha256"]), 64)
+            self.assertGreater(backup["ledgerBytes"], 0)
+            document = ledger.get_document(candidate_id)
+            self.assertEqual(document["category"], "Construction Materials & Tools")
+            self.assertEqual(document["processing_status"], "needs_review")
+            open_reviews = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=candidate_id,
+            )
+            self.assertEqual(
+                [(item["reason"], item["status"]) for item in open_reviews],
+                [("duplicate_candidate", "pending")],
+            )
+
+    def test_autonomy_repairs_legacy_duplicate_cycle_before_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            first_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "legacy-cycle-1",
+                "originalFilename": "scan-1.pdf",
+                "processingStatus": "needs_review",
+            })
+            second_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "legacy-cycle-2",
+                "originalFilename": "scan-2.pdf",
+                "processingStatus": "needs_review",
+            })
+            ledger.update_document(first_id, {"duplicateOfDocumentId": second_id})
+            ledger.update_document(second_id, {"duplicateOfDocumentId": first_id})
+            for document_id in (first_id, second_id):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "duplicate_candidate",
+                    "details": "Legacy duplicate review remains open.",
+                })
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_local_backup_dir": os.path.join(temp_dir, "backups")},
+                intake_paths=[],
+            )
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["duplicateLinkCycles"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(
+                processing["summary"]["duplicateCycleRepair"]["cyclesRepaired"],
+                1,
+            )
+            self.assertIsNone(ledger.get_document(first_id)["duplicate_of_document_id"])
+            self.assertIsNone(ledger.get_document(second_id)["duplicate_of_document_id"])
+            self.assertEqual(
+                len(ledger.list_review_items(status="pending")),
+                2,
+            )
+
+    def test_autonomy_reassesses_stale_duplicate_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            first_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-april",
+                "originalFilename": "monthly-april.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-04-21",
+                "totalAmount": 37.68,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-04-21",
+                    "total_amount": 37.68,
+                    "invoice_number": "staat",
+                },
+            })
+            second_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-may",
+                "originalFilename": "monthly-may.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-05-19",
+                "totalAmount": 37.68,
+                "extractedData": {
+                    "vendor_name": "T-Mobile",
+                    "transaction_date": "2023-05-19",
+                    "total_amount": 37.68,
+                    "invoice_number": "staat",
+                },
+            })
+            ledger.record_duplicate_candidate({
+                "documentId": second_id,
+                "candidateDocumentId": first_id,
+                "matchType": "exact_fingerprint_match",
+                "confidenceScore": 1.0,
+                "status": "pending",
+            })
+            ledger.create_review_item({
+                "documentId": second_id,
+                "reason": "duplicate_candidate",
+                "details": "Stale machine-generated match.",
+            })
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_local_backup_dir": os.path.join(temp_dir, "backups")},
+                intake_paths=[],
+            )
+
+            plan = service.plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            result = service.run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["duplicateCandidateReassessments"], 1)
+            self.assertIn("process_imported", plan["runnableActionIds"])
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            reassessment = processing["summary"]["duplicateCandidateReassessment"]
+            self.assertEqual(reassessment["rejectedPairs"], 1)
+            self.assertEqual(reassessment["resolvedReviewItems"], 1)
+            self.assertEqual(
+                ledger.list_duplicate_candidates(status=("pending", "in_review")),
+                [],
+            )
+            self.assertEqual(
+                ledger.list_review_items(status=("pending", "in_review")),
+                [],
+            )
+            self.assertEqual(ledger.get_document(second_id)["processing_status"], "processed")
+
     def test_autonomy_run_rescans_processes_and_prepares_wave_draft(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")
@@ -225,10 +515,12 @@ class TestLocalAutonomousService(unittest.TestCase):
             audit_actions = [event["action"] for event in client.get("/api/audit").get_json()["auditEvents"]]
             self.assertIn("local_autonomy.cycle_started", audit_actions)
             workflow = client.get(f"/api/workflows/{payload['workflowRunId']}").get_json()
-            self.assertEqual(len(workflow["steps"]), 12)
-            self.assertEqual(workflow["steps"][0]["step_key"], "rescan_intake")
-            self.assertEqual(workflow["steps"][0]["status"], "completed")
-            self.assertGreaterEqual(workflow["steps"][0]["duration_ms"], 0)
+            self.assertEqual(len(workflow["steps"]), 13)
+            self.assertEqual(workflow["steps"][0]["step_key"], "sync_connector_sources")
+            self.assertEqual(workflow["steps"][0]["status"], "skipped")
+            self.assertEqual(workflow["steps"][1]["step_key"], "rescan_intake")
+            self.assertEqual(workflow["steps"][1]["status"], "completed")
+            self.assertGreaterEqual(workflow["steps"][1]["duration_ms"], 0)
             self.assertEqual(workflow["stepSummary"]["completed"], len(payload["executedActions"]))
             self.assertEqual(workflow["stepSummary"]["skipped"], len(payload["skippedActions"]))
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
@@ -268,12 +560,94 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertNotIn("sensitive-value", result["error"])
             self.assertNotIn("unknown-secret", result["error"])
-            self.assertEqual(steps[0]["step_key"], "rescan_intake")
-            self.assertEqual(steps[0]["status"], "failed")
-            self.assertNotIn("sensitive-value", steps[0]["error_message"])
-            self.assertNotIn("unknown-secret", steps[0]["error_message"])
-            self.assertTrue(all(step["status"] == "not_run" for step in steps[1:]))
+            self.assertEqual(steps[0]["step_key"], "sync_connector_sources")
+            self.assertEqual(steps[0]["status"], "skipped")
+            self.assertEqual(steps[1]["step_key"], "rescan_intake")
+            self.assertEqual(steps[1]["status"], "failed")
+            self.assertNotIn("sensitive-value", steps[1]["error_message"])
+            self.assertNotIn("unknown-secret", steps[1]["error_message"])
+            self.assertTrue(all(step["status"] == "not_run" for step in steps[2:]))
             self.assertTrue(all(step["finished_at"] for step in steps))
+
+    def test_one_click_cycle_collects_connector_document_before_processing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_path = os.path.join(temp_dir, "scanner-receipt.txt")
+            with open(scan_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "Vendor: Test Vendor\nDate: 2026-06-28\n"
+                    "Total: EUR 42.50\nOffice supplies\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(
+                ledger,
+                {
+                    "fab_autonomy_ignore_health_blocks": True,
+                    "categorization_rules": {
+                        "Office Supplies": {
+                            "keywords": ["office supplies"],
+                            "vendors": ["test vendor"],
+                        }
+                    },
+                },
+                intake_paths=[],
+            )
+
+            with patch("src.operations.local_autonomy.LocalConnectorIntakeService") as connector_type:
+                connector = connector_type.return_value
+                connector.plan.return_value = {
+                    "enabledSources": ["gmail"],
+                    "syncableSources": ["gmail"],
+                    "sources": [{
+                        "source": "gmail",
+                        "status": "ready",
+                        "enabled": True,
+                        "canSync": True,
+                        "targetSystem": "waveapps_business",
+                    }],
+                }
+
+                def register_scan(**_kwargs):
+                    ledger.register_document({
+                        "source": "gmail",
+                        "sourceDocumentId": "scanner-message-1_attachment-1",
+                        "originalFilename": "scanner-receipt.txt",
+                        "mimeType": "text/plain",
+                        "storagePath": scan_path,
+                        "processingStatus": "imported",
+                        "metadata": {"targetSystem": "waveapps_business"},
+                    })
+                    return {
+                        "success": True,
+                        "status": "completed",
+                        "workflowRunId": 42,
+                        "summary": {"registered": 1},
+                    }
+
+                connector.sync.side_effect = register_scan
+                result = service.run_cycle(
+                    include_wave_plan=False,
+                    include_wave_sync=False,
+                )
+
+            executed_ids = [action["id"] for action in result["executedActions"]]
+            self.assertTrue(result["success"])
+            self.assertLess(
+                executed_ids.index("sync_connector_sources"),
+                executed_ids.index("process_imported"),
+            )
+            connector.sync.assert_called_once_with(
+                sources=["gmail"],
+                actor="local_autonomy",
+                trigger_source="local_autonomous_cycle",
+                workflow_metadata={"parentWorkflow": "local_autonomous_cycle"},
+            )
+            document = ledger.list_documents(limit=1)[0]
+            self.assertNotEqual(document["processing_status"], "imported")
+            processing = next(
+                action for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            self.assertEqual(processing["summary"]["requested"], 1)
 
     def test_autonomy_surfaces_and_prepares_mijngeldzaken_downstream_routes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

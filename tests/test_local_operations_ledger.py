@@ -2,6 +2,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.operations.local_ledger import LocalOperationsLedger
 
@@ -140,6 +141,36 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertTrue(
                 ledger.acquire_runtime_lease("autonomy", "owner-three", ttl_seconds=60)["acquired"]
             )
+
+    def test_runtime_lease_can_be_force_released_after_owned_service_shutdown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.acquire_runtime_lease(
+                "local_connector_intake",
+                "stopped-worker",
+                ttl_seconds=21600,
+                metadata={"actor": "local_worker"},
+            )
+
+            released = ledger.force_release_runtime_lease(
+                "local_connector_intake",
+                actor="Stop-FAB.ps1",
+                reason="owned_services_stopped",
+            )
+
+            self.assertTrue(released)
+            self.assertIsNone(ledger.get_runtime_lease("local_connector_intake"))
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["action"], "runtime_lease.force_released")
+            self.assertEqual(event["entity_id"], "local_connector_intake")
+            self.assertEqual(event["details"]["actor"], "Stop-FAB.ps1")
+            self.assertEqual(event["details"]["reason"], "owned_services_stopped")
+            self.assertEqual(event["details"]["externalSubmission"], "not_executed")
+            self.assertFalse(ledger.force_release_runtime_lease(
+                "local_connector_intake",
+                actor="Stop-FAB.ps1",
+                reason="owned_services_stopped",
+            ))
 
     def test_source_accounts_are_upserted_and_counted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -368,6 +399,7 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             self.assertEqual(candidate_id, same_candidate_id)
+            self.assertEqual(ledger.get_duplicate_candidate(candidate_id)["id"], candidate_id)
             self.assertEqual(ledger.dashboard_metrics()["duplicate_candidates"], 1)
             self.assertEqual(ledger.dashboard_metrics()["open_duplicate_candidates"], 1)
             candidates = ledger.list_duplicate_candidates(status="in_review", document_id=duplicate_id)
@@ -381,6 +413,53 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertEqual(resolved, 1)
             self.assertEqual(ledger.dashboard_metrics()["open_duplicate_candidates"], 0)
             self.assertEqual(ledger.list_duplicate_candidates()[0]["status"], "rejected")
+
+    def test_resolves_one_duplicate_candidate_without_closing_other_pairs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_ids = [
+                ledger.register_document({
+                    "source": "gmail",
+                    "sourceDocumentId": f"candidate-{index}",
+                    "originalFilename": f"candidate-{index}.pdf",
+                })
+                for index in range(3)
+            ]
+            first_id = ledger.record_duplicate_candidate({
+                "documentId": document_ids[2],
+                "candidateDocumentId": document_ids[0],
+                "matchType": "fuzzy_document_match",
+                "status": "pending",
+                "evidence": {"original": True},
+            })
+            second_id = ledger.record_duplicate_candidate({
+                "documentId": document_ids[2],
+                "candidateDocumentId": document_ids[1],
+                "matchType": "fuzzy_document_match",
+                "status": "pending",
+            })
+
+            self.assertTrue(
+                ledger.resolve_duplicate_candidate(
+                    first_id,
+                    "rejected",
+                    "Pair no longer matches.",
+                    evidence={"reassessed": True},
+                )
+            )
+
+            candidates = {
+                item["id"]: item
+                for item in ledger.list_duplicate_candidates(limit=10)
+            }
+            self.assertEqual(candidates[first_id]["status"], "rejected")
+            self.assertTrue(candidates[first_id]["evidence"]["original"])
+            self.assertTrue(candidates[first_id]["evidence"]["reassessed"])
+            self.assertEqual(
+                candidates[first_id]["evidence"]["resolution"],
+                "Pair no longer matches.",
+            )
+            self.assertEqual(candidates[second_id]["status"], "pending")
 
     def test_document_groups_are_persisted_with_members_and_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -794,8 +873,151 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             open_items = ledger.list_review_items(status=("pending", "in_review"))
+            first_page = ledger.list_review_items(status=("pending", "in_review"), limit=1)
+            second_page = ledger.list_review_items(status=("pending", "in_review"), limit=1, offset=1)
 
             self.assertEqual({item["id"] for item in open_items}, {pending_id, in_review_id})
+            self.assertEqual(
+                {first_page[0]["id"], second_page[0]["id"]},
+                {pending_id, in_review_id},
+            )
+
+    def test_create_review_item_reuses_open_document_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "review-idempotent",
+                "originalFilename": "receipt.pdf",
+            })
+            first_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Initial details.",
+            })
+            repeated_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Refreshed details.",
+            })
+
+            self.assertEqual(repeated_id, first_id)
+            open_items = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            self.assertEqual(len(open_items), 1)
+            self.assertEqual(open_items[0]["details"], "Refreshed details.")
+
+    def test_create_review_item_recovers_when_another_worker_wins_insert_race(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "review-insert-race",
+                "originalFilename": "receipt.pdf",
+            })
+            original_insert = ledger._insert_with_connection
+            raced = False
+
+            def simulate_competing_insert(connection, table, values):
+                nonlocal raced
+                if table == "review_items" and not raced:
+                    raced = True
+                    competitor = LocalOperationsLedger(ledger_path)
+                    competitor.create_review_item({
+                        "documentId": document_id,
+                        "reason": "manual_review_category",
+                        "details": "Competing worker details.",
+                    })
+                    raise sqlite3.IntegrityError("simulated unique-index race")
+                return original_insert(connection, table, values)
+
+            with patch.object(ledger, "_insert_with_connection", side_effect=simulate_competing_insert):
+                review_id = ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "manual_review_category",
+                    "details": "Current worker details.",
+                })
+
+            open_items = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            self.assertEqual(len(open_items), 1)
+            self.assertEqual(open_items[0]["id"], review_id)
+            self.assertEqual(open_items[0]["details"], "Current worker details.")
+
+    def test_existing_ledger_deduplicates_open_review_rows_before_unique_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "legacy-review-duplicates",
+                "originalFilename": "receipt.pdf",
+            })
+            first_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Older review gate.",
+            })
+            connection = sqlite3.connect(ledger_path)
+            try:
+                connection.execute("DROP INDEX idx_local_review_open_document_reason")
+                cursor = connection.execute(
+                    """
+                    INSERT INTO review_items
+                      (document_id, reason, details, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'pending', ?, ?)
+                    """,
+                    (
+                        document_id,
+                        "manual_review_category",
+                        "Newest review gate.",
+                        "2026-07-22T12:00:00+00:00",
+                        "2026-07-22T12:00:00+00:00",
+                    ),
+                )
+                newest_id = int(cursor.lastrowid)
+                connection.commit()
+            finally:
+                connection.close()
+
+            migrated = LocalOperationsLedger(ledger_path)
+            open_items = migrated.list_review_items(
+                status=("pending", "in_review"),
+                document_id=document_id,
+            )
+            all_items = migrated.list_review_items(document_id=document_id)
+
+            self.assertEqual([item["id"] for item in open_items], [newest_id])
+            older = next(item for item in all_items if item["id"] == first_id)
+            self.assertEqual(older["status"], "resolved")
+            self.assertEqual(older["corrected_data"]["supersededByReviewItemId"], newest_id)
+            audit = migrated.list_audit_events(limit=1)[0]
+            self.assertEqual(audit["action"], "local_ledger.open_reviews_deduplicated")
+            self.assertEqual(audit["details"]["supersededReviewItemIds"], [first_id])
+            connection = sqlite3.connect(ledger_path)
+            try:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        """
+                        INSERT INTO review_items
+                          (document_id, reason, details, status, created_at, updated_at)
+                        VALUES (?, ?, ?, 'pending', ?, ?)
+                        """,
+                        (
+                            document_id,
+                            "manual_review_category",
+                            "Should be blocked.",
+                            "2026-07-22T13:00:00+00:00",
+                            "2026-07-22T13:00:00+00:00",
+                        ),
+                    )
+            finally:
+                connection.close()
 
     def test_reconciliation_matches_can_be_filtered_and_resolved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -820,7 +1042,7 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertEqual(matches[0]["id"], match_id)
             self.assertEqual(ledger.get_reconciliation_match(match_id)["status"], "approved")
 
-    def test_existing_ledger_gets_reconciliation_status_column(self):
+    def test_existing_ledger_gets_reconciliation_and_content_hash_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
             connection = sqlite3.connect(ledger_path)
@@ -853,6 +1075,24 @@ class TestLocalOperationsLedger(unittest.TestCase):
                     )
                     """
                 )
+                connection.execute(
+                    """
+                    INSERT INTO bookkeeping_documents
+                      (source, source_document_id, original_filename, processing_status,
+                       duplicate_fingerprint, metadata_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "scanner",
+                        "legacy-content-hash",
+                        "legacy-content.pdf",
+                        "processed",
+                        "semantic-fingerprint",
+                        '{"contentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+                        "2026-07-22T00:00:00Z",
+                        "2026-07-22T00:00:00Z",
+                    ),
+                )
                 connection.commit()
             finally:
                 connection.close()
@@ -866,6 +1106,55 @@ class TestLocalOperationsLedger(unittest.TestCase):
             })
 
             self.assertEqual(ledger.get_document(document_id)["reconciliation_status"], "not_started")
+            migrated = ledger.get_document_by_source("scanner", "legacy-content-hash")
+            self.assertEqual(
+                migrated["content_sha256"],
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+
+    def test_false_source_revision_repair_requires_identical_unprocessed_bytes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            content_hash = "b" * 64
+            parent_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "drive-file-1",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "processed",
+                "duplicateFingerprint": "semantic-fingerprint",
+                "contentSha256": content_hash,
+                "metadata": {"contentSha256": content_hash},
+            })
+            child_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": f"drive-file-1:revision:{content_hash[:16]}",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "needs_review",
+                "duplicateFingerprint": content_hash,
+                "contentSha256": content_hash,
+                "metadata": {
+                    "contentSha256": content_hash,
+                    "sourceRevision": {
+                        "revisionOfDocumentId": parent_id,
+                        "baseSourceDocumentId": "drive-file-1",
+                    },
+                },
+            })
+            ledger.create_review_item({
+                "documentId": child_id,
+                "reason": "source_revision_detected",
+                "details": "False revision caused by legacy fingerprint reuse.",
+            })
+
+            result = ledger.repair_false_source_revisions(actor="test")
+
+            self.assertEqual(result["repaired"], 1)
+            self.assertIsNotNone(ledger.get_document(parent_id))
+            self.assertIsNone(ledger.get_document(child_id))
+            self.assertEqual(ledger.list_review_items(document_id=child_id), [])
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["action"], "local_ledger.false_source_revision_repaired")
+            self.assertFalse(event["details"]["localEvidenceDeleted"])
 
     def test_audit_event_details_redact_nested_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:

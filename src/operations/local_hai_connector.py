@@ -8,6 +8,8 @@ HAI_CONNECTOR_VERSION = "fab-hai-connector-v1"
 DEFAULT_HAI_COMMAND_IDS = (
     "rescan_intake",
     "process_imported",
+    "reprocess_incomplete",
+    "reprocess_review_queue",
     "sync_sources",
     "run_safe_cycle",
     "run_due_recovery",
@@ -15,6 +17,8 @@ DEFAULT_HAI_COMMAND_IDS = (
     "refresh_notifications",
     "run_due_reports",
     "assess_compliance",
+    "record_wave_attachment_verification",
+    "archive_verified_drive_sources",
 )
 
 
@@ -24,18 +28,22 @@ class HaiCommand:
     label: str
     description: str
     input_schema: Dict[str, Any]
+    mode: str = "safe_local_operation"
+    risk: str = "low"
+    requires_human_approval: bool = False
+    external_submission: str = "not_executed"
 
     def as_dict(self, allowed: bool) -> Dict[str, Any]:
         return {
             "commandId": self.command_id,
             "label": self.label,
             "description": self.description,
-            "mode": "safe_local_operation",
-            "risk": "low",
-            "requiresHumanApproval": False,
+            "mode": self.mode,
+            "risk": self.risk,
+            "requiresHumanApproval": self.requires_human_approval,
             "allowed": allowed,
             "inputSchema": self.input_schema,
-            "externalSubmission": "not_executed",
+            "externalSubmission": self.external_submission,
         }
 
 
@@ -65,6 +73,18 @@ HAI_COMMANDS = (
         "process_imported",
         "Process imported documents",
         "Run OCR, validation, duplicate checks, and classification for imported documents.",
+        _bounded_limit_schema(25, 100),
+    ),
+    HaiCommand(
+        "reprocess_incomplete",
+        "Recover incomplete OCR",
+        "Retry only review-gated documents with blank OCR after creating a local ledger backup.",
+        _bounded_limit_schema(25, 100),
+    ),
+    HaiCommand(
+        "reprocess_review_queue",
+        "Reassess machine-gated review documents",
+        "Back up the ledger, then rerun extraction and validation from retained OCR without external submission.",
         _bounded_limit_schema(25, 100),
     ),
     HaiCommand(
@@ -137,6 +157,38 @@ HAI_COMMANDS = (
             },
         },
     ),
+    HaiCommand(
+        "record_wave_attachment_verification",
+        "Record Wave attachment attestation",
+        "Record transaction metadata for one configured Drive or trusted Gmail scanner source; binary readback is still required before completion.",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["documentId", "evidence"],
+            "properties": {
+                "documentId": {"type": "integer", "minimum": 1},
+                "evidence": {"type": "object"},
+            },
+        },
+        mode="governed_evidence_recording",
+        risk="medium",
+    ),
+    HaiCommand(
+        "archive_verified_drive_sources",
+        "Archive verified Drive sources",
+        "Move only sources whose Wave transaction and exact attachment evidence pass every configured gate.",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                "dryRun": {"type": "boolean", "default": True},
+            },
+        },
+        mode="preauthorized_policy_gated_move",
+        risk="medium",
+        external_submission="policy_gated",
+    ),
 )
 
 
@@ -153,6 +205,11 @@ class LocalHaiConnector:
         self.config = config or {}
         self.executors = executors or {}
         self.enabled = _bool_config(self.config.get("fab_hai_connector_enabled"), default=False)
+        self.api_token_configured = bool(
+            self.config.get("fab_local_api_token")
+            or self.config.get("fab_operations_api_token")
+            or self.config.get("operations_api_token")
+        )
         self.allowed_command_ids = _allowed_commands(self.config.get("fab_hai_allowed_commands"))
         self._commands = {command.command_id: command for command in HAI_COMMANDS}
 
@@ -162,13 +219,45 @@ class LocalHaiConnector:
             "version": HAI_CONNECTOR_VERSION,
             "enabled": self.enabled,
             "status": "ready" if self.enabled else "prepared_disabled",
-            "transport": "authenticated_local_http",
+            "transport": "authenticated_local_http" if self.api_token_configured else "loopback_local_http",
+            "authentication": "bearer_token" if self.api_token_configured else "loopback_origin_controls",
             "sourceOfTruth": "fab_local_ledger",
             "idempotencyField": "requestId",
             "executionPolicy": "explicit_allowlist",
             "commands": [
                 command.as_dict(command.command_id in self.allowed_command_ids)
                 for command in HAI_COMMANDS
+            ],
+            "resources": [
+                {
+                    "resourceId": "google_drive_binary_relay",
+                    "label": "Google Drive binary relay",
+                    "description": "Idempotently hand exact configured-folder Drive bytes into FAB with provider identity and hash checks.",
+                    "method": "POST",
+                    "path": "/api/connectors/google-drive/relay",
+                    "contentType": "multipart/form-data",
+                    "mode": "authenticated_source_intake",
+                    "externalSubmission": "not_executed",
+                },
+                {
+                    "resourceId": "wave_attachment_work_orders",
+                    "label": "Wave attachment work orders",
+                    "description": "Evidence-bound Drive or trusted Gmail scanner source, Wave field, attachment readback, and retention-gate handoff.",
+                    "method": "GET",
+                    "path": "/api/drive-wave/work-orders",
+                    "mode": "read_only_executor_handoff",
+                    "externalSubmission": "not_executed",
+                },
+                {
+                    "resourceId": "wave_attachment_binary_readback",
+                    "label": "Wave attachment binary readback",
+                    "description": "Submit the receipt downloaded from one uniquely matched, reviewed Wave transaction so FAB verifies its entry binding, hash, size, filename, and bookkeeping evidence.",
+                    "method": "POST",
+                    "pathTemplate": "/api/drive-wave/documents/{documentId}/attachment-readback",
+                    "contentType": "multipart/form-data",
+                    "mode": "governed_binary_evidence",
+                    "externalSubmission": "verified_readback",
+                }
             ],
             "excludedCapabilities": [
                 "approve_review_items",
@@ -177,6 +266,8 @@ class LocalHaiConnector:
                 "submit_to_mijngeldzaken",
                 "restore_backups",
                 "change_access_control",
+                "delete_drive_sources",
+                "delete_or_mutate_gmail_sources",
             ],
             "externalSubmission": "not_executed",
         }
@@ -191,6 +282,7 @@ class LocalHaiConnector:
             "allowedCommandIds": sorted(self.allowed_command_ids),
             "availableExecutors": sorted(self.executors),
             "commandCount": len(manifest["commands"]),
+            "resourceCount": len(manifest["resources"]),
             "externalSubmission": "not_executed",
         }
 
@@ -390,6 +482,8 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
     allowed_fields = {
         "rescan_intake": set(),
         "process_imported": {"limit"},
+        "reprocess_incomplete": {"limit"},
+        "reprocess_review_queue": {"limit"},
         "sync_sources": {"sources"},
         "run_safe_cycle": {"limit", "dryRun"},
         "run_due_recovery": {"limit"},
@@ -397,6 +491,8 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         "refresh_notifications": set(),
         "run_due_reports": set(),
         "assess_compliance": {"fromDate", "toDate", "targetSystem"},
+        "record_wave_attachment_verification": {"documentId", "evidence"},
+        "archive_verified_drive_sources": {"limit", "dryRun"},
     }[command_id]
     unexpected = sorted(set(payload) - allowed_fields)
     if unexpected:
@@ -416,6 +512,36 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         if not isinstance(payload["dryRun"], bool):
             raise ValueError("dryRun must be a boolean.")
         normalized["dryRun"] = payload["dryRun"]
+    if "documentId" in payload:
+        try:
+            document_id = int(payload["documentId"])
+        except (TypeError, ValueError):
+            raise ValueError("documentId must be a positive integer.")
+        if document_id < 1:
+            raise ValueError("documentId must be a positive integer.")
+        normalized["documentId"] = document_id
+    if "evidence" in payload:
+        evidence = payload["evidence"]
+        if not isinstance(evidence, dict):
+            raise ValueError("evidence must be an object.")
+        allowed_evidence = {
+            "externalTransactionId", "businessId", "sourceSha256", "uploadSourceSha256",
+            "attachmentSha256", "attachmentObjectId", "attachmentMimeType", "attachmentFilename",
+            "attachmentSizeBytes",
+            "attachmentPresent", "attachmentOpened", "attachmentDownloaded", "attachmentTransactionId",
+            "transactionExists", "transactionStatus", "transactionMatchCount", "matchingTransactionIds",
+            "transactionPageUrl", "transactionReviewed", "waveObservedAt", "fieldMatches",
+            "observedFields", "expectedFieldsDigest",
+            "verifiedAt", "verifier",
+        }
+        unexpected_evidence = sorted(set(evidence) - allowed_evidence)
+        if unexpected_evidence:
+            raise ValueError(f"Unsupported evidence field(s): {', '.join(unexpected_evidence)}")
+        if "observedFields" in evidence and not isinstance(evidence["observedFields"], dict):
+            raise ValueError("evidence.observedFields must be an object.")
+        if "matchingTransactionIds" in evidence and not isinstance(evidence["matchingTransactionIds"], list):
+            raise ValueError("evidence.matchingTransactionIds must be a list.")
+        normalized["evidence"] = dict(evidence)
     if "sources" in payload:
         sources = payload["sources"]
         if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):

@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import secrets
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
@@ -14,6 +15,8 @@ from werkzeug.utils import secure_filename
 from src.config_loader import ConfigLoader
 from src.data_entry.waveapps_account_discovery import WaveappsAccountDiscoveryService
 from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
+from src.document_handling.duplicate_detector import DuplicateDetector
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
@@ -23,8 +26,15 @@ from src.operations.local_bookkeeping_records import (
 )
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
+from src.operations.local_categories import fab_category_options
+from src.operations.local_category_suggestions import suggest_category_intent
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
+from src.operations.drive_relay_intake import DriveRelayIntakeService
+from src.operations.drive_wave_delivery import (
+    DriveWaveDeliveryService,
+    WAVE_RECEIPT_MAX_BYTES,
+)
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_exports import (
     EXPORT_APPROVAL_PHRASE,
@@ -34,6 +44,8 @@ from src.operations.local_exports import (
 )
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_grouping import LocalDocumentGroupingService
+from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
+from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_hai_connector import LocalHaiConnector
 from src.operations.local_intake import DEFAULT_ALLOWED_EXTENSIONS, LocalFolderIntake
 from src.operations.local_ledger import (
@@ -52,10 +64,12 @@ from src.operations.local_reporting import LocalFinancialReportingService, Local
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.operations.local_wave_setup import LocalWaveSetupService
 from src.operations.local_workflow_recovery import (
     LocalWorkflowRecoveryScheduler,
     LocalWorkflowRecoveryService,
 )
+from src.utils.runtime_identity import local_instance_id
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -3711,6 +3725,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     ) or sorted(DEFAULT_ALLOWED_EXTENSIONS)
     ledger = LocalOperationsLedger(ledger_path)
     app = Flask(__name__)
+    app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(ledger, config)
+    app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(ledger, config)
     app.config["FAB_LOCAL_LEDGER_PATH"] = ledger_path
     app.config["FAB_LOCAL_API_HOST"] = host
     app.config["FAB_LOCAL_INTAKE_PATHS"] = intake_paths
@@ -3803,8 +3819,31 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def health():
         operations_health = LocalOperationsHealth(ledger, config).summarize()
         readiness = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions).compact()
+        wave_setup = LocalWaveSetupService(config).status(ledger, "waveapps_business")
+        wave_activation = wave_setup.get("activation") if isinstance(wave_setup.get("activation"), dict) else {}
+        core_target = {
+            "id": "waveapps_business",
+            "label": "Wave - Noodzakelijk Online",
+            "status": wave_setup.get("status"),
+            "ready": wave_setup.get("ready") is True,
+            "currentStep": wave_activation.get("currentStep"),
+            "nextAction": wave_activation.get("nextAction"),
+            "externalSubmission": "not_executed",
+        }
+        readiness["coreTarget"] = core_target
+        if not core_target["ready"]:
+            readiness["status"] = _combined_health_status(readiness.get("status"), "attention")
+            readiness["issueCount"] = int(readiness.get("issueCount") or 0) + 1
+            readiness["attentionIssues"] = int(readiness.get("attentionIssues") or 0) + 1
+        health_status = _combined_health_status(
+            operations_health.get("status"),
+            readiness.get("status"),
+        )
         return jsonify({
-            "status": operations_health["status"],
+            "service": "fab-ledger-api",
+            "apiVersion": "1",
+            "instanceId": local_instance_id(Path(__file__).resolve().parents[2]),
+            "status": health_status,
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
             "intakePaths": app.config["FAB_LOCAL_INTAKE_PATHS"],
@@ -4159,6 +4198,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100)
             )
 
+        def reprocess_incomplete_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalDocumentProcessor(ledger, config).reprocess_incomplete(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+            )
+
+        def reprocess_review_queue_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalDocumentProcessor(ledger, config).reprocess_review_queue(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+            )
+
         def sync_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
             return LocalConnectorIntakeService(ledger, config).sync(
                 sources=payload.get("sources"),
@@ -4202,12 +4253,28 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             ).transactions_for_reconciliation(limit=limit)
             return LocalReconciliationService(ledger, config).run(transactions, limit=limit)
 
+        def record_wave_attachment_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return DriveWaveDeliveryService(ledger, config).record_attachment_evidence(
+                int(payload["documentId"]),
+                payload.get("evidence") or {},
+                actor=actor,
+            )
+
+        def archive_verified_drive_sources_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return DriveWaveDeliveryService(ledger, config).archive_ready(
+                limit=_bounded_positive_int(payload.get("limit"), default=25, maximum=100),
+                actor=actor,
+                dry_run=bool(payload.get("dryRun", True)),
+            )
+
         return LocalHaiConnector(
             ledger,
             config,
             executors={
                 "rescan_intake": rescan_intake_command,
                 "process_imported": process_imported_command,
+                "reprocess_incomplete": reprocess_incomplete_command,
+                "reprocess_review_queue": reprocess_review_queue_command,
                 "sync_sources": sync_sources_command,
                 "run_safe_cycle": run_safe_cycle_command,
                 "run_due_recovery": run_due_recovery_command,
@@ -4229,6 +4296,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     target_system=payload.get("targetSystem"),
                     actor=actor,
                 ),
+                "record_wave_attachment_verification": record_wave_attachment_command,
+                "archive_verified_drive_sources": archive_verified_drive_sources_command,
             },
         )
 
@@ -4271,6 +4340,83 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         else:
             status_code = 400
         return jsonify(result), status_code
+
+    @app.get("/api/drive-wave/status")
+    def drive_wave_status_api():
+        return jsonify(DriveWaveDeliveryService(ledger, config).status())
+
+    @app.get("/api/drive-wave/candidates")
+    def drive_wave_candidates_api():
+        return jsonify(
+            DriveWaveDeliveryService(ledger, config).list_candidates(limit=_limit_arg())
+        )
+
+    @app.get("/api/drive-wave/work-orders")
+    def drive_wave_work_orders_api():
+        return jsonify(
+            DriveWaveDeliveryService(ledger, config).list_work_orders(limit=_limit_arg())
+        )
+
+    @app.get("/api/drive-wave/documents/<int:document_id>/work-order")
+    def drive_wave_document_work_order_api(document_id: int):
+        result = DriveWaveDeliveryService(ledger, config).work_order(document_id)
+        return jsonify(result), 200 if result.get("success") else 404
+
+    @app.get("/api/drive-wave/documents/<int:document_id>/archive-plan")
+    def drive_wave_archive_plan_api(document_id: int):
+        return jsonify(DriveWaveDeliveryService(ledger, config).plan_archive(document_id))
+
+    @app.post("/api/drive-wave/documents/<int:document_id>/attachment-evidence")
+    def drive_wave_attachment_evidence_api(document_id: int):
+        payload = request.get_json(silent=True) or {}
+        result = DriveWaveDeliveryService(ledger, config).record_attachment_evidence(
+            document_id,
+            payload.get("evidence") or payload,
+            actor=str(payload.get("actor") or "local_api"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.post("/api/drive-wave/documents/<int:document_id>/attachment-readback")
+    def drive_wave_attachment_readback_api(document_id: int):
+        attachment = request.files.get("attachment")
+        if attachment is None:
+            return jsonify({"error": "Multipart file field 'attachment' is required"}), 400
+        evidence_text = request.form.get("evidence") or "{}"
+        try:
+            evidence = json.loads(evidence_text)
+        except (TypeError, ValueError):
+            return jsonify({"error": "evidence must be a valid JSON object"}), 400
+        if not isinstance(evidence, dict):
+            return jsonify({"error": "evidence must be a valid JSON object"}), 400
+        content = attachment.stream.read(WAVE_RECEIPT_MAX_BYTES + 1)
+        if len(content) > WAVE_RECEIPT_MAX_BYTES:
+            return jsonify({
+                "success": False,
+                "status": "blocked",
+                "reasons": ["wave_attachment_readback_exceeds_limit"],
+                "maxBytes": WAVE_RECEIPT_MAX_BYTES,
+                "externalSubmission": "not_executed",
+            }), 413
+        result = DriveWaveDeliveryService(ledger, config).record_attachment_readback(
+            document_id,
+            content,
+            filename=attachment.filename,
+            mime_type=attachment.mimetype,
+            evidence=evidence,
+            actor=str(request.form.get("actor") or "local_api_wave_browser"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.post("/api/drive-wave/documents/<int:document_id>/archive")
+    def drive_wave_archive_document_api(document_id: int):
+        payload = request.get_json(silent=True) or {}
+        if bool(payload.get("dryRun", False)):
+            return jsonify(DriveWaveDeliveryService(ledger, config).plan_archive(document_id))
+        result = DriveWaveDeliveryService(ledger, config).archive_document(
+            document_id,
+            actor=str(payload.get("actor") or "local_api"),
+        )
+        return jsonify(result), 200 if result.get("success") else 409
 
     @app.get("/api/workflows")
     def workflow_runs_api():
@@ -4754,6 +4900,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         limit = _bounded_positive_int(request.args.get("limit"), default=25, maximum=100)
         include_wave_plan = _bool_value(request.args.get("includeWavePlan"), default=True)
         include_wave_sync = _bool_value(request.args.get("includeWaveSync"), default=True)
+        include_connector_sync = _bool_value(request.args.get("includeConnectorSync"), default=True)
         return jsonify(_autonomy_service(
             ledger,
             config,
@@ -4764,6 +4911,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             limit=limit,
             include_wave_plan=include_wave_plan,
             include_wave_sync=include_wave_sync,
+            include_connector_sync=include_connector_sync,
         ))
 
     @app.post("/api/autonomy/run")
@@ -4783,6 +4931,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             bank_transactions=bank_transactions,
             include_wave_plan=_bool_value(payload.get("includeWavePlan"), default=True),
             include_wave_sync=_bool_value(payload.get("includeWaveSync"), default=True),
+            include_connector_sync=_bool_value(payload.get("includeConnectorSync"), default=True),
             dry_run=bool(payload.get("dryRun", False)),
         )
         if result.get("status") == "already_running":
@@ -4801,12 +4950,66 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
             intake_paths,
             intake_extensions,
-        ).run_cycle(limit=25, include_wave_plan=True, include_wave_sync=True)
+        ).run_cycle(
+            limit=25,
+            include_wave_plan=True,
+            include_wave_sync=True,
+            include_connector_sync=True,
+        )
         return redirect(url_for("dashboard_page", _anchor="autonomy"))
 
     @app.get("/api/wave")
     def wave_overview():
         return jsonify(LocalWaveControlService(config).overview(ledger))
+
+    @app.get("/api/wave/setup")
+    def wave_setup_status():
+        target_system = str(
+            request.args.get("targetSystem")
+            or request.args.get("target_system")
+            or "waveapps_business"
+        )
+        result = LocalWaveSetupService(config).status(ledger, target_system)
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.put("/api/wave/setup")
+    def save_wave_setup():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Wave setup payload must be an object"}), 400
+        allowed = {
+            "targetSystem", "accessToken", "businessId", "anchorAccountId",
+            "defaultCategoryAccountId", "categoryAccountIds", "clearAccessToken", "actor",
+        }
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            return jsonify({"error": f"Unsupported Wave setup field(s): {', '.join(unexpected)}"}), 400
+        target_system = payload.get("targetSystem", "waveapps_business")
+        if target_system not in {"waveapps_business", "waveapps_personal"}:
+            return jsonify({"error": "targetSystem must be waveapps_business or waveapps_personal"}), 400
+        for field in ("accessToken", "businessId", "anchorAccountId", "defaultCategoryAccountId", "actor"):
+            if field in payload and not isinstance(payload[field], str):
+                return jsonify({"error": f"{field} must be a string"}), 400
+        category_mapping = payload.get("categoryAccountIds")
+        if category_mapping is not None and (
+            not isinstance(category_mapping, dict)
+            or len(category_mapping) > 250
+            or any(not isinstance(key, str) or not isinstance(value, str) for key, value in category_mapping.items())
+        ):
+            return jsonify({"error": "categoryAccountIds must be an object of string account IDs with at most 250 entries"}), 400
+        if payload.get("clearAccessToken") not in (None, True, False):
+            return jsonify({"error": "clearAccessToken must be a boolean"}), 400
+        if payload.get("clearAccessToken") is True and "accessToken" in payload:
+            return jsonify({"error": "accessToken and clearAccessToken cannot be supplied together"}), 400
+        try:
+            result = LocalWaveSetupService(config).save(
+                ledger,
+                payload,
+                actor=str(payload.get("actor") or "local_api_wave_setup"),
+            )
+        except (ValueError, RuntimeError) as exc:
+            return jsonify({"success": False, "status": "blocked", "error": str(exc)}), 400
+        return jsonify(result)
 
     @app.get("/api/wave/actions")
     def wave_actions():
@@ -4855,18 +5058,36 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         })
         return result
 
+    @app.post("/api/wave/setup/validate")
+    def validate_wave_setup():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Wave validation payload must be an object"}), 400
+        unexpected = sorted(set(payload) - {"targetSystem"})
+        if unexpected:
+            return jsonify({"error": f"Unsupported Wave validation field(s): {', '.join(unexpected)}"}), 400
+        target_system = str(payload.get("targetSystem") or "waveapps_business")
+        if target_system not in {"waveapps_business", "waveapps_personal"}:
+            return jsonify({"error": "targetSystem must be waveapps_business or waveapps_personal"}), 400
+        discovery = run_wave_account_discovery(target_system)
+        result = {
+            "success": bool(discovery.get("success")),
+            "status": discovery.get("status"),
+            "discovery": discovery,
+            "setup": LocalWaveSetupService(config).status(ledger, target_system),
+        }
+        if not result["success"]:
+            result["error"] = discovery.get("message") or "Wave validation failed."
+            result["nextAction"] = discovery.get("nextAction")
+        status_code = _wave_discovery_http_status(discovery)
+        return jsonify(result), status_code
+
     @app.post("/api/wave/accounts/discover")
     def discover_wave_accounts():
         payload = request.get_json(silent=True) or {}
         target_system = str(payload.get("targetSystem") or payload.get("target_system") or "waveapps_business")
         result = run_wave_account_discovery(target_system)
-        status_code = 200 if result.get("success") else 400
-        if result.get("status") in {"rate_limited", "quota_exhausted"}:
-            status_code = 429
-        elif result.get("status") in {"provider_error", "pagination_incomplete"}:
-            status_code = 502
-        elif result.get("status") == "internal_error":
-            status_code = 500
+        status_code = _wave_discovery_http_status(result)
         return jsonify(result), status_code
 
     @app.post("/wave/accounts/discover")
@@ -5826,6 +6047,26 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
         return jsonify(LocalDocumentProcessor(ledger, config).process_imported(limit=limit))
 
+    @app.post("/api/documents/reprocess-incomplete")
+    def reprocess_incomplete_documents():
+        payload = request.get_json(silent=True) or {}
+        limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
+        actor = str(payload.get("actor") or "fab_local_api")
+        return jsonify(LocalDocumentProcessor(ledger, config).reprocess_incomplete(
+            limit=limit,
+            actor=actor,
+        ))
+
+    @app.post("/api/documents/reprocess-review-queue")
+    def reprocess_review_queue():
+        payload = request.get_json(silent=True) or {}
+        limit = _bounded_positive_int(payload.get("limit"), default=25, maximum=100)
+        actor = str(payload.get("actor") or "fab_local_api")
+        return jsonify(LocalDocumentProcessor(ledger, config).reprocess_review_queue(
+            limit=limit,
+            actor=actor,
+        ))
+
     @app.post("/documents/process-imported")
     def process_imported_form():
         session["fab_last_processing_summary"] = LocalDocumentProcessor(ledger, config).process_imported(limit=25)
@@ -6470,6 +6711,142 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "externalSubmission": "not_executed",
         }), 201
 
+    @app.get("/api/connectors/google-drive/relay")
+    def google_drive_relay_status_api():
+        return jsonify(DriveRelayIntakeService(ledger, config).status())
+
+    @app.get("/api/connectors/gmail/authorization")
+    def gmail_authorization_status_api():
+        return jsonify(app.config["FAB_GMAIL_AUTH"].status())
+
+    @app.post("/api/connectors/gmail/credentials")
+    def install_gmail_credentials_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        encoded = str(payload.get("contentBase64") or "")
+        if len(encoded) > 90_000:
+            return jsonify({"error": "Google OAuth credential payload exceeds the 64 KB limit"}), 413
+        replace = payload.get("replace", False)
+        if not isinstance(replace, bool):
+            return jsonify({"error": "replace must be a boolean"}), 400
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "contentBase64 must contain valid base64 data"}), 400
+        try:
+            result = app.config["FAB_GMAIL_AUTH"].install_credentials(
+                content,
+                filename=str(payload.get("filename") or ""),
+                replace=replace,
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 400
+        except (FileExistsError, RuntimeError) as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 409
+        return jsonify(result), 201
+
+    @app.post("/api/connectors/gmail/authorization/start")
+    def start_gmail_authorization_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = app.config["FAB_GMAIL_AUTH"].start(
+            actor=payload.get("actor") or "local_api",
+        )
+        if result.get("success"):
+            status_code = 200 if result.get("status") == "authorization_in_progress" else 202
+        else:
+            status_code = 409
+        return jsonify(result), status_code
+
+    @app.get("/api/connectors/google-drive/authorization")
+    def google_drive_authorization_status_api():
+        return jsonify(app.config["FAB_GOOGLE_DRIVE_AUTH"].status())
+
+    @app.post("/api/connectors/google-drive/credentials")
+    def install_google_drive_credentials_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        encoded = str(payload.get("contentBase64") or "")
+        if len(encoded) > 90_000:
+            return jsonify({"error": "Google OAuth credential payload exceeds the 64 KB limit"}), 413
+        replace = payload.get("replace", False)
+        if not isinstance(replace, bool):
+            return jsonify({"error": "replace must be a boolean"}), 400
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return jsonify({"error": "contentBase64 must contain valid base64 data"}), 400
+        try:
+            result = app.config["FAB_GOOGLE_DRIVE_AUTH"].install_credentials(
+                content,
+                filename=str(payload.get("filename") or ""),
+                replace=replace,
+                actor=payload.get("actor") or "local_api",
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 400
+        except (FileExistsError, RuntimeError) as exc:
+            return jsonify({"error": str(exc), "externalSubmission": "not_executed"}), 409
+        return jsonify(result), 201
+
+    @app.post("/api/connectors/google-drive/authorization/start")
+    def start_google_drive_authorization_api():
+        if host not in LOOPBACK_HOSTS:
+            return jsonify({"error": "Desktop OAuth setup is available only on the loopback FAB API"}), 403
+        payload = request.get_json(silent=True) or {}
+        result = app.config["FAB_GOOGLE_DRIVE_AUTH"].start(
+            actor=payload.get("actor") or "local_api",
+        )
+        if result.get("success"):
+            status_code = 200 if result.get("status") == "authorization_in_progress" else 202
+        else:
+            status_code = 409
+        return jsonify(result), status_code
+
+    @app.post("/api/connectors/google-drive/relay")
+    def google_drive_relay_intake_api():
+        upload = request.files.get("file")
+        if upload is None:
+            return jsonify({"error": "Multipart file field 'file' is required"}), 400
+        metadata_text = request.form.get("metadata") or "{}"
+        try:
+            metadata = json.loads(metadata_text)
+        except (TypeError, ValueError):
+            return jsonify({"error": "metadata must be a valid JSON object"}), 400
+        if not isinstance(metadata, dict):
+            return jsonify({"error": "metadata must be a valid JSON object"}), 400
+
+        service = DriveRelayIntakeService(ledger, config)
+        max_bytes = int(service.status()["maxBytes"])
+        content = upload.stream.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            return jsonify({
+                "success": False,
+                "status": "rejected",
+                "reasons": ["drive_file_exceeds_relay_limit"],
+                "maxBytes": max_bytes,
+                "externalSubmission": "not_executed",
+            }), 413
+        result = service.ingest(
+            content,
+            provider_file_id=metadata.get("providerFileId"),
+            source_folder_id=metadata.get("sourceFolderId"),
+            filename=metadata.get("filename") or upload.filename,
+            mime_type=metadata.get("mimeType") or upload.mimetype,
+            provider_size=metadata.get("sizeBytes"),
+            expected_sha256=metadata.get("sha256"),
+            created_time=metadata.get("createdTime"),
+            modified_time=metadata.get("modifiedTime"),
+            md5_checksum=metadata.get("md5Checksum"),
+            web_view_link=metadata.get("webViewLink"),
+            actor=metadata.get("actor") or "local_api_drive_relay",
+        )
+        return jsonify(result), 201 if result.get("success") else 400
+
     @app.post("/intake/rescan")
     def rescan_intake_form():
         paths = app.config["FAB_LOCAL_INTAKE_PATHS"]
@@ -6493,11 +6870,66 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/review")
     def review_queue():
+        requested_status = str(request.args.get("status") or "").strip().lower()
+        status_filter: Any = requested_status or None
+        if requested_status == "open":
+            status_filter = ("pending", "in_review")
+        review_items = ledger.list_review_items(
+            status=status_filter,
+            limit=_limit_arg(),
+        )
+        work_items = _review_work_items(ledger, review_items, config)
+        evidence_only_work_items = [
+            item
+            for item in work_items
+            if (item.get("document") or {}).get("postingEligible") is False
+        ]
+        posting_blocked_work_items = [
+            item
+            for item in work_items
+            if (item.get("document") or {}).get("postingEligible") is not False
+        ]
         return jsonify({
-            "reviewItems": ledger.list_review_items(
-                status=request.args.get("status"),
-                limit=_limit_arg(),
-            )
+            "reviewItems": review_items,
+            "workItems": work_items,
+            "categoryOptions": _review_category_options(ledger, config),
+            "capabilities": {
+                "exactVendorCategoryBatch": {
+                    "enabled": True,
+                    "requiresExplicitApproval": True,
+                    "matchPolicy": "exact_normalized_vendor_and_target_system",
+                    "propagatedFields": ["category", "targetSystem"],
+                    "preservedFields": ["vendorName", "transactionDate", "totalAmount", "taxAmount"],
+                    "excludedDocuments": ["marked_duplicate"],
+                    "preservedReviewGates": ["duplicate_candidate", "validation_failed"],
+                },
+            },
+            "summary": {
+                "reviewItems": len(review_items),
+                "documents": len([item for item in work_items if item.get("documentId")]),
+                "postingBlockedDocuments": len([
+                    item for item in posting_blocked_work_items if item.get("documentId")
+                ]),
+                "postingBlockedReviewItems": sum(
+                    len(item.get("reviewItems") or [])
+                    for item in posting_blocked_work_items
+                ),
+                "evidenceOnlyDocuments": len([
+                    item for item in evidence_only_work_items if item.get("documentId")
+                ]),
+                "evidenceOnlyReviewItems": sum(
+                    len(item.get("reviewItems") or [])
+                    for item in evidence_only_work_items
+                ),
+                "duplicateCandidates": len([
+                    item for item in work_items
+                    if "duplicate_candidate" in (item.get("reasons") or [])
+                ]),
+                "categorySuggestions": len([
+                    item for item in work_items
+                    if ((item.get("document") or {}).get("categorySuggestion") or {}).get("category")
+                ]),
+            },
         })
 
     @app.post("/api/review/<int:review_item_id>/resolve")
@@ -6513,8 +6945,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             resolution=str(resolution) if resolution is not None else None,
             corrections=payload.get("corrections") or _corrections_from_mapping(payload),
             learn_rule=bool(payload.get("learnRule", True)),
+            apply_to_matching_vendor=bool(payload.get("applyToMatchingVendor", False)),
         )
-        status_code = 404 if result.get("status") == "not_found" else 200
+        status_code = {
+            "not_found": 404,
+            "already_resolved": 409,
+            "duplicate_candidate_not_found": 404,
+            "duplicate_candidate_already_resolved": 409,
+            "duplicate_candidate_mismatch": 409,
+            "duplicate_candidate_selection_required": 409,
+            "invalid_duplicate_decision": 400,
+        }.get(result.get("status"), 200)
         return jsonify(result), status_code
 
     @app.post("/review/<int:review_item_id>/resolve")
@@ -6784,6 +7225,18 @@ def _autonomy_service(
     )
 
 
+def _combined_health_status(*statuses: Any) -> str:
+    rank = {
+        "ok": 0,
+        "ready": 0,
+        "attention": 1,
+        "attention_required": 1,
+        "blocked": 2,
+    }
+    normalized = [str(status or "ok") for status in statuses]
+    return max(normalized, key=lambda status: rank.get(status, 1))
+
+
 def _workflow_recovery_service(
     ledger: LocalOperationsLedger,
     config: Dict[str, Any],
@@ -7028,6 +7481,199 @@ def _bool_value(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _review_work_items(
+    ledger: LocalOperationsLedger,
+    review_items: list,
+    config: Optional[Dict[str, Any]] = None,
+) -> list:
+    grouped: Dict[str, list] = {}
+    for item in review_items:
+        document_id = item.get("document_id")
+        key = f"document:{document_id}" if document_id is not None else f"review:{item.get('id')}"
+        grouped.setdefault(key, []).append(item)
+
+    document_ids = [
+        int(group[0]["document_id"])
+        for group in grouped.values()
+        if group[0].get("document_id") is not None
+    ]
+    review_context = ledger.get_review_work_item_context(document_ids)
+    documents = review_context["documents"]
+    bookkeeping_records = review_context["bookkeeping_records"]
+    duplicate_links = review_context["duplicate_candidates"]
+    duplicate_detector = DuplicateDetector(config or {})
+
+    work_items = []
+    for group in grouped.values():
+        group = sorted(group, key=lambda item: int(item.get("id") or 0), reverse=True)
+        document_id = group[0].get("document_id")
+        document = documents.get(int(document_id)) if document_id is not None else None
+        bookkeeping_record = bookkeeping_records.get(int(document_id)) if document_id is not None else None
+        compact_document = (
+            _compact_review_document(document, bookkeeping_record)
+            if document
+            else None
+        )
+        duplicate_candidates = []
+        for candidate in duplicate_links.get(int(document_id), []) if document_id is not None else []:
+            if candidate.get("status") not in {"pending", "in_review"}:
+                continue
+            other_id = candidate.get("candidate_document_id")
+            if int(candidate.get("document_id") or 0) != int(document_id or 0):
+                other_id = candidate.get("document_id")
+            other_document = documents.get(int(other_id)) if other_id is not None else None
+            comparison = (
+                duplicate_detector.compare_identity_evidence(document, other_document)
+                if document and other_document
+                else {}
+            )
+            duplicate_candidates.append({
+                "id": candidate.get("id"),
+                "candidateDocumentId": other_id,
+                "matchType": candidate.get("match_type"),
+                "confidenceScore": candidate.get("confidence_score"),
+                "reason": candidate.get("reason"),
+                "evidence": candidate.get("evidence") or {},
+                "matchedIdentityFields": comparison.get("matched_identity_fields") or [],
+                "conflictingIdentityFields": comparison.get("conflicting_identity_fields") or [],
+                "similarityScore": comparison.get("similarity_score"),
+                "comparableFields": comparison.get("comparable_fields"),
+                "currentIdentity": _compact_duplicate_identity(comparison.get("left") or {}),
+                "candidateIdentity": _compact_duplicate_identity(comparison.get("right") or {}),
+                "document": _compact_review_document(other_document) if other_document else None,
+            })
+        work_items.append({
+            "id": f"document-{document_id}" if document_id is not None else f"review-{group[0].get('id')}",
+            "documentId": document_id,
+            "status": "in_review" if any(item.get("status") == "in_review" for item in group) else "pending",
+            "reasons": list(dict.fromkeys(str(item.get("reason") or "manual_review") for item in group)),
+            "reviewItems": [
+                {
+                    "id": item.get("id"),
+                    "reason": item.get("reason"),
+                    "details": item.get("details"),
+                    "status": item.get("status"),
+                    "correctedData": item.get("corrected_data") or {},
+                    "createdAt": item.get("created_at"),
+                    "updatedAt": item.get("updated_at"),
+                }
+                for item in group
+            ],
+            "document": compact_document,
+            "duplicateCandidates": duplicate_candidates,
+            "reviewPath": f"/documents/{document_id}" if document_id is not None else "/#review",
+        })
+    return sorted(
+        work_items,
+        key=lambda item: max(
+            [int(review.get("id") or 0) for review in item.get("reviewItems") or []] or [0]
+        ),
+        reverse=True,
+    )
+
+
+def _compact_duplicate_identity(evidence: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "postingPolarity": evidence.get("posting_polarity"),
+        "vendor": evidence.get("vendor"),
+        "date": evidence.get("date"),
+        "amount": evidence.get("amount"),
+        "tax": evidence.get("tax"),
+        "invoiceNumber": evidence.get("invoice_number"),
+        "receiptNumber": evidence.get("receipt_number"),
+        "orderNumber": evidence.get("order_number"),
+        "transactionReference": evidence.get("transaction_reference"),
+    }
+
+
+def _compact_review_document(
+    document: Optional[Dict[str, Any]],
+    bookkeeping_record: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not document:
+        return None
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    provider = metadata.get("providerMetadata") if isinstance(metadata.get("providerMetadata"), dict) else {}
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    ocr_text = str(document.get("ocr_text") or "").strip()
+    target_system = str(metadata.get("targetSystem") or metadata.get("target_system") or "waveapps_business")
+    processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+    classification = (
+        processing.get("documentTypeClassification")
+        if isinstance(processing.get("documentTypeClassification"), dict)
+        else {}
+    )
+    classified_document_type = str(classification.get("documentType") or "").strip().lower()
+    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+    override = review_metadata.get("documentTypeOverride")
+    override_document_type = (
+        str(override.get("documentType") or "").strip().lower()
+        if isinstance(override, dict)
+        else ""
+    )
+    document_type = str(document.get("document_type") or "").strip().lower()
+    effective_document_type = override_document_type or document_type
+    posting_eligible = not is_non_posting_document_type(effective_document_type) and not (
+        not override_document_type and is_non_posting_document_type(classified_document_type)
+    )
+    record_metadata = (
+        bookkeeping_record.get("metadata")
+        if isinstance((bookkeeping_record or {}).get("metadata"), dict)
+        else {}
+    )
+    return {
+        "id": document.get("id"),
+        "filename": document.get("original_filename"),
+        "mimeType": document.get("mime_type"),
+        "source": document.get("source"),
+        "sourceDocumentId": document.get("source_document_id"),
+        "sourceUrl": provider.get("web_view_link"),
+        "processingStatus": document.get("processing_status"),
+        "documentType": document_type,
+        "classifiedDocumentType": classified_document_type or None,
+        "postingEligible": posting_eligible,
+        "vendorName": document.get("vendor_name"),
+        "transactionDate": document.get("transaction_date"),
+        "totalAmount": document.get("total_amount"),
+        "vatAmount": document.get("vat_amount"),
+        "bookkeepingRecordId": (bookkeeping_record or {}).get("id"),
+        "bookkeepingExportStatus": (bookkeeping_record or {}).get("export_status"),
+        "normalizedRecordDate": (bookkeeping_record or {}).get("record_date"),
+        "normalizedVatAmount": (bookkeeping_record or {}).get("vat_amount"),
+        "financialFieldIssues": record_metadata.get("financialFieldIssues") or [],
+        "currency": extracted.get("currency") or "EUR",
+        "category": document.get("category"),
+        "categorySuggestion": suggest_category_intent(document),
+        "targetSystem": target_system,
+        "invoiceNumber": extracted.get("invoice_number"),
+        "receiptNumber": extracted.get("receipt_number"),
+        "orderNumber": extracted.get("order_number"),
+        "transactionReference": extracted.get("transaction_reference"),
+        "confidenceScore": document.get("confidence_score"),
+        "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
+        "ocrExcerpt": ocr_text[:1200],
+    }
+
+
+def _review_category_options(ledger: LocalOperationsLedger, config: Dict[str, Any]) -> list:
+    return fab_category_options(ledger, config)
+
+
+def _wave_discovery_http_status(result: Dict[str, Any]) -> int:
+    if result.get("success"):
+        return 200
+    return {
+        "authentication_failed": 401,
+        "authorization_failed": 403,
+        "business_not_found": 404,
+        "rate_limited": 429,
+        "quota_exhausted": 429,
+        "provider_error": 502,
+        "pagination_incomplete": 502,
+        "internal_error": 500,
+    }.get(str(result.get("status") or ""), 400)
+
+
 def _corrections_from_mapping(values: Any) -> Dict[str, Any]:
     keys = (
         "vendorName",
@@ -7037,6 +7683,8 @@ def _corrections_from_mapping(values: Any) -> Dict[str, Any]:
         "vatAmount",
         "targetSystem",
         "duplicateOfDocumentId",
+        "duplicateCandidateId",
+        "documentType",
     )
     corrections = {}
     for key in keys:

@@ -41,6 +41,40 @@ class TestWaveappsTransactionInput(unittest.TestCase):
         }])
         self.assertIn('"paper"', payload["description"])
 
+    def test_credit_note_builds_deposit_that_decreases_expense(self):
+        result = build_expense_transaction_input(
+            self._document(
+                document_type="credit_note",
+                extracted_data={
+                    "document_type": "credit_note",
+                    "description": "Supplier refund",
+                    "total_amount": -42.50,
+                    "transaction_date": "2026-07-10",
+                    "line_items": [{
+                        "description": "Returned paper",
+                        "amount": -42.50,
+                        "category": "Business",
+                    }],
+                },
+            ),
+            business_id="business-1",
+            anchor_account_id="anchor-1",
+            category_mapping={"Business": "Office Supplies"},
+            category_account_ids={"Office Supplies": "expense-1"},
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["input"]["anchor"], {
+            "accountId": "anchor-1",
+            "amount": 42.5,
+            "direction": "DEPOSIT",
+        })
+        self.assertEqual(result["input"]["lineItems"], [{
+            "accountId": "expense-1",
+            "amount": 42.5,
+            "balance": "DECREASE",
+        }])
+
     def test_missing_or_invalid_financial_fields_are_not_dispatchable(self):
         result = build_expense_transaction_input(
             self._document(extracted_data={"total_amount": "0", "transaction_date": "not-a-date"}),
@@ -52,6 +86,19 @@ class TestWaveappsTransactionInput(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["missingFields"], ["categoryAccountId", "transactionDate", "totalAmount"])
+
+    def test_default_account_cannot_hide_an_unmapped_category(self):
+        result = build_expense_transaction_input(
+            self._document(),
+            business_id="business-1",
+            anchor_account_id="anchor-1",
+            category_mapping={},
+            category_account_ids={"Office Supplies": "expense-1"},
+            default_category_account_id="fallback-expense",
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["missingFields"], ["categoryAccountId"])
 
     def test_preserves_balanced_multi_category_line_items(self):
         document = self._document(extracted_data={

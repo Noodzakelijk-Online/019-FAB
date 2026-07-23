@@ -1,15 +1,22 @@
 import base64
+import json
 import os
 import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
+from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
+from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
 from src.operations.local_ledger import LocalOperationsLedger
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
+from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
@@ -275,6 +282,12 @@ class TestLocalOperationsApi(unittest.TestCase):
 
             health = client.get("/api/health")
             self.assertEqual(health.status_code, 200)
+            self.assertEqual(health.get_json()["service"], "fab-ledger-api")
+            self.assertEqual(
+                health.get_json()["instanceId"],
+                local_instance_id(Path(__file__).resolve().parents[1]),
+            )
+            self.assertNotIn("instanceRoot", health.get_json())
             self.assertFalse(health.get_json()["authRequired"])
 
             dashboard = client.get("/api/dashboard")
@@ -297,7 +310,26 @@ class TestLocalOperationsApi(unittest.TestCase):
 
             review = client.get("/api/review?status=pending")
             self.assertEqual(review.status_code, 200)
-            self.assertEqual(review.get_json()["reviewItems"][0]["reason"], "low_confidence")
+            review_payload = review.get_json()
+            self.assertEqual(review_payload["reviewItems"][0]["reason"], "low_confidence")
+            self.assertEqual(review_payload["summary"]["documents"], 1)
+            self.assertEqual(review_payload["summary"]["postingBlockedDocuments"], 1)
+            self.assertEqual(review_payload["summary"]["postingBlockedReviewItems"], 1)
+            self.assertEqual(review_payload["summary"]["evidenceOnlyDocuments"], 0)
+            self.assertEqual(review_payload["summary"]["evidenceOnlyReviewItems"], 0)
+            self.assertEqual(review_payload["summary"]["duplicateCandidates"], 0)
+            batch_capability = review_payload["capabilities"]["exactVendorCategoryBatch"]
+            self.assertTrue(batch_capability["enabled"])
+            self.assertTrue(batch_capability["requiresExplicitApproval"])
+            self.assertEqual(batch_capability["propagatedFields"], ["category", "targetSystem"])
+            self.assertEqual(
+                batch_capability["preservedReviewGates"],
+                ["duplicate_candidate", "validation_failed"],
+            )
+            self.assertEqual(review_payload["workItems"][0]["documentId"], document_id)
+            self.assertEqual(review_payload["workItems"][0]["document"]["vendorName"], "Vendor")
+            self.assertTrue(review_payload["workItems"][0]["document"]["postingEligible"])
+            self.assertEqual(review_payload["workItems"][0]["reviewItems"][0]["id"], review_id)
 
             resolved = client.post(
                 f"/api/review/{review_id}/resolve",
@@ -306,9 +338,304 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(resolved.status_code, 200)
             self.assertTrue(resolved.get_json()["success"])
 
+            repeated = client.post(
+                f"/api/review/{review_id}/resolve",
+                json={"status": "resolved", "resolution": "Repeated stale submission."},
+            )
+            self.assertEqual(repeated.status_code, 409)
+            self.assertEqual(repeated.get_json()["status"], "already_resolved")
+
             audit = client.get("/api/audit")
             self.assertEqual(audit.status_code, 200)
             self.assertEqual(audit.get_json()["auditEvents"][0]["action"], "local_review.review_item.resolve")
+
+    def test_review_queue_uses_batched_document_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "batched-review",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "totalAmount": 12.1,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            with (
+                patch.object(
+                    LocalOperationsLedger,
+                    "get_document",
+                    side_effect=AssertionError("per-document review lookup"),
+                ),
+                patch.object(
+                    LocalOperationsLedger,
+                    "get_bookkeeping_record_by_document",
+                    side_effect=AssertionError("per-document record lookup"),
+                ),
+            ):
+                response = client.get("/api/review?status=open")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["summary"]["documents"], 1)
+            self.assertEqual(payload["workItems"][0]["documentId"], document_id)
+            self.assertEqual(payload["workItems"][0]["document"]["vendorName"], "Vendor")
+
+    def test_review_api_exposes_identity_evidence_and_resolves_one_duplicate_pair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            canonical_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "canonical-receipt",
+                "originalFilename": "canonical.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transactie nr.: 10632674",
+            })
+            alternate_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "alternate-receipt",
+                "originalFilename": "alternate.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transactie nr.: 10639999",
+            })
+            subject_id = ledger.register_document({
+                "source": "google_drive",
+                "sourceDocumentId": "subject-receipt",
+                "originalFilename": "subject.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "transactionDate": "2026-06-02",
+                "totalAmount": 31.12,
+                "ocrText": "Transaction: 10632674",
+            })
+            selected_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.95,
+                "status": "pending",
+            })
+            remaining_candidate_id = ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": alternate_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.91,
+                "status": "pending",
+            })
+            review_id = ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Compare transaction identity.",
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            initial = client.get("/api/review?status=open").get_json()
+            candidates = {
+                candidate["id"]: candidate
+                for candidate in initial["workItems"][0]["duplicateCandidates"]
+            }
+
+            self.assertEqual(
+                candidates[selected_candidate_id]["matchedIdentityFields"],
+                ["vendor", "date", "amount", "transaction_reference"],
+            )
+            self.assertEqual(
+                candidates[selected_candidate_id]["currentIdentity"]["transactionReference"],
+                "10632674",
+            )
+            self.assertEqual(
+                candidates[selected_candidate_id]["candidateIdentity"]["transactionReference"],
+                "10632674",
+            )
+            self.assertEqual(
+                candidates[remaining_candidate_id]["conflictingIdentityFields"],
+                ["transaction_reference"],
+            )
+
+            rejected = client.post(
+                f"/api/review/{review_id}/resolve",
+                json={
+                    "status": "rejected",
+                    "resolution": "Not the same transaction.",
+                    "corrections": {"duplicateCandidateId": selected_candidate_id},
+                    "learnRule": False,
+                },
+            )
+
+            self.assertEqual(rejected.status_code, 200)
+            self.assertEqual(rejected.get_json()["status"], "candidate_rejected")
+            self.assertEqual(
+                rejected.get_json()["remainingDuplicateCandidateIds"],
+                [remaining_candidate_id],
+            )
+            refreshed = client.get("/api/review?status=open").get_json()
+            self.assertEqual(len(refreshed["workItems"][0]["duplicateCandidates"]), 1)
+            self.assertEqual(
+                refreshed["workItems"][0]["duplicateCandidates"][0]["id"],
+                remaining_candidate_id,
+            )
+            self.assertEqual(
+                refreshed["workItems"][0]["reviewItems"][0]["status"],
+                "in_review",
+            )
+
+    def test_review_summary_separates_non_posting_evidence_from_posting_blocks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "bank-statement-evidence",
+                "originalFilename": "statement.pdf",
+                "documentType": "bank_statement",
+                "processingStatus": "needs_review",
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "non_posting_document_type",
+                "details": "Retain as supporting evidence.",
+            })
+
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            payload = app.test_client().get("/api/review?status=open").get_json()
+
+            self.assertEqual(payload["summary"]["documents"], 1)
+            self.assertEqual(payload["summary"]["postingBlockedDocuments"], 0)
+            self.assertEqual(payload["summary"]["postingBlockedReviewItems"], 0)
+            self.assertEqual(payload["summary"]["evidenceOnlyDocuments"], 1)
+            self.assertEqual(payload["summary"]["evidenceOnlyReviewItems"], 1)
+            self.assertFalse(payload["workItems"][0]["document"]["postingEligible"])
+
+    def test_review_api_prefills_but_does_not_apply_exact_vendor_category_suggestion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "telecom-suggestion",
+                "originalFilename": "invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "category": "Manual Review",
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+            })
+
+            payload = create_app({"fab_local_ledger_path": ledger_path}).test_client().get(
+                "/api/review?status=open"
+            ).get_json()
+
+            suggestion = payload["workItems"][0]["document"]["categorySuggestion"]
+            self.assertEqual(suggestion["category"], "Telecommunications")
+            self.assertTrue(suggestion["requiresApproval"])
+            self.assertEqual(payload["summary"]["categorySuggestions"], 1)
+            self.assertEqual(ledger.get_document(document_id)["category"], "Manual Review")
+
+    def test_review_api_exposes_suppressed_financial_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "invalid-financial-fields",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "category": "Office Supplies",
+                "transactionDate": "3038-06-10",
+                "totalAmount": 59.6,
+                "vatAmount": 8075.08,
+                "confidenceScore": 0.9,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Confirm extracted financial fields.",
+            })
+            LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+
+            payload = create_app({"fab_local_ledger_path": ledger_path}).test_client().get(
+                "/api/review?status=open"
+            ).get_json()
+            document = payload["workItems"][0]["document"]
+
+            self.assertEqual(document["bookkeepingExportStatus"], "blocked_invalid_financial_fields")
+            self.assertIsNone(document["normalizedRecordDate"])
+            self.assertIsNone(document["normalizedVatAmount"])
+            self.assertEqual(
+                {issue["field"] for issue in document["financialFieldIssues"]},
+                {"recordDate", "vatAmount"},
+            )
+
+    def test_review_api_can_apply_an_exact_vendor_category_batch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            review_ids = []
+            for source_id in ("telecom-1", "telecom-2"):
+                document_id = ledger.register_document({
+                    "source": "google_drive",
+                    "sourceDocumentId": source_id,
+                    "originalFilename": f"{source_id}.pdf",
+                    "processingStatus": "needs_review",
+                    "vendorName": "T-Mobile",
+                    "category": "Manual Review",
+                    "transactionDate": "2026-06-28",
+                    "totalAmount": 25.0,
+                    "metadata": {"targetSystem": "waveapps_business"},
+                })
+                review_ids.append(ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": "manual_review_category",
+                    "details": "Choose a category.",
+                }))
+
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            response = app.test_client().post(
+                f"/api/review/{review_ids[0]}/resolve",
+                json={
+                    "status": "approved",
+                    "resolution": "Verified recurring telecom expense.",
+                    "corrections": {
+                        "vendorName": "T-Mobile",
+                        "category": "Operations | Telecommunications",
+                        "transactionDate": "2026-06-28",
+                        "totalAmount": 25.0,
+                        "targetSystem": "waveapps_business",
+                    },
+                    "learnRule": True,
+                    "applyToMatchingVendor": True,
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["batchPropagation"]["appliedDocuments"], 1)
+            self.assertEqual(ledger.get_review_item(review_ids[1])["status"], "approved")
 
     def test_api_registers_and_lists_sources_without_secret_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -334,6 +661,195 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertNotIn("should-not-be-used-here", client.get("/api/sources").data.decode("utf-8"))
             self.assertEqual(sources[0]["metadata"]["token"], "<redacted>")
             self.assertEqual(client.get("/api/audit").get_json()["auditEvents"][0]["action"], "local_api.source.upsert")
+
+    def test_api_installs_and_launches_google_drive_authorization_without_exposing_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            credentials_path = os.path.join(temp_dir, "credentials", "drive.json")
+            token_path = os.path.join(temp_dir, "tokens", "drive.pickle")
+            config = {
+                "fab_local_ledger_path": ledger_path,
+                "google_drive_credentials_file": credentials_path,
+                "google_drive_token_file": token_path,
+                "google_drive_folder_id": "approved-source-folder",
+            }
+            app = create_app(config)
+            client = app.test_client()
+            credentials = json.dumps({
+                "installed": {
+                    "client_id": "fab-api-test.apps.googleusercontent.com",
+                    "client_secret": "api-test-client-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }).encode("utf-8")
+
+            self.assertEqual(
+                client.get("/api/connectors/google-drive/authorization").get_json()["status"],
+                "credentials_required",
+            )
+            invalid = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={"filename": "drive.json", "contentBase64": "not-base64"},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            invalid_replace = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "replace": "false",
+                },
+            )
+            self.assertEqual(invalid_replace.status_code, 400)
+            installed = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "actor": "api_test",
+                },
+            )
+            self.assertEqual(installed.status_code, 201)
+            self.assertEqual(installed.get_json()["status"], "ready_to_authorize")
+            repeated = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={
+                    "filename": "drive.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                },
+            )
+            self.assertEqual(repeated.status_code, 409)
+
+            ledger = LocalOperationsLedger(ledger_path)
+
+            def authorize(settings):
+                os.makedirs(os.path.dirname(settings["google_drive_token_file"]), exist_ok=True)
+                with open(settings["google_drive_token_file"], "wb") as handle:
+                    handle.write(b"test-token")
+                return {"success": True, "status": "authorized", "folderVerified": True}
+
+            app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(
+                ledger,
+                config,
+                authorize=authorize,
+            )
+            started = client.post(
+                "/api/connectors/google-drive/authorization/start",
+                json={"actor": "api_test"},
+            )
+            self.assertEqual(started.status_code, 202)
+            for _ in range(100):
+                status = client.get("/api/connectors/google-drive/authorization").get_json()
+                if not status["authorizationInProgress"]:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status["status"], "authorized")
+            self.assertTrue(status["tokenPresent"])
+            response_text = client.get("/api/audit").data.decode("utf-8")
+            self.assertNotIn("api-test-client-secret", response_text)
+
+    def test_api_installs_and_launches_read_only_gmail_scanner_authorization(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            credentials_path = os.path.join(temp_dir, "credentials", "gmail.json")
+            token_path = os.path.join(temp_dir, "tokens", "gmail.pickle")
+            config = {
+                "fab_local_ledger_path": ledger_path,
+                "gmail_credentials_file": credentials_path,
+                "gmail_token_file": token_path,
+                "gmail_scanner_mode": True,
+                "gmail_trusted_senders": "eprintcenter@hp8.us",
+                "gmail_query": "label:all from:eprintcenter@hp8.us has:attachment filename:pdf",
+            }
+            app = create_app(config)
+            client = app.test_client()
+            credentials = json.dumps({
+                "installed": {
+                    "client_id": "fab-api-test.apps.googleusercontent.com",
+                    "client_secret": "gmail-api-test-client-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }).encode("utf-8")
+
+            initial = client.get("/api/connectors/gmail/authorization").get_json()
+            self.assertEqual(initial["status"], "credentials_required")
+            self.assertTrue(initial["scannerPolicyReady"])
+            installed = client.post(
+                "/api/connectors/gmail/credentials",
+                json={
+                    "filename": "gmail.json",
+                    "contentBase64": base64.b64encode(credentials).decode("ascii"),
+                    "actor": "api_test",
+                },
+            )
+            self.assertEqual(installed.status_code, 201)
+
+            ledger = LocalOperationsLedger(ledger_path)
+
+            def authorize(settings):
+                os.makedirs(os.path.dirname(settings["gmail_token_file"]), exist_ok=True)
+                with open(settings["gmail_token_file"], "wb") as handle:
+                    handle.write(b"test-token")
+                return {
+                    "success": True,
+                    "status": "authorized",
+                    "mailboxVerified": True,
+                    "emailAddress": "bookkeeping@example.com",
+                }
+
+            app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(
+                ledger,
+                config,
+                authorize=authorize,
+            )
+            started = client.post(
+                "/api/connectors/gmail/authorization/start",
+                json={"actor": "api_test"},
+            )
+            self.assertEqual(started.status_code, 202)
+            for _ in range(100):
+                status = client.get("/api/connectors/gmail/authorization").get_json()
+                if not status["authorizationInProgress"]:
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status["status"], "authorized")
+            self.assertTrue(status["tokenPresent"])
+            self.assertEqual(status["emailAddress"], "bookkeeping@example.com")
+            response_text = client.get("/api/audit").data.decode("utf-8")
+            self.assertNotIn("gmail-api-test-client-secret", response_text)
+
+    def test_google_drive_desktop_oauth_mutations_are_loopback_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_host": "0.0.0.0",
+                "fab_local_api_token": "remote-test-token",
+                "google_drive_credentials_file": os.path.join(temp_dir, "drive.json"),
+                "google_drive_token_file": os.path.join(temp_dir, "drive.pickle"),
+                "google_drive_folder_id": "approved-source-folder",
+            })
+            client = app.test_client()
+            headers = {"Authorization": "Bearer remote-test-token"}
+
+            install = client.post(
+                "/api/connectors/google-drive/credentials",
+                json={"filename": "drive.json", "contentBase64": "e30="},
+                headers=headers,
+            )
+            start = client.post(
+                "/api/connectors/google-drive/authorization/start",
+                json={},
+                headers=headers,
+            )
+
+            self.assertEqual(install.status_code, 403)
+            self.assertEqual(start.status_code, 403)
 
     def test_dashboard_renders_ledger_review_and_resolves_from_form(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -515,7 +1031,7 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(detail["review_corrections"][0]["corrected_data"]["category"], "Office Supplies")
             rules = client.get("/api/rules").get_json()["vendorCategoryRules"]
             self.assertEqual(rules[0]["vendor_name"], "Correct Vendor")
-            self.assertEqual(rules[0]["status"], "suggested")
+            self.assertEqual(rules[0]["status"], "approved")
             corrections = client.get(f"/api/corrections?documentId={document_id}").get_json()["reviewCorrections"]
             self.assertEqual(corrections[0]["corrected_data"]["vendorName"], "Correct Vendor")
             records = client.get("/api/bookkeeping-records?status=ready_to_route").get_json()["bookkeepingRecords"]
@@ -2110,6 +2626,52 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Office Supplies", html)
             self.assertIn("vendor_name", html)
             self.assertIn("processed", html)
+
+    def test_api_reprocess_incomplete_is_bounded_and_actor_audited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({"fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3")})
+            client = app.test_client()
+            expected = {
+                "requested": 2,
+                "reprocessed": 2,
+                "ocrRecovered": 1,
+                "externalSubmission": "not_executed",
+            }
+            with patch(
+                "src.operations.local_api.LocalDocumentProcessor.reprocess_incomplete",
+                return_value=expected,
+            ) as reprocess:
+                response = client.post("/api/documents/reprocess-incomplete", json={
+                    "limit": 2,
+                    "actor": "dashboard-operator",
+                })
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), expected)
+            reprocess.assert_called_once_with(limit=2, actor="dashboard-operator")
+
+    def test_api_reprocess_review_queue_is_bounded_and_actor_audited(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({"fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3")})
+            client = app.test_client()
+            expected = {
+                "requested": 3,
+                "reprocessed": 3,
+                "resolvedReviewItems": 2,
+                "externalSubmission": "not_executed",
+            }
+            with patch(
+                "src.operations.local_api.LocalDocumentProcessor.reprocess_review_queue",
+                return_value=expected,
+            ) as reprocess:
+                response = client.post("/api/documents/reprocess-review-queue", json={
+                    "limit": 3,
+                    "actor": "dashboard-operator",
+                })
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), expected)
+            reprocess.assert_called_once_with(limit=3, actor="dashboard-operator")
 
     def test_api_exposes_wave_control_center_without_external_submission(self):
         with tempfile.TemporaryDirectory() as temp_dir:

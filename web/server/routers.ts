@@ -89,8 +89,15 @@ import {
 import {
   FAB_OPERATOR_COMMAND_IDS,
   getFabControlCenter,
+  resolveFabReviewItem,
   runFabOperatorCommand,
+  saveFabWaveSetup,
+  startFabGmailAuthorization,
+  startFabGoogleDriveAuthorization,
+  uploadFabGmailCredentials,
+  uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
+  validateFabWaveSetup,
 } from "./fabLocalGateway";
 import { z } from "zod";
 
@@ -439,6 +446,73 @@ export const appRouter = router({
         contentBase64: z.string().min(4).max(8_500_000),
       }).strict())
       .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    installGmailCredentials: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
+        contentBase64: z.string().min(4).max(90_000),
+        replace: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => uploadFabGmailCredentials({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    startGmailAuthorization: fabOperatorProcedure
+      .mutation(async ({ ctx }) => startFabGmailAuthorization(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
+    installGoogleDriveCredentials: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
+        contentBase64: z.string().min(4).max(90_000),
+        replace: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => uploadFabGoogleDriveCredentials({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    startGoogleDriveAuthorization: fabOperatorProcedure
+      .mutation(async ({ ctx }) => startFabGoogleDriveAuthorization(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
+    saveWaveSetup: fabOperatorProcedure
+      .input(z.object({
+        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
+        accessToken: z.string().trim().min(10).max(16_384).optional(),
+        businessId: z.string().trim().min(1).max(255).optional(),
+        anchorAccountId: z.string().trim().min(1).max(255).optional(),
+        defaultCategoryAccountId: z.string().trim().min(1).max(255).optional(),
+        categoryAccountIds: z.record(z.string().trim().min(1).max(255), z.string().trim().min(1).max(255)).optional(),
+        clearAccessToken: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input, ctx }) => saveFabWaveSetup({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
+    validateWaveSetup: fabOperatorProcedure
+      .input(z.object({
+        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
+      }).strict())
+      .mutation(async ({ input }) => validateFabWaveSetup(input.targetSystem)),
+    resolveReview: fabOperatorProcedure
+      .input(z.object({
+        reviewItemId: z.number().int().positive(),
+        status: z.enum(["approved", "rejected", "resolved", "ignored"]),
+        resolution: z.string().trim().min(3).max(1000),
+        corrections: z.object({
+          vendorName: z.string().trim().min(1).max(255).optional(),
+          category: z.string().trim().min(1).max(255).optional(),
+          transactionDate: z.iso.date().optional(),
+          totalAmount: z.number().finite().nonnegative().optional(),
+          vatAmount: z.number().finite().nonnegative().optional(),
+          targetSystem: z.enum(["waveapps_business", "waveapps_personal", "mijngeldzaken"]).optional(),
+          duplicateOfDocumentId: z.number().int().positive().optional(),
+          duplicateCandidateId: z.number().int().positive().optional(),
+          documentType: z.enum(["receipt", "vendor_invoice", "credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]).optional(),
+        }).strict().optional(),
+        learnRule: z.boolean().optional(),
+        applyToMatchingVendor: z.boolean().optional(),
+      }).strict())
+      .mutation(async ({ input }) => resolveFabReviewItem(input)),
     runCommand: fabOperatorProcedure
       .input(z.object({
         commandId: z.enum(FAB_OPERATOR_COMMAND_IDS),

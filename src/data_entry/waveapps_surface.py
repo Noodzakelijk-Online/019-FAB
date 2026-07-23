@@ -1164,6 +1164,7 @@ WAVE_SURFACE_CATALOG: Dict[str, Any] = {
         "receipt": {"target": "transactions", "fallback": "bills"},
         "card_receipt": {"target": "transactions", "fallback": "bills"},
         "bank_transaction": {"target": "transactions", "fallback": "bills"},
+        "credit_note": {"target": "transactions", "fallback": "bills"},
         "vendor_invoice": {"target": "bills", "fallback": "transactions"},
         "bill": {"target": "bills", "fallback": "transactions"},
         "unpaid_purchase": {"target": "bills", "fallback": "transactions"},
@@ -2668,7 +2669,16 @@ def build_wave_action_payload(
     extracted = data.get("extracted_data", {})
     vendor = extracted.get("vendor_name") or data.get("vendor_name") or ""
     date = extracted.get("transaction_date") or extracted.get("date") or ""
-    amount = extracted.get("total_amount") or extracted.get("amount") or 0.0
+    raw_amount = (
+        extracted.get("total_amount")
+        if extracted.get("total_amount") not in (None, "")
+        else extracted.get("amount")
+        if extracted.get("amount") not in (None, "")
+        else data.get("total_amount")
+    )
+    destination = classify_wave_destination(data)
+    document_type = destination["document_type"]
+    amount = _wave_posting_amount(raw_amount, document_type)
     description = extracted.get("description") or data.get("description") or ""
     action_id = resolve_wave_action_for_document(data)
     line_items = _normalize_wave_line_items(
@@ -2699,6 +2709,8 @@ def build_wave_action_payload(
     return {
         "date": date,
         "amount": amount,
+        "documentType": document_type,
+        "transactionDirection": "deposit" if document_type == "credit_note" else "withdrawal",
         "account": first_line.get("account") or default_account,
         "category": first_line.get("category") or wave_category,
         "description": description,
@@ -2720,9 +2732,20 @@ def _normalize_wave_line_items(
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
             continue
+        amount = _wave_number(
+            raw_item.get("amount")
+            if raw_item.get("amount") not in (None, "")
+            else raw_item.get("total")
+            if raw_item.get("total") not in (None, "")
+            else raw_item.get("total_amount")
+            if raw_item.get("total_amount") not in (None, "")
+            else raw_item.get("totalAmount")
+        )
+        if amount is None:
+            continue
         item = {
             "description": raw_item.get("description") or raw_item.get("item_name") or raw_item.get("itemName") or fallback_description,
-            "amount": raw_item.get("amount") if raw_item.get("amount") not in (None, "") else fallback_amount,
+            "amount": amount,
             "category": raw_item.get("category") or fallback_category,
             "account": (
                 raw_item.get("account")
@@ -2744,14 +2767,45 @@ def _normalize_wave_line_items(
         if tax_amount not in (None, ""):
             item["taxAmount"] = tax_amount
         line_items.append(item)
+    document_total = _wave_number(fallback_amount)
+    line_total = round(sum(float(item["amount"]) for item in line_items), 2)
+    tolerance = max(0.02, abs(document_total or 0.0) * 0.01)
     if line_items:
-        return line_items
+        if document_total is None or abs(line_total - document_total) <= tolerance:
+            return line_items
+        if abs(abs(line_total) - abs(document_total)) <= tolerance:
+            direction = -1.0 if document_total < 0 else 1.0
+            return [
+                {
+                    **item,
+                    "amount": round(abs(float(item["amount"])) * direction, 2),
+                }
+                for item in line_items
+            ]
     return [{
         "description": fallback_description,
-        "amount": fallback_amount,
+        "amount": document_total if document_total is not None else fallback_amount,
         "category": fallback_category,
         "account": default_account,
     }]
+
+
+def _wave_number(value: Any) -> Optional[float]:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _wave_posting_amount(value: Any, document_type: str) -> Any:
+    amount = _wave_number(value)
+    if amount is None:
+        return value if value not in (None, "") else 0.0
+    if document_type == "credit_note":
+        return -abs(amount)
+    return amount
 
 
 def build_wave_expense_import_row(
@@ -2765,9 +2819,14 @@ def build_wave_expense_import_row(
         description = f"{description} {description_suffix}".strip()
 
     destination = classify_wave_destination(data)
+    raw_amount = (
+        extracted.get("total_amount")
+        if extracted.get("total_amount") not in (None, "")
+        else extracted.get("amount")
+    )
     return {
         "Date": extracted.get("transaction_date") or extracted.get("date") or "",
-        "Amount": extracted.get("total_amount") or extracted.get("amount") or 0.0,
+        "Amount": _wave_posting_amount(raw_amount, destination["document_type"]),
         "Description": description,
         "Category": wave_category,
         "Vendor": extracted.get("vendor_name") or data.get("vendor_name") or "",

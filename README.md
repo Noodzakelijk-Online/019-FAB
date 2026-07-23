@@ -3,8 +3,10 @@
 ## Overview
 This project aims to develop a fully automated system to fetch financial documents from various sources, extract relevant data, categorize them based on predefined rules, and enter the data into mijngeldzaken.nl and Waveapps accounts.
 
+The governed cutover from repository 025's Apps Script is documented in [docs/scanner_mailbox_migration.md](docs/scanner_mailbox_migration.md).
+
 ## Features
-- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
+- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Gmail can run as a strict scanner mailbox: exact trusted sender, PDF filename/MIME/signature validation, immutable local evidence, and no deletion or mutation of the source email. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
 - **Advanced Document Processing**: Utilizes OCR (Tesseract, Google Cloud Vision), including Dutch OCR, handwritten recognition, template matching, and line item extraction.
 - **Intelligent Categorization**: Employs rule-based, machine learning, and hybrid categorization approaches.
 - **Automated Data Entry**: Supports data entry into mijngeldzaken.nl (via browser automation) and Waveapps (via API).
@@ -220,9 +222,49 @@ On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
 the ignored local configuration files when needed, installs missing dashboard
 and Python runtime dependencies, provisions Tesseract plus Dutch/English OCR
 data and Poppler PDF tools when `winget` is available, starts the ledger API,
-autonomous worker, and dashboard on loopback, then opens the control room.
-Double-click `Stop-FAB.cmd` to stop only the processes recorded by that FAB
-runtime. Runtime logs are written under `logs/`.
+autonomous worker, and a current production build of the dashboard on loopback,
+then opens the control room. Use `.\Start-FAB.ps1 -Development` only when
+actively changing dashboard source code.
+Double-click `Stop-FAB.cmd` to stop only processes whose service identity and
+project root match this FAB checkout. Runtime logs are written under `logs/`.
+
+The launcher verifies FAB-specific service identity instead of trusting an
+occupied port. If another application uses `3000` or `5001`, FAB selects a
+free loopback port, records the actual URLs in `data/fab-runtime.json`, and
+opens the correct dashboard. It also repairs stale PID metadata by
+rediscovering the matching API, dashboard listener and singleton worker. The
+dashboard process tree is adopted only after its runtime identity, checkout and
+local API endpoint match, so repeated starts do not create duplicate
+bookkeeping loops or move the dashboard to another port. `Stop-FAB.cmd`
+performs the same discovery when runtime metadata is stale or missing.
+
+For Google Drive intake and verified move-only archival, place a Google OAuth
+desktop client JSON at `credentials/drive_credentials.json`, then double-click
+`Authorize-FAB-GoogleDrive.cmd`. The supervised flow opens Google in your
+browser, writes `tokens/drive_token.pickle`, verifies access to the configured
+intake folder, and never prints or stores the token in the ledger.
+
+Configure Wave from the **Connections** section of the operator dashboard.
+Open **Wave - Noodzakelijk Online**, store the user-owned API token and business
+ID, run the read-only business validation, then map each in-use FAB category
+intent to an expense account returned by Wave. Reviewers can classify and teach
+FAB before Wave is connected because the intent is local; posting remains
+blocked until the intent has an explicit, live-verified Wave account ID. A
+default expense account can be retained for supervised drafts, but autonomous
+posting never uses it to hide a missing mapping. FAB encrypts these local
+settings and, on Windows, protects the encryption key with DPAPI for the current
+user. The token is never returned to the browser, ledger, audit log, or API
+status response. Environment variables remain supported and take precedence
+over dashboard settings.
+
+The review workspace prefills explainable category intents only for exact
+normalized matches to FAB's conservative vendor taxonomy. The suggestion is
+never applied until the source-backed decision is approved. When **Teach FAB**
+is checked, that explicit approval becomes an approved exact-vendor rule for
+future documents instead of requiring a second approval. **Reassess review
+queue** creates a ledger backup, reruns current extraction and validation
+against retained OCR once per algorithm version, preserves manual corrections
+and duplicate gates, and never reruns OCR or submits externally.
 
 For manual startup or development:
 
@@ -250,17 +292,32 @@ For manual startup or development:
    **Detailed ledger** opens the complete local document, review,
    reconciliation, reporting, backup, and approval interface.
 
-Set `FAB_LOCAL_API_TOKEN` in `web/.env` to the same value as
-`operations.api_token` in `config/config.ini` when API authentication is
-enabled. The token is used only by the web server and is never sent to the
+`Start-FAB.cmd` passes `operations.api_token` to the dashboard server without
+printing it. For manual startup, set `FAB_LOCAL_API_TOKEN` in `web/.env` to the
+same value. The token is used only by the web server and is never sent to the
 browser. Local operator access accepts direct loopback requests in development;
 deployed environments require an authenticated administrator unless
 `FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
 
 The HAI connector publishes discovery at `/api/hai/manifest` and status at
 `/api/hai/status`. The default local configuration enables the bounded
-safe-command allowlist used by the dashboard. HAI cannot approve, export,
+governed-command allowlist used by the dashboard. HAI cannot approve, export,
 restore, change access controls, or submit downstream bookkeeping changes.
+
+Source-to-Wave executor handoff is available at
+`GET /api/drive-wave/work-orders` and is advertised by the HAI manifest as the
+read-only resource `wave_attachment_work_orders`. Authenticated connectors can
+submit exact configured-folder bytes through `google_drive_binary_relay`; after
+Wave upload they must submit the attachment downloaded back from Wave through
+`wave_attachment_binary_readback`. Each work order binds one Drive file or
+trusted Gmail scanner attachment and SHA-256 to FAB's expected Wave fields,
+line items, transaction reference, server-computed attachment readback
+evidence, and source retention policy. Metadata attestation or a visible
+receipt icon cannot complete delivery or unlock archival. FAB compares the
+observed Wave values itself; executor-supplied match booleans are ignored, and
+later field changes invalidate older evidence. Gmail source messages and local
+evidence are never mutated or deleted. The dashboard exposes the same state in
+**Source to Wave delivery**.
 
 ### Running the Workflow Locally
 To run the main automated bookkeeping workflow:

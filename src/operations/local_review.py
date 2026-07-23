@@ -1,13 +1,28 @@
+from datetime import date
 from typing import Any, Dict, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_targets import resolve_document_target_system
 
 
 APPLIED_REVIEW_STATUSES = {"approved", "resolved"}
 OPEN_REVIEW_STATUSES = {"pending", "in_review"}
 RECONCILIATION_REVIEW_REASONS = {"reconciliation_candidate", "missing_receipt", "unmatched_document"}
+CATEGORY_REVIEW_REASONS = {"low_confidence_categorization", "manual_review_category"}
+BATCH_VENDOR_CATEGORY_REASONS = CATEGORY_REVIEW_REASONS
+CORRECTABLE_DOCUMENT_TYPES = {
+    "bank_statement",
+    "credit_note",
+    "estimate",
+    "government_correspondence",
+    "insurance_policy",
+    "order_confirmation",
+    "receipt",
+    "vendor_invoice",
+}
 
 
 class LocalReviewService:
@@ -23,18 +38,63 @@ class LocalReviewService:
         resolution: Optional[str] = None,
         corrections: Optional[Dict[str, Any]] = None,
         learn_rule: bool = True,
+        apply_to_matching_vendor: bool = False,
     ) -> Dict[str, Any]:
         review_item = self.ledger.get_review_item(review_item_id)
         if not review_item:
             return {"success": False, "error": "Review item not found", "status": "not_found"}
+        if review_item.get("status") not in OPEN_REVIEW_STATUSES:
+            return {
+                "success": False,
+                "error": "Review item is already closed",
+                "status": "already_resolved",
+                "reviewItemId": review_item_id,
+            }
 
         document = self.ledger.get_document(int(review_item["document_id"])) if review_item.get("document_id") else None
         normalized_corrections = normalize_corrections(corrections or {})
+        if document and review_item.get("reason") == "duplicate_candidate":
+            open_duplicate_candidates = [
+                item
+                for item in document.get("duplicate_candidates") or []
+                if item.get("status") in OPEN_REVIEW_STATUSES
+            ]
+            if not normalized_corrections.get("duplicateCandidateId"):
+                if len(open_duplicate_candidates) != 1:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Select one duplicate candidate before resolving this review"
+                            if open_duplicate_candidates
+                            else "No open duplicate candidate belongs to this review"
+                        ),
+                        "status": (
+                            "duplicate_candidate_selection_required"
+                            if open_duplicate_candidates
+                            else "duplicate_candidate_not_found"
+                        ),
+                    }
+                selected_candidate = open_duplicate_candidates[0]
+                normalized_corrections["duplicateCandidateId"] = int(selected_candidate["id"])
+                if status == "approved" and not normalized_corrections.get("duplicateOfDocumentId"):
+                    normalized_corrections["duplicateOfDocumentId"] = (
+                        int(selected_candidate["candidate_document_id"])
+                        if int(selected_candidate["document_id"]) == int(document["id"])
+                        else int(selected_candidate["document_id"])
+                    )
+            return self._resolve_duplicate_candidate_review(
+                review_item=review_item,
+                document=document,
+                status=status,
+                resolution=resolution,
+                corrections=normalized_corrections,
+            )
         original_data = _document_snapshot(document) if document else {}
         document_update = {}
         rule_id = None
         reconciliation_resolution = None
         duplicate_candidate_resolution = None
+        duplicate_decision = None
 
         if document:
             document_update = _build_document_update(document, normalized_corrections)
@@ -56,7 +116,7 @@ class LocalReviewService:
                 )
 
             if status in APPLIED_REVIEW_STATUSES and document_update.get("processingStatus") is None:
-                document_update["processingStatus"] = "reviewed"
+                document_update["processingStatus"] = "needs_review"
 
             if document_update:
                 self.ledger.update_document(int(document["id"]), document_update)
@@ -80,6 +140,27 @@ class LocalReviewService:
         )
 
         updated_document = self.ledger.get_document(int(review_item["document_id"])) if review_item.get("document_id") else None
+        superseded_review_ids = self._resolve_superseded_document_reviews(
+            review_item,
+            status,
+            normalized_corrections,
+            updated_document,
+        )
+        updated_document = self.ledger.get_document(int(review_item["document_id"])) if review_item.get("document_id") else None
+        remaining_review_items = [
+            item
+            for item in (updated_document or {}).get("review_items") or []
+            if item.get("status") in OPEN_REVIEW_STATUSES
+        ]
+        final_processing_status = self._final_processing_status(
+            review_item,
+            status,
+            duplicate_decision,
+            remaining_review_items,
+        )
+        if updated_document and updated_document.get("processing_status") != final_processing_status:
+            self.ledger.update_document(int(updated_document["id"]), {"processingStatus": final_processing_status})
+            updated_document = self.ledger.get_document(int(updated_document["id"]))
         if learn_rule and status in APPLIED_REVIEW_STATUSES and updated_document:
             rule_id = self._learn_vendor_category_rule(updated_document, review_item_id, correction_id)
 
@@ -108,6 +189,9 @@ class LocalReviewService:
                 "ruleId": rule_id,
                 "reconciliationResolution": reconciliation_resolution,
                 "duplicateCandidatesResolved": duplicate_candidate_resolution,
+                "supersededReviewItemIds": superseded_review_ids,
+                "remainingReviewItemIds": [int(item["id"]) for item in remaining_review_items],
+                "processingStatus": final_processing_status,
                 "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
                 "corrections": normalized_corrections,
             },
@@ -125,6 +209,16 @@ class LocalReviewService:
                 },
             })
 
+        batch_propagation = None
+        if apply_to_matching_vendor:
+            batch_propagation = self._apply_vendor_category_to_matching_reviews(
+                primary_review_item=review_item,
+                primary_document=updated_document,
+                status=status,
+                resolution=resolution,
+                corrections=normalized_corrections,
+            )
+
         return {
             "success": True,
             "reviewItemId": review_item_id,
@@ -134,9 +228,433 @@ class LocalReviewService:
             "ruleId": rule_id,
             "reconciliationResolution": reconciliation_resolution,
             "duplicateCandidatesResolved": duplicate_candidate_resolution,
+            "supersededReviewItemIds": superseded_review_ids,
+            "remainingReviewItems": remaining_review_items,
+            "processingStatus": final_processing_status,
             "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
             "corrections": normalized_corrections,
+            "batchPropagation": batch_propagation,
         }
+
+    def _resolve_duplicate_candidate_review(
+        self,
+        review_item: Dict[str, Any],
+        document: Dict[str, Any],
+        status: str,
+        resolution: Optional[str],
+        corrections: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if status not in {"approved", "rejected"}:
+            return {
+                "success": False,
+                "error": "Duplicate candidates must be approved or rejected",
+                "status": "invalid_duplicate_decision",
+            }
+
+        candidate_id = int(corrections["duplicateCandidateId"])
+        candidate = self.ledger.get_duplicate_candidate(candidate_id)
+        if not candidate:
+            return {
+                "success": False,
+                "error": "Duplicate candidate not found",
+                "status": "duplicate_candidate_not_found",
+            }
+        if candidate.get("status") not in OPEN_REVIEW_STATUSES:
+            return {
+                "success": False,
+                "error": "Duplicate candidate is already closed",
+                "status": "duplicate_candidate_already_resolved",
+                "duplicateCandidateId": candidate_id,
+            }
+
+        document_id = int(document["id"])
+        pair_document_ids = {
+            int(candidate["document_id"]),
+            int(candidate["candidate_document_id"]),
+        }
+        if document_id not in pair_document_ids:
+            return {
+                "success": False,
+                "error": "Duplicate candidate does not belong to this review document",
+                "status": "duplicate_candidate_mismatch",
+            }
+        counterpart_document_id = next(
+            pair_id for pair_id in pair_document_ids if pair_id != document_id
+        )
+        accepted = status == "approved"
+        if accepted and corrections.get("duplicateOfDocumentId") != counterpart_document_id:
+            return {
+                "success": False,
+                "error": "The canonical document must match the selected duplicate candidate",
+                "status": "duplicate_candidate_mismatch",
+            }
+
+        review_item_id = int(review_item["id"])
+        original_data = _document_snapshot(document)
+        decision = "same_transaction" if accepted else "different_transaction"
+        candidate_resolution = resolution or (
+            f"Confirmed as the same transaction as document #{counterpart_document_id}."
+            if accepted
+            else f"Confirmed as a different transaction from document #{counterpart_document_id}."
+        )
+        self.ledger.resolve_duplicate_candidate(
+            candidate_id,
+            "approved" if accepted else "rejected",
+            candidate_resolution,
+            evidence={
+                "reviewItemId": review_item_id,
+                "operatorDecision": decision,
+                "counterpartDocumentId": counterpart_document_id,
+                "sourceFilesRetained": True,
+            },
+        )
+        duplicate_candidates_resolved = 1
+
+        if accepted:
+            for other_candidate in document.get("duplicate_candidates") or []:
+                other_candidate_id = int(other_candidate.get("id") or 0)
+                if (
+                    not other_candidate_id
+                    or other_candidate_id == candidate_id
+                    or other_candidate.get("status") not in OPEN_REVIEW_STATUSES
+                ):
+                    continue
+                if self.ledger.resolve_duplicate_candidate(
+                    other_candidate_id,
+                    "rejected",
+                    (
+                        f"Superseded by approved duplicate candidate #{candidate_id}; "
+                        f"document #{counterpart_document_id} is the selected canonical record."
+                    ),
+                    evidence={
+                        "reviewItemId": review_item_id,
+                        "operatorDecision": "superseded",
+                        "supersededByDuplicateCandidateId": candidate_id,
+                        "sourceFilesRetained": True,
+                    },
+                ):
+                    duplicate_candidates_resolved += 1
+            self.ledger.update_document(document_id, {
+                "duplicateOfDocumentId": counterpart_document_id,
+                "processingStatus": "duplicate",
+            })
+        elif document.get("duplicate_of_document_id") == counterpart_document_id:
+            self.ledger.clear_document_duplicate(document_id)
+
+        refreshed_document = self.ledger.get_document(document_id) or document
+        remaining_duplicate_candidates = [
+            item
+            for item in refreshed_document.get("duplicate_candidates") or []
+            if item.get("status") in OPEN_REVIEW_STATUSES
+        ]
+        close_review = accepted or not remaining_duplicate_candidates
+        correction_status = status if close_review else "candidate_rejected"
+        correction_id = self.ledger.record_review_correction({
+            "reviewItemId": review_item_id,
+            "documentId": document_id,
+            "originalData": original_data,
+            "correctedData": corrections,
+            "status": correction_status,
+        })
+        if close_review:
+            self.ledger.resolve_review_item(
+                review_item_id,
+                status=status,
+                resolution=candidate_resolution,
+                corrected_data={
+                    "corrections": corrections,
+                    "correctionId": correction_id,
+                    "duplicateCandidateId": candidate_id,
+                },
+            )
+        else:
+            self.ledger.resolve_review_item(
+                review_item_id,
+                status="in_review",
+                resolution=(
+                    f"Candidate #{candidate_id} rejected; "
+                    f"{len(remaining_duplicate_candidates)} candidate(s) still require review."
+                ),
+                corrected_data={
+                    "lastDuplicateCandidateDecision": {
+                        "duplicateCandidateId": candidate_id,
+                        "counterpartDocumentId": counterpart_document_id,
+                        "decision": decision,
+                        "correctionId": correction_id,
+                    },
+                },
+            )
+
+        updated_document = self.ledger.get_document(document_id) or document
+        superseded_review_ids = []
+        if accepted:
+            superseded_review_ids = self._resolve_superseded_document_reviews(
+                review_item,
+                status,
+                corrections,
+                updated_document,
+            )
+            updated_document = self.ledger.get_document(document_id) or updated_document
+
+        remaining_review_items = [
+            item
+            for item in updated_document.get("review_items") or []
+            if item.get("status") in OPEN_REVIEW_STATUSES
+        ]
+        if accepted:
+            final_processing_status = "duplicate"
+        elif remaining_review_items:
+            final_processing_status = "needs_review"
+        else:
+            final_processing_status = "reviewed"
+        if updated_document.get("processing_status") != final_processing_status:
+            self.ledger.update_document(
+                document_id,
+                {"processingStatus": final_processing_status},
+            )
+            updated_document = self.ledger.get_document(document_id) or updated_document
+
+        bookkeeping_record = LocalBookkeepingRecordService(self.ledger).upsert_from_document(
+            document_id
+        )
+        result_status = status if close_review else "candidate_rejected"
+        audit_details = {
+            "status": result_status,
+            "resolution": candidate_resolution,
+            "documentId": document_id,
+            "duplicateCandidateId": candidate_id,
+            "counterpartDocumentId": counterpart_document_id,
+            "operatorDecision": decision,
+            "correctionId": correction_id,
+            "duplicateCandidatesResolved": duplicate_candidates_resolved,
+            "remainingDuplicateCandidateIds": [
+                int(item["id"]) for item in remaining_duplicate_candidates
+            ],
+            "supersededReviewItemIds": superseded_review_ids,
+            "remainingReviewItemIds": [
+                int(item["id"]) for item in remaining_review_items
+            ],
+            "processingStatus": final_processing_status,
+            "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
+            "sourceFilesRetained": True,
+        }
+        self.ledger.record_audit_event({
+            "action": "local_review.duplicate_candidate.resolve",
+            "entityType": "duplicate_candidate",
+            "entityId": str(candidate_id),
+            "details": audit_details,
+        })
+        self.ledger.record_audit_event({
+            "action": "local_review.review_item.resolve",
+            "entityType": "review_item",
+            "entityId": str(review_item_id),
+            "details": audit_details,
+        })
+
+        return {
+            "success": True,
+            "reviewItemId": review_item_id,
+            "documentId": document_id,
+            "status": result_status,
+            "reviewItemStatus": status if close_review else "in_review",
+            "duplicateCandidateId": candidate_id,
+            "counterpartDocumentId": counterpart_document_id,
+            "correctionId": correction_id,
+            "duplicateCandidatesResolved": duplicate_candidates_resolved,
+            "remainingDuplicateCandidateIds": [
+                int(item["id"]) for item in remaining_duplicate_candidates
+            ],
+            "supersededReviewItemIds": superseded_review_ids,
+            "remainingReviewItems": remaining_review_items,
+            "processingStatus": final_processing_status,
+            "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
+            "corrections": corrections,
+            "sourceFilesRetained": True,
+        }
+
+    def _apply_vendor_category_to_matching_reviews(
+        self,
+        primary_review_item: Dict[str, Any],
+        primary_document: Optional[Dict[str, Any]],
+        status: str,
+        resolution: Optional[str],
+        corrections: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        vendor_name = str(corrections.get("vendorName") or (primary_document or {}).get("vendor_name") or "").strip()
+        category = str(corrections.get("category") or (primary_document or {}).get("category") or "").strip()
+        target_system = str(corrections.get("targetSystem") or _target_system(primary_document or {})).strip()
+        primary_document_id = _int(primary_review_item.get("document_id"))
+        result = {
+            "requested": True,
+            "policy": "exact_normalized_vendor_and_target_system",
+            "vendorName": vendor_name,
+            "category": category,
+            "targetSystem": target_system,
+            "matchedDocuments": 0,
+            "appliedDocuments": 0,
+            "appliedReviewItemIds": [],
+            "skipped": [],
+        }
+
+        invalid_reason = None
+        if status not in APPLIED_REVIEW_STATUSES:
+            invalid_reason = "primary_review_not_approved"
+        elif str(primary_review_item.get("reason") or "") not in BATCH_VENDOR_CATEGORY_REASONS:
+            invalid_reason = "primary_review_is_not_a_category_or_validation_gate"
+        elif not _normalized_vendor_key(vendor_name):
+            invalid_reason = "vendor_missing"
+        elif not category or category.lower() in {"manual review", "uncategorized"}:
+            invalid_reason = "verified_category_missing"
+        elif not target_system:
+            invalid_reason = "target_system_missing"
+        elif primary_document_id is None:
+            invalid_reason = "primary_document_missing"
+        if invalid_reason:
+            result["status"] = "not_applied"
+            result["reason"] = invalid_reason
+            self._record_vendor_category_batch_audit(primary_review_item, result)
+            return result
+
+        candidate_reviews = {}
+        scan_offset = 0
+        while True:
+            review_page = self.ledger.list_review_items(
+                status=tuple(OPEN_REVIEW_STATUSES),
+                limit=500,
+                offset=scan_offset,
+            )
+            for item in review_page:
+                document_id = _int(item.get("document_id"))
+                if document_id is None or document_id == primary_document_id:
+                    continue
+                if str(item.get("reason") or "") not in BATCH_VENDOR_CATEGORY_REASONS:
+                    continue
+                current = candidate_reviews.get(document_id)
+                if current is None or _batch_review_priority(item) < _batch_review_priority(current):
+                    candidate_reviews[document_id] = item
+            if len(review_page) < 500:
+                break
+            scan_offset += len(review_page)
+
+        vendor_key = _normalized_vendor_key(vendor_name)
+        for document_id, candidate_review in sorted(candidate_reviews.items()):
+            document = self.ledger.get_document(document_id)
+            if not document:
+                result["skipped"].append({"documentId": document_id, "reason": "document_missing"})
+                continue
+            if _normalized_vendor_key(document.get("vendor_name")) != vendor_key:
+                continue
+            if _target_system(document) != target_system:
+                continue
+            if document.get("duplicate_of_document_id") or str(document.get("processing_status") or "") == "duplicate":
+                result["skipped"].append({"documentId": document_id, "reason": "document_marked_duplicate"})
+                continue
+
+            result["matchedDocuments"] += 1
+            candidate_id = int(candidate_review["id"])
+            candidate_result = self.resolve_review_item(
+                candidate_id,
+                status="approved",
+                resolution=(
+                    f"Exact-vendor category decision propagated from review item #{primary_review_item['id']}. "
+                    f"{resolution or 'Verified by the operator.'}"
+                ),
+                corrections={"category": category, "targetSystem": target_system},
+                learn_rule=False,
+                apply_to_matching_vendor=False,
+            )
+            if candidate_result.get("success"):
+                result["appliedDocuments"] += 1
+                result["appliedReviewItemIds"].append(candidate_id)
+            else:
+                result["skipped"].append({
+                    "documentId": document_id,
+                    "reviewItemId": candidate_id,
+                    "reason": candidate_result.get("status") or "resolution_failed",
+                })
+
+        result["status"] = "applied"
+        result["reviewItemsScanned"] = scan_offset + len(review_page)
+        self._record_vendor_category_batch_audit(primary_review_item, result)
+        return result
+
+    def _record_vendor_category_batch_audit(
+        self,
+        primary_review_item: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        self.ledger.record_audit_event({
+            "action": "local_review.vendor_category_batch.resolve",
+            "entityType": "review_item",
+            "entityId": str(primary_review_item["id"]),
+            "details": result,
+        })
+
+    def _resolve_superseded_document_reviews(
+        self,
+        review_item: Dict[str, Any],
+        status: str,
+        corrections: Dict[str, Any],
+        document: Optional[Dict[str, Any]],
+    ) -> list:
+        if not document or status not in APPLIED_REVIEW_STATUSES:
+            return []
+        duplicate_decision = _duplicate_decision(review_item, status, corrections)
+        reasons = set()
+        if duplicate_decision == "accepted":
+            reasons = {
+                str(item.get("reason") or "")
+                for item in document.get("review_items") or []
+                if item.get("status") in OPEN_REVIEW_STATUSES
+            }
+        else:
+            category = str(document.get("category") or "").strip().lower()
+            if category and category not in {"manual review", "uncategorized"}:
+                reasons.update(CATEGORY_REVIEW_REASONS)
+            if _has_valid_required_fields(document):
+                reasons.add("validation_failed")
+            if corrections.get("documentType"):
+                reasons.update({
+                    "credit_note_posting_review",
+                    "document_type_conflict",
+                    "non_posting_document_type",
+                })
+
+        resolved_ids = []
+        for item in document.get("review_items") or []:
+            if item.get("status") not in OPEN_REVIEW_STATUSES:
+                continue
+            if str(item.get("reason") or "") not in reasons:
+                continue
+            item_id = int(item["id"])
+            self.ledger.resolve_review_item(
+                item_id,
+                status="resolved",
+                resolution=f"Superseded by approved review item #{review_item['id']}.",
+                corrected_data={
+                    "supersededByReviewItemId": int(review_item["id"]),
+                    "appliedCorrections": corrections,
+                },
+            )
+            resolved_ids.append(item_id)
+        return resolved_ids
+
+    @staticmethod
+    def _final_processing_status(
+        review_item: Dict[str, Any],
+        status: str,
+        duplicate_decision: Optional[str],
+        remaining_review_items: list,
+    ) -> str:
+        if duplicate_decision == "accepted":
+            return "duplicate"
+        if remaining_review_items:
+            return "needs_review"
+        if duplicate_decision == "rejected":
+            return "reviewed"
+        if status in APPLIED_REVIEW_STATUSES:
+            return "reviewed"
+        return "needs_review"
 
     def _learn_vendor_category_rule(
         self,
@@ -144,26 +662,32 @@ class LocalReviewService:
         review_item_id: int,
         correction_id: int,
     ) -> Optional[int]:
+        if is_non_posting_document_type(document.get("document_type")):
+            return None
         vendor_name = str(document.get("vendor_name") or "").strip()
         category = str(document.get("category") or "").strip()
-        if not vendor_name or not category:
+        if not vendor_name or not category or category.lower() in {"manual review", "uncategorized"}:
             return None
         rule_id = self.ledger.upsert_vendor_category_rule({
             "vendorName": vendor_name,
             "category": category,
             "targetSystem": _target_system(document),
             "confidenceScore": 1.0,
-            "status": "suggested",
+            "status": "approved",
             "sourceDocumentId": document.get("source_document_id"),
             "metadata": {
-                "source": "manual_review_correction",
+                "source": "operator_approved_review_correction",
+                "approval": {
+                    "reviewItemId": review_item_id,
+                    "correctionId": correction_id,
+                },
                 "documentId": document.get("id"),
                 "reviewItemId": review_item_id,
                 "correctionId": correction_id,
             },
         })
         self.ledger.record_audit_event({
-            "action": "local_review.vendor_category_rule.suggested",
+            "action": "local_review.vendor_category_rule.approved",
             "entityType": "vendor_category_rule",
             "entityId": str(rule_id),
             "details": {
@@ -218,6 +742,10 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
         "targetSystem": "targetSystem",
         "duplicate_of_document_id": "duplicateOfDocumentId",
         "duplicateOfDocumentId": "duplicateOfDocumentId",
+        "duplicate_candidate_id": "duplicateCandidateId",
+        "duplicateCandidateId": "duplicateCandidateId",
+        "document_type": "documentType",
+        "documentType": "documentType",
     }
     for key, value in corrections.items():
         mapped = mapping.get(key)
@@ -228,10 +756,15 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
             if parsed is not None:
                 result[mapped] = parsed
             continue
-        if mapped == "duplicateOfDocumentId":
+        if mapped in {"duplicateOfDocumentId", "duplicateCandidateId"}:
             parsed_id = _int(value)
             if parsed_id is not None:
                 result[mapped] = parsed_id
+            continue
+        if mapped == "documentType":
+            document_type = str(value).strip().lower()
+            if document_type in CORRECTABLE_DOCUMENT_TYPES:
+                result[mapped] = document_type
             continue
         result[mapped] = str(value).strip()
     return result
@@ -260,6 +793,16 @@ def _build_document_update(document: Dict[str, Any], corrections: Dict[str, Any]
         update["duplicateOfDocumentId"] = corrections["duplicateOfDocumentId"]
     if "targetSystem" in corrections:
         metadata["targetSystem"] = corrections["targetSystem"]
+    if "documentType" in corrections:
+        document_type = corrections["documentType"]
+        update["documentType"] = document_type
+        extracted_data["document_type"] = document_type
+        metadata.setdefault("review", {})["documentTypeOverride"] = {
+            "documentType": document_type,
+            "source": "manual_review_correction",
+        }
+        if is_non_posting_document_type(document_type):
+            update["category"] = "Supporting Evidence"
 
     if corrections:
         extracted_data.setdefault("manual_corrections", {}).update(corrections)
@@ -295,9 +838,35 @@ def _document_snapshot(document: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _has_valid_required_fields(document: Dict[str, Any]) -> bool:
+    vendor_name = str(document.get("vendor_name") or "").strip()
+    category = str(document.get("category") or "").strip().lower()
+    transaction_date = str(document.get("transaction_date") or "").strip()
+    try:
+        date.fromisoformat(transaction_date)
+    except ValueError:
+        return False
+    return bool(
+        vendor_name
+        and category
+        and category not in {"manual review", "uncategorized"}
+        and _float(document.get("total_amount")) is not None
+    )
+
+
 def _target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    return str(metadata.get("targetSystem") or metadata.get("target_system") or "none")
+    return resolve_document_target_system(document, default="none")
+
+
+def _normalized_vendor_key(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _batch_review_priority(review_item: Dict[str, Any]) -> int:
+    return {
+        "manual_review_category": 0,
+        "low_confidence_categorization": 1,
+    }.get(str(review_item.get("reason") or ""), 99)
 
 
 def _reconciliation_match_id(review_item: Dict[str, Any]) -> Optional[int]:

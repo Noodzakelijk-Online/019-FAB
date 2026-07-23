@@ -20,6 +20,7 @@ from src.data_entry.waveapps_personal_handler import WaveappsPersonalHandler
 from src.utils.rate_limiter import reset_all_limiters
 from src.data_entry.waveapps_surface import (
     WAVE_SURFACE_CATALOG,
+    build_wave_action_payload,
     build_wave_report_payload,
     classify_wave_destination,
     list_wave_actions,
@@ -178,6 +179,39 @@ class TestDataEntry(unittest.TestCase):
         self.assertEqual(row["Vendor"], "Local Supermarket")
         # Clean up generated CSV
         os.remove(csv_path)
+
+    @patch("src.data_entry.waveapps_business_handler.requests.post")
+    def test_waveapps_business_credit_note_posts_a_deposit(self, mock_post):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "data": {
+                "moneyTransactionCreate": {
+                    "didSucceed": True,
+                    "transaction": {"id": "vendor-credit-1"},
+                }
+            }
+        }
+        mock_post.return_value = response
+        credit_note = {
+            **self.dummy_processed_data,
+            "document_type": "credit_note",
+            "category": "Business",
+            "extracted_data": {
+                **self.dummy_processed_data["extracted_data"],
+                "document_type": "credit_note",
+                "total_amount": -45.50,
+                "description": "Supplier refund",
+            },
+        }
+
+        result = WaveappsBusinessHandler(self.config).enter_data(credit_note)
+
+        self.assertEqual(result["status"], "success")
+        request_input = mock_post.call_args.kwargs["json"]["variables"]["input"]
+        self.assertEqual(request_input["anchor"]["amount"], 45.5)
+        self.assertEqual(request_input["anchor"]["direction"], "DEPOSIT")
+        self.assertEqual(request_input["lineItems"][0]["balance"], "DECREASE")
 
     def test_mijngeldzaken_surface_catalog_and_operator(self):
         row = build_mijngeldzaken_import_row(
@@ -373,6 +407,50 @@ class TestDataEntry(unittest.TestCase):
         self.assertEqual(account_transactions_payload["fromDate"], "2026-06-28")
         self.assertEqual(account_transactions_payload["format"], "csv")
         self.assertEqual(balance_sheet_payload["asOfDate"], "2026-06-28")
+
+    def test_wave_payload_uses_reconciled_ocr_line_totals(self):
+        payload = build_wave_action_payload(
+            {
+                "document_type": "receipt",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 25.10,
+                    "line_items": [{"description": "Hardware", "total": 25.10}],
+                },
+            },
+            "Construction Materials & Tools",
+            default_account="materials-account",
+        )
+
+        self.assertEqual(payload["lineItems"], [{
+            "description": "Hardware",
+            "amount": 25.10,
+            "category": "Construction Materials & Tools",
+            "account": "materials-account",
+        }])
+
+    def test_wave_payload_never_repeats_document_total_for_uncertain_lines(self):
+        payload = build_wave_action_payload(
+            {
+                "document_type": "receipt",
+                "extracted_data": {
+                    "vendor_name": "Praxis",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 25.10,
+                    "line_items": [
+                        {"description": "OCR gross column", "total": 28.10},
+                        {"description": "Unpriced OCR row"},
+                    ],
+                },
+            },
+            "Construction Materials & Tools",
+            default_account="materials-account",
+        )
+
+        self.assertEqual(len(payload["lineItems"]), 1)
+        self.assertEqual(payload["lineItems"][0]["amount"], 25.10)
+        self.assertEqual(payload["lineItems"][0]["description"], "Praxis")
 
     def test_waveapps_action_planner(self):
         transaction_plan = plan_wave_action(

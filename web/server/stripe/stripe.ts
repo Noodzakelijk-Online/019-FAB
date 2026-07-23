@@ -101,8 +101,8 @@ export async function getOrCreateStripeCustomer(
 }
 
 /**
- * Create a Stripe Checkout Session for subscription.
- * Returns the checkout URL. Throws if session creation fails.
+ * Create a Checkout Session that stores a payment method for usage billing.
+ * It creates no recurring price or fixed fee.
  */
 export async function createCheckoutSession(params: {
   userId: number;
@@ -110,35 +110,20 @@ export async function createCheckoutSession(params: {
   userName?: string | null;
   stripeCustomerId: string;
   origin: string;
-  priceAmount: number;
-  currency: string;
-  interval: "month" | "year";
-  productName: string;
-  productDescription: string;
 }): Promise<string> {
   const stripe = getStripe();
 
   const session = await stripe.checkout.sessions.create({
     customer: params.stripeCustomerId,
     client_reference_id: params.userId.toString(),
-    mode: "subscription",
-    allow_promotion_codes: true,
-    line_items: [
-      {
-        price_data: {
-          currency: params.currency,
-          product_data: {
-            name: params.productName,
-            description: params.productDescription,
-          },
-          unit_amount: params.priceAmount,
-          recurring: {
-            interval: params.interval,
-          },
-        },
-        quantity: 1,
+    mode: "setup",
+    payment_method_types: ["card"],
+    setup_intent_data: {
+      metadata: {
+        user_id: params.userId.toString(),
+        billing_model: "resource_usage_x_2_5",
       },
-    ],
+    },
     metadata: {
       user_id: params.userId.toString(),
       customer_email: params.userEmail,
@@ -206,5 +191,15 @@ export async function getCustomerSubscriptions(customerId: string) {
     customer: customerId,
     status: "active",
     limit: 5,
+  });
+}
+
+/** Return saved card payment methods used for usage-based invoicing. */
+export async function getCustomerPaymentMethods(customerId: string) {
+  const stripe = getStripe();
+  return stripe.paymentMethods.list({
+    customer: customerId,
+    type: "card",
+    limit: 10,
   });
 }

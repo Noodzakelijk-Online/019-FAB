@@ -1,49 +1,51 @@
-import { useRef } from "react";
 import {
-  ArrowRight,
-  BadgeCheck,
+  AlertTriangle,
   BookCheck,
   Bot,
   CircleDollarSign,
-  FileInput,
-  FileSearch,
-  FileUp,
   ExternalLink,
-  ListChecks,
+  FileSearch,
+  FileStack,
+  FileUp,
   MoreHorizontal,
   Play,
-  ScanText,
   ShieldAlert,
 } from "lucide-react";
-import { asRecord, bool, count, humanize, records, statusTone, text, type FabCommandId, type FabRecord } from "./fabView";
+import { FabDataStatus } from "./FabDataState";
+import { useFabLocale } from "./fabLocale";
+import { bool, count, exactDateTime, statusTone, text, type FabCommandId, type FabRecord, type FabResourceState } from "./fabView";
+
+type NullableMetrics = {
+  documents: number | null;
+  pendingReview: number | null;
+  pendingReviewDocuments: number | null;
+  unreconciled: number | null;
+  unreconciledDocuments: number | null;
+  unreconciledBankTransactions: number | null;
+  exceptions: number | null;
+  failedDocuments: number | null;
+};
 
 type FabControlOverviewProps = {
   connected: boolean;
-  metrics: {
-    documents: number;
-    pendingReview: number;
-    unreconciled: number;
-    exceptions: number;
-    failedDocuments: number;
-  };
+  metrics: NullableMetrics;
   health: FabRecord;
   autonomy: FabRecord;
   closeReadiness: FabRecord;
+  metricResource?: FabResourceState;
+  healthResource?: FabResourceState;
+  exceptionResource?: FabResourceState;
+  closeResource?: FabResourceState;
+  checkedAt?: string | null;
+  latencyMs?: number | null;
   commandPending: boolean;
+  pendingCommand: FabCommandId | null;
   uploading: boolean;
   localApiEndpoint: string;
   onCommand: (commandId: FabCommandId) => void;
-  onUpload: (files: File[]) => void;
+  onOpenIntake: () => void;
   onOpenCommands: () => void;
 };
-
-const pipelineStages = [
-  { id: "collect", label: "Collect", detail: "Sources and intake", icon: FileInput, stages: ["collect"] },
-  { id: "extract", label: "Extract", detail: "OCR and validation", icon: ScanText, stages: ["extract_validate"] },
-  { id: "classify", label: "Classify", detail: "Rules and drafts", icon: ListChecks, stages: ["classify_post"] },
-  { id: "reconcile", label: "Reconcile", detail: "Bank matching", icon: CircleDollarSign, stages: ["match_reconcile"] },
-  { id: "close", label: "Close", detail: "Evidence and reports", icon: BookCheck, stages: ["close_report"] },
-];
 
 export function FabControlOverview({
   connected,
@@ -51,48 +53,83 @@ export function FabControlOverview({
   health,
   autonomy,
   closeReadiness,
+  metricResource,
+  healthResource,
+  exceptionResource,
+  closeResource,
+  checkedAt,
+  latencyMs,
   commandPending,
+  pendingCommand,
   uploading,
   localApiEndpoint,
   onCommand,
-  onUpload,
+  onOpenIntake,
   onOpenCommands,
 }: FabControlOverviewProps) {
-  const uploadInputRef = useRef<HTMLInputElement>(null);
-  const operations = asRecord(health.operations);
-  const healthStatus = text(operations.status || health.status, connected ? "unknown" : "disconnected");
-  const autonomyStatus = text(autonomy.status, "unavailable");
+  const { lang, copy, status, dateLocale } = useFabLocale();
+  const operations = record(health.operations);
+  const healthStatus = text(health.status || operations.status, connected ? "unknown" : "disconnected");
   const closeStatus = text(closeReadiness.status, "unavailable");
-  const actionRows = records(autonomy.actions);
+  const canRun = bool(autonomy.canRunAutonomously);
+  const pendingReview = metrics.pendingReview;
+  const pendingReviewDocuments = metrics.pendingReviewDocuments;
+  const primary = pendingReviewDocuments !== null && pendingReviewDocuments > 0
+    ? { label: lang === "nl" ? `Controleer ${pendingReviewDocuments} document${pendingReviewDocuments === 1 ? "" : "en"}` : `Review ${pendingReviewDocuments} document${pendingReviewDocuments === 1 ? "" : "s"}`, action: () => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth" }) }
+    : canRun
+      ? { label: pendingCommand === "run_safe_cycle" ? copy("Cycle running...", "Cyclus wordt uitgevoerd...") : copy("Run safe cycle", "Veilige cyclus uitvoeren"), action: () => onCommand("run_safe_cycle") }
+      : { label: copy("Inspect automation gates", "Automatiseringspoorten bekijken"), action: () => document.getElementById("automation")?.scrollIntoView({ behavior: "smooth" }) };
 
   const metricRows = [
     {
-      label: "Health",
-      value: humanize(healthStatus),
-      detail: `${count(operations.issueCount || records(operations.issues).length)} active signals`,
-      icon: healthStatus === "ok" || healthStatus === "ready" ? BadgeCheck : ShieldAlert,
+      label: copy("Operational health", "Operationele gezondheid"),
+      value: healthResource?.state === "live" || healthResource?.state === "stale" ? status(healthStatus) : null,
+      detail: healthResource?.state === "live" || healthResource?.state === "stale" ? `${count(operations.issueCount || array(operations.issues).length)} ${copy("active signals", "actieve signalen")}` : copy("Health source unavailable", "Gezondheidsbron niet beschikbaar"),
+      icon: ShieldAlert,
       tone: statusTone(healthStatus),
+      resource: healthResource,
     },
     {
-      label: "Review backlog",
-      value: String(metrics.pendingReview),
-      detail: `${metrics.exceptions} operating exceptions`,
+      label: copy("Documents in ledger", "Documenten in grootboek"),
+      value: metric(metrics.documents, lang),
+      detail: copy("Authoritative local records", "Gezaghebbende lokale records"),
+      icon: FileStack,
+      tone: "info" as const,
+      resource: metricResource,
+    },
+    {
+      label: copy("Review backlog", "Controleachterstand"),
+      value: metric(pendingReviewDocuments, lang),
+      detail: pendingReview === null
+        ? copy("Decision count unavailable", "Aantal beslissingen niet beschikbaar")
+        : `${pendingReview} ${copy(pendingReview === 1 ? "open decision" : "open decisions", pendingReview === 1 ? "open beslissing" : "open beslissingen")}`,
       icon: FileSearch,
-      tone: metrics.pendingReview > 0 ? "warn" as const : "good" as const,
+      tone: pendingReviewDocuments !== null && pendingReviewDocuments > 0 ? "warn" as const : "good" as const,
+      resource: metricResource,
     },
     {
-      label: "Unreconciled",
-      value: String(metrics.unreconciled),
-      detail: "Documents and bank lines",
+      label: copy("Bank lines unmatched", "Ongekoppelde bankregels"),
+      value: metric(metrics.unreconciledBankTransactions, lang),
+      detail: metrics.unreconciledDocuments === null ? copy("Document matching unavailable", "Documentkoppeling niet beschikbaar") : `${metrics.unreconciledDocuments} ${copy("documents unmatched", "documenten ongekoppeld")}`,
       icon: CircleDollarSign,
-      tone: metrics.unreconciled > 0 ? "warn" as const : "good" as const,
+      tone: metrics.unreconciled !== null && metrics.unreconciled > 0 ? "warn" as const : "good" as const,
+      resource: metricResource,
     },
     {
-      label: "Close readiness",
-      value: humanize(closeStatus),
-      detail: `${count(closeReadiness.blockingCount)} blocking gates`,
+      label: copy("Failed documents", "Mislukte documenten"),
+      value: metric(metrics.failedDocuments, lang),
+      detail: copy("Requires recovery or review", "Vereist herstel of controle"),
+      icon: AlertTriangle,
+      tone: metrics.failedDocuments !== null && metrics.failedDocuments > 0 ? "bad" as const : "good" as const,
+      resource: metricResource,
+    },
+    {
+      label: copy("Close readiness", "Afsluitgereedheid"),
+      value: closeResource?.state === "live" || closeResource?.state === "stale" ? status(closeStatus) : null,
+      detail: closeResource?.state === "live" || closeResource?.state === "stale" ? `${count(closeReadiness.blockingCount)} ${copy("blocking gates", "blokkerende poorten")}` : copy("Close evidence unavailable", "Afsluitbewijs niet beschikbaar"),
       icon: BookCheck,
       tone: statusTone(closeStatus),
+      resource: closeResource,
     },
   ];
 
@@ -100,73 +137,65 @@ export function FabControlOverview({
     <section id="control-room" className="fab-control-overview">
       <div className="fab-page-heading">
         <div>
-          <div className="fab-eyebrow"><Bot aria-hidden="true" /> Autonomous bookkeeping control</div>
-          <h1>Control room</h1>
-          <p>Operate the local FAB ledger, review exceptions, and supervise downstream bookkeeping readiness.</p>
+          <div className="fab-eyebrow"><Bot aria-hidden="true" /> {copy("Autonomous bookkeeping control", "Autonome boekhoudbesturing")}</div>
+          <h1>{copy("Control room", "Controlecentrum")}</h1>
+          <p>{copy("Decide what needs attention, supervise safe automation, and keep every downstream action evidence-bound.", "Bepaal wat aandacht nodig heeft, bewaak veilige automatisering en houd iedere vervolgactie bewijsgebonden.")}</p>
         </div>
         <div className="fab-heading-actions">
-          <input
-            ref={uploadInputRef}
-            className="sr-only"
-            type="file"
-            multiple
-            accept=".pdf,.jpg,.jpeg,.png,.heic,.tif,.tiff,.txt,.csv"
-            onChange={(event) => {
-              const files = Array.from(event.currentTarget.files || []);
-              event.currentTarget.value = "";
-              if (files.length) onUpload(files);
-            }}
-          />
-          <button className="fab-secondary-button" onClick={() => uploadInputRef.current?.click()} disabled={!connected || commandPending || uploading}>
-            <FileUp aria-hidden="true" /> {uploading ? "Adding..." : "Add receipts"}
+          <button className="fab-secondary-button" onClick={onOpenIntake} disabled={commandPending || uploading}>
+            <FileUp aria-hidden="true" /> {uploading ? copy("Adding receipts...", "Bonnen toevoegen...") : copy("Add receipts", "Bonnen toevoegen")}
           </button>
-          <button className="fab-primary-button" onClick={() => onCommand("run_safe_cycle")} disabled={!connected || commandPending || !bool(autonomy.canRunAutonomously)}>
-            <Play aria-hidden="true" /> Run safe cycle
+          <button className="fab-primary-button" onClick={primary.action} disabled={!connected || commandPending}>
+            <Play aria-hidden="true" /> {primary.label}
           </button>
           <a className="fab-secondary-button" href={localApiEndpoint} target="_blank" rel="noreferrer">
-            <ExternalLink aria-hidden="true" /> Detailed ledger
+            <ExternalLink aria-hidden="true" /> {copy("Open advanced local ledger", "Geavanceerd lokaal grootboek openen")}
           </a>
-          <button className="fab-secondary-button" onClick={onOpenCommands} disabled={!connected}>
-            <MoreHorizontal aria-hidden="true" /> More actions
+          <button className="fab-secondary-button" onClick={onOpenCommands}>
+            <MoreHorizontal aria-hidden="true" /> {copy("Command centre", "Opdrachtencentrum")}
           </button>
         </div>
       </div>
 
-      <div className="fab-metric-strip" id="documents">
-        {metricRows.map(({ label, value, detail, icon: Icon, tone }) => (
-          <div className={`fab-metric fab-metric-${tone}`} key={label}>
-            <div className={`fab-metric-icon tone-${tone}`}><Icon aria-hidden="true" /></div>
-            <div><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
+      <div className="fab-context-strip" aria-label="Control-center data context">
+        <span><strong>{copy("Last refresh", "Laatst vernieuwd")}</strong>{exactDateTime(checkedAt, dateLocale)}</span>
+        <span><strong>API-latentie</strong>{latencyMs === null || latencyMs === undefined ? copy("Unavailable", "Niet beschikbaar") : `${latencyMs} ms`}</span>
+        <span><strong>{copy("Fiscal period", "Boekingsperiode")}</strong>{period(closeReadiness.fromDate, closeReadiness.toDate, dateLocale)}</span>
+        <span><strong>{copy("Submission mode", "Indieningsmodus")}</strong>{status(closeReadiness.externalSubmission || "not_executed")}</span>
+      </div>
+
+      <div className="fab-metric-strip" aria-label="Decision metrics">
+        {metricRows.map(({ label, value, detail, icon: Icon, tone, resource }) => (
+          <div className={`fab-metric fab-metric-${value === null ? "bad" : tone}`} key={label}>
+            <div className={`fab-metric-icon tone-${value === null ? "bad" : tone}`}><Icon aria-hidden="true" /></div>
+            <div>
+              <span>{label}</span>
+              <strong>{value === null ? copy("Unavailable", "Niet beschikbaar") : value}</strong>
+              <small>{detail}</small>
+            </div>
+            <FabDataStatus resource={resource} />
           </div>
         ))}
       </div>
-
-      <div className="fab-section fab-pipeline-section">
-        <div className="fab-section-heading">
-          <div><span>Autonomous run</span><h2>Safe-cycle pipeline</h2></div>
-          <span className={`fab-status-chip tone-${statusTone(autonomyStatus)}`}>{humanize(autonomyStatus)}</span>
-        </div>
-        <div className="fab-pipeline" aria-label="Autonomous bookkeeping stages">
-          {pipelineStages.map((stage, index) => {
-            const stageActions = actionRows.filter((action) => stage.stages.includes(text(action.stage, "")));
-            const runnable = stageActions.filter((action) => bool(action.canRun)).length;
-            const blocked = stageActions.filter((action) => text(action.blockedReason, "") !== "").length;
-            const tone = autonomyStatus === "blocked" ? "bad" : runnable > 0 ? "good" : blocked > 0 ? "warn" : "neutral";
-            const StageIcon = stage.icon;
-            return (
-              <div className="fab-pipeline-step" key={stage.id}>
-                <div className={`fab-pipeline-node tone-${tone}`}><StageIcon aria-hidden="true" /></div>
-                <div><strong>{stage.label}</strong><span>{stage.detail}</span><small>{runnable > 0 ? `${runnable} ready` : blocked > 0 ? `${blocked} gated` : "No work due"}</small></div>
-                {index < pipelineStages.length - 1 && <ArrowRight className="fab-pipeline-arrow" aria-hidden="true" />}
-              </div>
-            );
-          })}
-        </div>
-        <div className="fab-pipeline-note">
-          <ShieldAlert aria-hidden="true" />
-          <span><strong>External submission remains approval-gated.</strong> {text(autonomy.nextAction, "FAB will prepare local evidence and drafts only.")}</span>
-        </div>
-      </div>
     </section>
   );
+}
+
+function metric(value: number | null, lang: "en" | "nl"): string | null {
+  return value === null ? null : new Intl.NumberFormat(lang === "nl" ? "nl-NL" : "en-NL").format(value);
+}
+
+function record(value: unknown): FabRecord {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as FabRecord : {};
+}
+
+function array(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function period(fromValue: unknown, toValue: unknown, locale: string): string {
+  const from = text(fromValue, "");
+  const to = text(toValue, "");
+  if (!from || !to) return "Unavailable";
+  return from === to ? exactDateTime(`${from}T00:00:00Z`, locale).split(",")[0] : `${from} - ${to}`;
 }

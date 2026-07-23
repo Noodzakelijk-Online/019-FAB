@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.data_entry.mijngeldzaken_autonomous_operator import MijngeldzakenAutonomousOperator
 from src.data_entry.mijngeldzaken_surface import (
     build_mijngeldzaken_action_payload,
@@ -14,6 +15,7 @@ from src.data_entry.waveapps_surface import (
 )
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 ROUTABLE_DOCUMENT_STATUSES = ("processed", "reviewed", "validated", "ready_to_route")
@@ -57,6 +59,24 @@ class LocalRoutingService:
             return {"success": False, "status": "not_found", "error": "Document not found"}
 
         target_system = _normalize_target_system(target_system or _target_system(document))
+        document_type_block = _document_type_routing_block(document, target_system)
+        if document_type_block:
+            if target_system in MIJNGELDZAKEN_TARGET_SYSTEMS:
+                return self._record_mijngeldzaken_blocked_attempt(
+                    document,
+                    document_type_block["status"],
+                    document_type_block["message"],
+                    document_type_block["metadata"],
+                    workflow_run_id=workflow_run_id,
+                )
+            if target_system in WAVE_TARGET_SYSTEMS:
+                return self._record_blocked_attempt(
+                    document,
+                    document_type_block["status"],
+                    document_type_block["message"],
+                    document_type_block["metadata"],
+                    workflow_run_id=workflow_run_id,
+                )
         if target_system in MIJNGELDZAKEN_TARGET_SYSTEMS:
             return self._prepare_mijngeldzaken_document_route(document, target_system, workflow_run_id)
         if target_system not in WAVE_TARGET_SYSTEMS:
@@ -1183,19 +1203,25 @@ def _wave_line_item_from_record_line(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _bookkeeping_record_data(record: Dict[str, Any]) -> Dict[str, Any]:
-    amount = _positive_amount(record.get("amount"))
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    document_type = str(metadata.get("documentType") or "receipt").strip().lower()
+    amount = (
+        _negative_amount(record.get("amount"))
+        if document_type == "credit_note"
+        else _positive_amount(record.get("amount"))
+    )
     extracted = {
         "vendor_name": record.get("vendor_name"),
         "transaction_date": record.get("record_date"),
         "total_amount": amount,
         "currency": record.get("currency"),
         "description": record.get("description"),
-        "document_type": "receipt",
+        "document_type": document_type,
         "line_items": [_wave_line_item_from_record_line(item) for item in record.get("line_items") or []],
     }
     return {
         "id": record.get("id"),
-        "document_type": "receipt",
+        "document_type": document_type,
         "vendor_name": record.get("vendor_name"),
         "category": record.get("category"),
         "transaction_date": record.get("record_date"),
@@ -1260,7 +1286,61 @@ def _blank(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
 
+def _document_type_routing_block(document: Dict[str, Any], target_system: str) -> Optional[Dict[str, Any]]:
+    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+    override = review_metadata.get("documentTypeOverride")
+    override_type = (
+        str(override.get("documentType") or "").strip().lower()
+        if isinstance(override, dict)
+        else ""
+    )
+    stored_type = str(document.get("document_type") or extracted.get("document_type") or "").strip().lower()
+    processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+    classification = (
+        processing.get("documentTypeClassification")
+        if isinstance(processing.get("documentTypeClassification"), dict)
+        else {}
+    )
+    classified_type = str(classification.get("documentType") or "").strip().lower()
+    effective_type = override_type or stored_type
+
+    if is_non_posting_document_type(effective_type):
+        return {
+            "status": "blocked_non_posting_document_type",
+            "message": (
+                f"Document type {effective_type!r} is supporting evidence and cannot be posted "
+                "as a bookkeeping transaction."
+            ),
+            "metadata": {
+                "targetSystem": target_system,
+                "documentType": effective_type,
+                "postingEligible": False,
+                "manualDocumentTypeOverride": bool(override_type),
+            },
+        }
+    if not override_type and is_non_posting_document_type(classified_type):
+        return {
+            "status": "blocked_document_type_conflict",
+            "message": (
+                f"Stored document type {stored_type!r} conflicts with non-posting classifier result "
+                f"{classified_type!r}; an explicit document-type review is required."
+            ),
+            "metadata": {
+                "targetSystem": target_system,
+                "documentType": stored_type,
+                "classifiedDocumentType": classified_type,
+                "postingEligible": False,
+                "documentTypeConflict": True,
+            },
+        }
+    return None
+
+
 def _blocked_export_status(status: str) -> str:
+    if status in {"blocked_document_type_conflict", "blocked_non_posting_document_type"}:
+        return "not_applicable"
     if status == "needs_review":
         return "blocked_by_review"
     if status == "blocked_duplicate":
@@ -1340,14 +1420,7 @@ def _bookkeeping_record_snapshot(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    return str(
-        routing.get("targetSystem")
-        or metadata.get("targetSystem")
-        or metadata.get("target_system")
-        or "waveapps"
-    )
+    return resolve_document_target_system(document, default="waveapps")
 
 
 def _normalize_target_system(value: Any) -> str:
@@ -1388,6 +1461,15 @@ def _positive_amount(value: Any) -> Any:
         return None
     try:
         return abs(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _negative_amount(value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        return -abs(float(value))
     except (TypeError, ValueError):
         return value
 

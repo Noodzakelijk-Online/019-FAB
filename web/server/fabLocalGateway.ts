@@ -2,10 +2,21 @@ import { ENV } from "./_core/env";
 
 type JsonRecord = Record<string, unknown>;
 
+export type FabDataState = "live" | "stale" | "unavailable" | "error";
+
+export type FabResourceState = {
+  state: FabDataState;
+  checkedAt: string;
+  updatedAt: string | null;
+  error: string | null;
+};
+
 export const FAB_OPERATOR_COMMAND_IDS = [
   "run_safe_cycle",
   "rescan_intake",
   "process_imported",
+  "reprocess_incomplete",
+  "reprocess_review_queue",
   "sync_sources",
   "run_due_recovery",
   "run_reconciliation",
@@ -27,15 +38,33 @@ export type FabControlCenter = {
     error: string | null;
   };
   metrics: {
-    documents: number;
-    pendingReview: number;
-    unreconciled: number;
-    exceptions: number;
-    failedDocuments: number;
+    documents: number | null;
+    pendingReview: number | null;
+    pendingReviewDocuments: number | null;
+    postingBlockedReviewDocuments: number | null;
+    unreconciled: number | null;
+    unreconciledDocuments: number | null;
+    unreconciledBankTransactions: number | null;
+    exceptions: number | null;
+    failedDocuments: number | null;
   };
   health: JsonRecord;
   autonomy: JsonRecord;
   closeReadiness: JsonRecord;
+  delivery: {
+    status: JsonRecord;
+    summary: JsonRecord;
+    workOrders: JsonRecord[];
+    count: number | null;
+  };
+  reviews: {
+    workItems: JsonRecord[];
+    categoryOptions: string[];
+    summary: JsonRecord;
+  };
+  gmailAuthorization: JsonRecord;
+  driveAuthorization: JsonRecord;
+  waveSetup: JsonRecord;
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -48,7 +77,8 @@ export type FabControlCenter = {
     status: JsonRecord;
     manifest: JsonRecord;
   };
-  partialErrors: Array<{ resource: string; error: string }>;
+  resourceStates: Record<FabResourceKey, FabResourceState>;
+  partialErrors: Array<{ resource: FabResourceKey; error: string; state: FabDataState; updatedAt: string | null }>;
 };
 
 const DEFAULT_FAB_LOCAL_API_URL = "http://127.0.0.1:5001";
@@ -69,12 +99,24 @@ const READ_PATHS = {
   closeReadiness: "/api/close-readiness",
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
+  driveWaveStatus: "/api/drive-wave/status",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=500",
+  gmailAuthorization: "/api/connectors/gmail/authorization",
+  driveAuthorization: "/api/connectors/google-drive/authorization",
+  waveSetup: "/api/wave/setup",
+  reviewQueue: "/api/review?status=open&limit=500",
 } as const;
 
+export type FabResourceKey = keyof typeof READ_PATHS;
+
+const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
+
 const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord }> = {
-  run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true } },
+  run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true, includeConnectorSync: true } },
   rescan_intake: { path: "/api/intake/rescan", body: {} },
   process_imported: { path: "/api/documents/process-imported", body: { limit: 25 } },
+  reprocess_incomplete: { path: "/api/documents/reprocess-incomplete", body: { limit: 25 } },
+  reprocess_review_queue: { path: "/api/documents/reprocess-review-queue", body: { limit: 25 } },
   sync_sources: { path: "/api/sources/sync", body: {} },
   run_due_recovery: { path: "/api/workflows/recovery/run-due", body: { limit: 5 } },
   run_reconciliation: { path: "/api/reconciliation/run", body: { limit: 100 } },
@@ -146,34 +188,43 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     );
   }
 
-  const entries = Object.entries(READ_PATHS) as Array<[keyof typeof READ_PATHS, string]>;
+  const entries = Object.entries(READ_PATHS) as Array<[FabResourceKey, string]>;
   const settled = await Promise.allSettled(entries.map(([, path]) => fabLocalRequest(path)));
-  const resources: Record<string, JsonRecord> = {};
-  const partialErrors: Array<{ resource: string; error: string }> = [];
+  const resources: Partial<Record<FabResourceKey, JsonRecord>> = {};
+  const resourceStates = {} as Record<FabResourceKey, FabResourceState>;
+  const partialErrors: FabControlCenter["partialErrors"] = [];
   settled.forEach((result, index) => {
     const resource = entries[index][0];
     if (result.status === "fulfilled") {
       resources[resource] = result.value;
+      resourceCache.set(resource, { value: result.value, updatedAt: checkedAt });
+      resourceStates[resource] = { state: "live", checkedAt, updatedAt: checkedAt, error: null };
       return;
+    }
+    const error = result.reason instanceof Error ? result.reason.message : "Request failed";
+    const cached = resourceCache.get(resource);
+    if (cached) {
+      resources[resource] = cached.value;
+      resourceStates[resource] = { state: "stale", checkedAt, updatedAt: cached.updatedAt, error };
+    } else {
+      resourceStates[resource] = { state: "error", checkedAt, updatedAt: null, error };
     }
     partialErrors.push({
       resource,
-      error: result.reason instanceof Error ? result.reason.message : "Request failed",
+      error,
+      state: resourceStates[resource].state,
+      updatedAt: resourceStates[resource].updatedAt,
     });
   });
 
-  const connected = Boolean(resources.health);
-  if (!connected) {
-    return {
-      ...disconnectedControlCenter(endpoint, checkedAt, partialErrors[0]?.error || "FAB local API is unavailable"),
-      partialErrors,
-    };
-  }
+  const connected = resourceStates.health.state === "live";
 
   const metrics = resources.metrics || {};
+  const reviewSummary = asRecord(resources.reviewQueue?.summary) || {};
   const exceptionsPayload = resources.exceptions || {};
   const settings = resources.settings || {};
   const sourceReadiness = resources.sourceReadiness || {};
+  const waveSetup = resources.waveSetup || {};
   const registeredSources = arrayValue(resources.sources?.sources);
   const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
@@ -183,7 +234,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       const sourceType = stringValue(item.source_type || item.sourceType);
       return sourceType === sourceId || sourceType === sourceId.replace("waveapps_", "waveapps");
     });
-    return {
+    const baseConnection = {
       ...source,
       canSync: Boolean(syncPlan?.canSync),
       enabled: syncPlan ? Boolean(syncPlan.enabled) : Boolean(source.configured),
@@ -191,28 +242,58 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       lastSyncAt: account?.last_sync_at || account?.updated_at || null,
       accountStatus: account?.status || null,
     };
+    if (sourceId !== "waveapps_business") return baseConnection;
+    const setupStatus = stringValue(waveSetup.status, stringValue(source.status, "not_configured"));
+    return {
+      ...baseConnection,
+      status: setupStatus,
+      ready: waveSetup.ready === true,
+      configured: waveSetup.accessTokenConfigured === true && Boolean(waveSetup.businessId),
+      details: waveSetup.ready === true
+        ? "Wave business and account mappings were verified from the live chart of accounts."
+        : "Connect Wave, validate the business, and map the posting accounts.",
+      nextAction: stringValue(asRecord(waveSetup.activation)?.nextAction, waveSetupNextAction(setupStatus)),
+    };
   });
 
   return {
     connection: {
-      connected: true,
-      status: stringValue(resources.health.status, "connected"),
+      connected,
+      status: connected ? stringValue(resources.health?.status, "connected") : "disconnected",
       endpoint,
       authConfigured: Boolean(ENV.fabLocalApiToken),
       checkedAt,
-      latencyMs: Date.now() - startedAt,
-      error: null,
+      latencyMs: connected ? Date.now() - startedAt : null,
+      error: connected ? null : resourceStates.health.error || "FAB local API is unavailable",
     },
     metrics: {
-      documents: numberValue(metrics.documents),
-      pendingReview: numberValue(metrics.pending_review),
-      unreconciled: numberValue(metrics.unreconciled_bank_transactions) + numberValue(metrics.unreconciled_documents),
-      exceptions: numberValue(asRecord(exceptionsPayload.summary)?.total),
-      failedDocuments: numberValue(metrics.failed_documents),
+      documents: nullableNumber(metrics.documents),
+      pendingReview: nullableNumber(metrics.pending_review),
+      pendingReviewDocuments: nullableNumber(reviewSummary.documents),
+      postingBlockedReviewDocuments: nullableNumber(reviewSummary.postingBlockedDocuments),
+      unreconciled: sumNullable(metrics.unreconciled_bank_transactions, metrics.unreconciled_documents),
+      unreconciledDocuments: nullableNumber(metrics.unreconciled_documents),
+      unreconciledBankTransactions: nullableNumber(metrics.unreconciled_bank_transactions),
+      exceptions: nullableNumber(asRecord(exceptionsPayload.summary)?.total),
+      failedDocuments: nullableNumber(metrics.failed_documents),
     },
-    health: resources.health,
+    health: resources.health || {},
     autonomy: resources.autonomy || {},
     closeReadiness: resources.closeReadiness || {},
+    delivery: {
+      status: resources.driveWaveStatus || {},
+      summary: asRecord(resources.driveWaveWorkOrders?.summary) || {},
+      workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders).map(projectDeliveryWorkOrder),
+      count: nullableNumber(resources.driveWaveWorkOrders?.count),
+    },
+    reviews: {
+      workItems: arrayValue(resources.reviewQueue?.workItems).map(projectReviewWorkItem),
+      categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
+      summary: asRecord(resources.reviewQueue?.summary) || {},
+    },
+    gmailAuthorization: resources.gmailAuthorization || {},
+    driveAuthorization: resources.driveAuthorization || {},
+    waveSetup,
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -224,7 +305,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
         configured: Boolean(resources.haiStatus?.enabled),
         ready: resources.haiStatus?.status === "ready",
         details: resources.haiStatus?.status === "ready"
-          ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} local-safe commands.`
+          ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} allowlisted commands.`
           : "Governed machine-control contract for safe local FAB commands.",
         allowedCommandIds: haiAllowedCommandIds,
       },
@@ -238,8 +319,13 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       status: resources.haiStatus || {},
       manifest: resources.haiManifest || {},
     },
+    resourceStates,
     partialErrors,
   };
+}
+
+export function resetFabControlCenterCacheForTests() {
+  resourceCache.clear();
 }
 
 export async function runFabOperatorCommand(
@@ -266,7 +352,123 @@ export async function uploadFabIntakeFile(input: {
   }, { timeoutMs: 20_000 });
 }
 
+export async function uploadFabGoogleDriveCredentials(input: {
+  filename: string;
+  contentBase64: string;
+  replace?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/google-drive/credentials", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: input.filename,
+      contentBase64: input.contentBase64,
+      replace: input.replace ?? false,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  }, { timeoutMs: 20_000 });
+}
+
+export async function uploadFabGmailCredentials(input: {
+  filename: string;
+  contentBase64: string;
+  replace?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/gmail/credentials", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: input.filename,
+      contentBase64: input.contentBase64,
+      replace: input.replace ?? false,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  }, { timeoutMs: 20_000 });
+}
+
+export async function startFabGmailAuthorization(actor: string): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/gmail/authorization/start", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
+}
+
+export async function startFabGoogleDriveAuthorization(actor: string): Promise<JsonRecord> {
+  return fabLocalRequest("/api/connectors/google-drive/authorization/start", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
+}
+
+export async function saveFabWaveSetup(input: {
+  targetSystem?: "waveapps_business" | "waveapps_personal";
+  accessToken?: string;
+  businessId?: string;
+  anchorAccountId?: string;
+  defaultCategoryAccountId?: string;
+  categoryAccountIds?: Record<string, string>;
+  clearAccessToken?: boolean;
+  actor: string;
+}): Promise<JsonRecord> {
+  return fabLocalRequest("/api/wave/setup", {
+    method: "PUT",
+    body: JSON.stringify({
+      ...input,
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  });
+}
+
+export async function validateFabWaveSetup(
+  targetSystem: "waveapps_business" | "waveapps_personal" = "waveapps_business",
+): Promise<JsonRecord> {
+  return fabLocalRequest("/api/wave/setup/validate", {
+    method: "POST",
+    body: JSON.stringify({ targetSystem }),
+  }, { timeoutMs: 20_000 });
+}
+
+export async function resolveFabReviewItem(input: {
+  reviewItemId: number;
+  status: "approved" | "rejected" | "resolved" | "ignored";
+  resolution: string;
+  corrections?: {
+    vendorName?: string;
+    category?: string;
+    transactionDate?: string;
+    totalAmount?: number;
+    vatAmount?: number;
+    targetSystem?: string;
+    duplicateOfDocumentId?: number;
+    duplicateCandidateId?: number;
+    documentType?: "receipt" | "vendor_invoice" | "credit_note" | "order_confirmation" | "estimate" | "bank_statement" | "insurance_policy" | "government_correspondence";
+  };
+  learnRule?: boolean;
+  applyToMatchingVendor?: boolean;
+}): Promise<JsonRecord> {
+  return fabLocalRequest(`/api/review/${input.reviewItemId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({
+      status: input.status,
+      resolution: input.resolution,
+      corrections: input.corrections || {},
+      learnRule: input.learnRule ?? true,
+      applyToMatchingVendor: input.applyToMatchingVendor ?? false,
+    }),
+  });
+}
+
 function disconnectedControlCenter(endpoint: string, checkedAt: string, error: string): FabControlCenter {
+  const resourceStates = Object.fromEntries(
+    (Object.keys(READ_PATHS) as FabResourceKey[]).map((resource) => [
+      resource,
+      { state: "unavailable", checkedAt, updatedAt: null, error },
+    ]),
+  ) as Record<FabResourceKey, FabResourceState>;
   return {
     connection: {
       connected: false,
@@ -277,10 +479,25 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
       latencyMs: null,
       error,
     },
-    metrics: { documents: 0, pendingReview: 0, unreconciled: 0, exceptions: 0, failedDocuments: 0 },
+    metrics: {
+      documents: null,
+      pendingReview: null,
+      pendingReviewDocuments: null,
+      postingBlockedReviewDocuments: null,
+      unreconciled: null,
+      unreconciledDocuments: null,
+      unreconciledBankTransactions: null,
+      exceptions: null,
+      failedDocuments: null,
+    },
     health: {},
     autonomy: {},
     closeReadiness: {},
+    delivery: { status: {}, summary: {}, workOrders: [], count: null },
+    reviews: { workItems: [], categoryOptions: [], summary: {} },
+    gmailAuthorization: {},
+    driveAuthorization: {},
+    waveSetup: {},
     exceptions: [],
     exceptionSummary: {},
     connections: [],
@@ -290,6 +507,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     reconciliation: [],
     activity: [],
     hai: { status: {}, manifest: {} },
+    resourceStates,
     partialErrors: [],
   };
 }
@@ -302,6 +520,145 @@ function arrayValue(value: unknown): JsonRecord[] {
   return Array.isArray(value) ? value.flatMap((item) => asRecord(item) ? [asRecord(item)!] : []) : [];
 }
 
+function projectDeliveryWorkOrder(value: JsonRecord): JsonRecord {
+  const source = selectFields(value.source, ["filename", "mimeType", "provider", "sha256"]);
+  const wave = selectFields(value.wave, ["externalTransactionId", "targetSystem"]);
+  const archivePlan = selectFields(value.archivePlan, [
+    "canArchive",
+    "evidenceVerified",
+    "externalSubmission",
+    "reasons",
+    "retentionStatus",
+    "status",
+  ]);
+  const reviews = selectFields(value.reviews, ["blocking", "open", "reasons"]);
+  return {
+    ...selectFields(value, [
+      "actionRequired",
+      "documentId",
+      "externalSubmission",
+      "stage",
+      "status",
+      "success",
+      "workOrderId",
+      "workOrderVersion",
+    ]),
+    source,
+    wave,
+    archivePlan,
+    reviews,
+  };
+}
+
+function projectReviewWorkItem(value: JsonRecord): JsonRecord {
+  const document = selectFields(value.document, [
+    "category",
+    "classifiedDocumentType",
+    "currency",
+    "documentType",
+    "duplicateOfDocumentId",
+    "filename",
+    "financialFieldIssues",
+    "normalizedRecordDate",
+    "normalizedVatAmount",
+    "ocrExcerpt",
+    "orderNumber",
+    "postingEligible",
+    "processingStatus",
+    "source",
+    "sourceUrl",
+    "targetSystem",
+    "totalAmount",
+    "transactionDate",
+    "transactionReference",
+    "vatAmount",
+    "vendorName",
+    "invoiceNumber",
+    "receiptNumber",
+  ]);
+  const categorySuggestion = selectFields(
+    asRecord(value.document)?.categorySuggestion,
+    ["category", "confidenceScore", "matchPolicy", "rationale", "source"],
+  );
+  if (Object.keys(categorySuggestion).length) {
+    document.categorySuggestion = categorySuggestion;
+  }
+  const duplicateCandidates = arrayValue(value.duplicateCandidates).map((candidate) => ({
+    ...selectFields(candidate, [
+      "candidateDocumentId",
+      "confidenceScore",
+      "conflictingIdentityFields",
+      "comparableFields",
+      "id",
+      "matchType",
+      "matchedIdentityFields",
+      "reason",
+      "similarityScore",
+    ]),
+    currentIdentity: selectFields(candidate.currentIdentity, [
+      "amount",
+      "date",
+      "invoiceNumber",
+      "orderNumber",
+      "postingPolarity",
+      "receiptNumber",
+      "tax",
+      "transactionReference",
+      "vendor",
+    ]),
+    candidateIdentity: selectFields(candidate.candidateIdentity, [
+      "amount",
+      "date",
+      "invoiceNumber",
+      "orderNumber",
+      "postingPolarity",
+      "receiptNumber",
+      "tax",
+      "transactionReference",
+      "vendor",
+    ]),
+    document: selectFields(candidate.document, [
+      "currency",
+      "documentType",
+      "filename",
+      "invoiceNumber",
+      "orderNumber",
+      "receiptNumber",
+      "source",
+      "totalAmount",
+      "transactionDate",
+      "transactionReference",
+      "vendorName",
+    ]),
+  }));
+  const reviewItems = arrayValue(value.reviewItems).map((item) => selectFields(
+    item,
+    ["createdAt", "details", "id", "reason", "status", "updatedAt"],
+  ));
+  return {
+    ...selectFields(value, [
+      "documentId",
+      "id",
+      "reasons",
+      "reviewPath",
+      "status",
+    ]),
+    document,
+    duplicateCandidates,
+    reviewItems,
+  };
+}
+
+function selectFields(value: unknown, fields: string[]): JsonRecord {
+  const source = asRecord(value);
+  if (!source) return {};
+  return Object.fromEntries(
+    fields
+      .filter((field) => Object.prototype.hasOwnProperty.call(source, field))
+      .map((field) => [field, source[field]]),
+  );
+}
+
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -310,8 +667,24 @@ function stringValue(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
-function numberValue(value: unknown): number {
+function waveSetupNextAction(status: string): string {
+  if (status === "needs_token") return "Add the user-owned Wave access token.";
+  if (status === "needs_business_id") return "Select the Wave business to operate.";
+  if (status === "needs_validation") return "Validate the Wave business and load its chart of accounts.";
+  if (status === "needs_mapping") return "Map the verified funding account and every FAB category currently in use.";
+  if (status === "ready") return "Wave is ready for governed bookkeeping operations.";
+  return "Review the Wave connection setup.";
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sumNullable(left: unknown, right: unknown): number | null {
+  const leftNumber = nullableNumber(left);
+  const rightNumber = nullableNumber(right);
+  return leftNumber === null || rightNumber === null ? null : leftNumber + rightNumber;
 }

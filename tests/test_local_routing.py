@@ -64,6 +64,47 @@ class TestLocalRoutingService(unittest.TestCase):
             )
             self.assertEqual(ledger.list_audit_events()[0]["action"], "local_routing.wave_draft_prepared")
 
+    def test_reviewed_credit_note_prepares_a_wave_deposit_reversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "credit-note-route-1",
+                "originalFilename": "credit-note.pdf",
+                "documentType": "credit_note",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "extractedData": {
+                    "document_type": "credit_note",
+                    "vendor_name": "Office Shop",
+                    "transaction_date": "2026-06-28",
+                    "total_amount": 42.5,
+                    "description": "Returned paper",
+                    "line_items": [{
+                        "description": "Returned paper",
+                        "amount": 42.5,
+                        "category": "Office Supplies",
+                        "account_name": "Office Supplies",
+                    }],
+                },
+                "metadata": {"targetAccount": "Office Supplies"},
+            })
+
+            result = LocalRoutingService(ledger).prepare_document_route(document_id)
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["status"], "draft_prepared")
+            operation = result["operation"]
+            self.assertEqual(operation["action_id"], "transaction_add")
+            self.assertEqual(operation["surface"], "transactions")
+            self.assertEqual(operation["payload"]["documentType"], "credit_note")
+            self.assertEqual(operation["payload"]["transactionDirection"], "deposit")
+            self.assertEqual(operation["payload"]["amount"], -42.5)
+            self.assertEqual(operation["payload"]["lineItems"][0]["amount"], -42.5)
+
     def test_prepare_document_is_idempotent_for_existing_operation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -176,6 +217,76 @@ class TestLocalRoutingService(unittest.TestCase):
             self.assertFalse(result["success"])
             self.assertEqual(result["status"], "blocked_review")
             self.assertEqual(ledger.get_document(document_id)["routing_attempts"][0]["status"], "blocked_review")
+
+    def test_non_posting_document_is_blocked_even_after_review_is_closed(self):
+        for target_system in ("waveapps", "mijngeldzaken"):
+            with self.subTest(target_system=target_system), tempfile.TemporaryDirectory() as temp_dir:
+                ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+                document_id = ledger.register_document({
+                    "source": "scanner",
+                    "sourceDocumentId": f"policy-{target_system}",
+                    "originalFilename": "policy.pdf",
+                    "documentType": "insurance_policy",
+                    "processingStatus": "reviewed",
+                    "vendorName": "Insurer",
+                    "category": "Supporting Evidence",
+                    "transactionDate": "2026-06-28",
+                    "totalAmount": 6100000,
+                    "metadata": {"targetSystem": target_system},
+                })
+
+                result = LocalRoutingService(ledger).prepare_document_route(document_id)
+                document = ledger.get_document(document_id)
+
+                self.assertFalse(result["success"])
+                self.assertEqual(result["status"], "blocked_non_posting_document_type")
+                self.assertEqual(document["routing_attempts"][0]["status"], result["status"])
+                self.assertEqual(
+                    document["routing_attempts"][0]["metadata"]["externalSubmission"],
+                    "not_executed",
+                )
+                self.assertEqual(document["bookkeeping_record"]["export_status"], "not_applicable")
+
+    def test_non_posting_classifier_conflict_requires_explicit_type_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "policy-invoice-conflict",
+                "originalFilename": "policy.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "reviewed",
+                "vendorName": "Insurer",
+                "category": "Insurance",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 125.4,
+                "metadata": {
+                    "processing": {
+                        "documentTypeClassification": {
+                            "documentType": "insurance_policy",
+                            "classifier": "deterministic_financial_document_type_v2",
+                        },
+                    },
+                },
+            })
+            service = LocalRoutingService(ledger)
+
+            blocked = service.prepare_document_route(document_id)
+            self.assertEqual(blocked["status"], "blocked_document_type_conflict")
+
+            document = ledger.get_document(document_id)
+            metadata = dict(document["metadata"])
+            metadata["review"] = {
+                "documentTypeOverride": {
+                    "documentType": "vendor_invoice",
+                    "source": "manual_review_correction",
+                },
+            }
+            ledger.update_document(document_id, {"metadata": metadata})
+            prepared = service.prepare_document_route(document_id)
+
+            self.assertTrue(prepared["success"])
+            self.assertEqual(prepared["status"], "draft_prepared")
 
     def test_prepare_bank_transaction_record_creates_wave_draft_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:

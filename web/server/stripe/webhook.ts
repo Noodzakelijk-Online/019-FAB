@@ -97,8 +97,8 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
           // Notification is best-effort — don't let it break the webhook
           await notifyOwner({
-            title: "New Subscription!",
-            content: `A user has subscribed to FAB Pay-As-You-Go.\n\nUser ID: ${userId}\nEmail: ${session.metadata?.customer_email || "N/A"}\nName: ${session.metadata?.customer_name || "N/A"}\nSession ID: ${session.id}`,
+            title: "Usage Billing Ready",
+            content: `A user has configured payment for FAB usage billing (resource cost x 2.5; no fixed fee).\n\nUser ID: ${userId}\nEmail: ${session.metadata?.customer_email || "N/A"}\nName: ${session.metadata?.customer_name || "N/A"}\nSession ID: ${session.id}`,
           }).catch((err) => {
             log.warn("Failed to send checkout notification", {}, err instanceof Error ? err : undefined);
           });

@@ -79,6 +79,25 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(summary["localAccess"]["ngrokSafety"], "blocked_without_token")
             self.assertIn("remote_api_without_token", {issue["type"] for issue in summary["issues"]})
 
+    def test_drive_readiness_blocks_sync_during_oauth_client_rotation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "drive.json")
+            token_path = os.path.join(temp_dir, "drive.pickle")
+            for path in (credentials_path, token_path, f"{token_path}.reauthorize"):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+
+            summary = LocalReadinessService({
+                "google_drive_credentials_file": credentials_path,
+                "google_drive_token_file": token_path,
+                "google_drive_folder_id": "approved-source-folder",
+            }).summarize()
+            drive = next(item for item in summary["sources"] if item["id"] == "google_drive")
+
+            self.assertFalse(drive["ready"])
+            self.assertEqual(drive["status"], "needs_authorization")
+            self.assertIn("fresh Google consent", drive["details"])
+
     def test_base_url_overrides_displayed_local_access_without_exposing_token(self):
         summary = LocalReadinessService(
             {"fab_local_api_base_url": "https://fab-local.example.ngrok-free.app", "fab_local_api_token": "secret-token"},
@@ -139,6 +158,92 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(dependencies["tesseract_languages"]["status"], "ok")
             self.assertEqual(dependencies["poppler"]["status"], "ok")
             self.assertEqual(sources["tesseract_ocr"]["status"], "ready")
+
+    def test_category_model_readiness_does_not_claim_an_untrained_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = os.path.join(temp_dir, "model.joblib")
+            vectorizer_path = os.path.join(temp_dir, "vectorizer.joblib")
+            missing_summary = LocalReadinessService({
+                "ml_model_path": model_path,
+                "ml_vectorizer_path": vectorizer_path,
+            }).summarize()
+            missing = next(
+                item for item in missing_summary["dependencies"]
+                if item["id"] == "category_model"
+            )
+
+            self.assertEqual(missing["status"], "attention")
+            self.assertFalse(missing["configured"])
+            self.assertFalse(missing["required"])
+            self.assertFalse(any(
+                issue.get("entity") == "category_model"
+                for issue in missing_summary["issues"]
+            ))
+
+            for path in (model_path, vectorizer_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"approved-test-artifact")
+            ready_summary = LocalReadinessService({
+                "ml_model_path": model_path,
+                "ml_vectorizer_path": vectorizer_path,
+            }).summarize()
+            ready = next(
+                item for item in ready_summary["dependencies"]
+                if item["id"] == "category_model"
+            )
+
+            self.assertEqual(ready["status"], "ok")
+            self.assertTrue(ready["configured"])
+
+    def test_disabled_optional_sources_do_not_create_readiness_issues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = LocalReadinessService(
+                {
+                    "google_photos": {
+                        "enabled": False,
+                        "credentials_file": os.path.join(temp_dir, "missing-credentials.json"),
+                        "picker_token_file": os.path.join(temp_dir, "missing-token.json"),
+                    },
+                },
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                intake_paths=[temp_dir],
+            ).summarize()
+            photos = next(
+                source for source in summary["sources"]
+                if source["id"] == "google_photos"
+            )
+            issue_entities = {issue.get("entity") for issue in summary["issues"]}
+
+            self.assertEqual(photos["status"], "disabled")
+            self.assertFalse(photos["enabled"])
+            self.assertNotIn("photos_credentials", issue_entities)
+            self.assertNotIn("photos_token", issue_entities)
+            self.assertNotIn("category_model", issue_entities)
+            self.assertNotIn("playwright", issue_entities)
+
+    def test_enabled_photos_reports_missing_required_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = LocalReadinessService(
+                {
+                    "google_photos": {
+                        "enabled": True,
+                        "credentials_file": os.path.join(temp_dir, "missing-credentials.json"),
+                        "picker_token_file": os.path.join(temp_dir, "missing-token.json"),
+                    },
+                },
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                intake_paths=[temp_dir],
+            ).summarize()
+            photos = next(
+                source for source in summary["sources"]
+                if source["id"] == "google_photos"
+            )
+            issue_entities = {issue.get("entity") for issue in summary["issues"]}
+
+            self.assertEqual(photos["status"], "needs_attention")
+            self.assertTrue(photos["enabled"])
+            self.assertIn("photos_credentials", issue_entities)
+            self.assertIn("photos_token", issue_entities)
 
     def test_api_settings_and_dashboard_render_readiness_without_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir:

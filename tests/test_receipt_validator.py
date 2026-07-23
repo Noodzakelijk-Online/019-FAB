@@ -66,6 +66,66 @@ class TestReceiptValidator(unittest.TestCase):
         self.assertFalse(result["is_valid"])
         self.assertIn("Extracted BTW number not found in OCR text", result["errors"])
 
+    def test_validate_receipt_rejects_impossible_vat_amount(self):
+        processed_data = {
+            "extracted_data": {
+                "vendor_name": "Example Shop",
+                "total_amount": 59.60,
+                "vat_amount": 8075.08,
+                "transaction_date": "2025-01-01",
+            },
+            "ocr_text": "BTW-nummer: NL8075.08.093.B.01",
+        }
+
+        result = self.validator.validate_receipt(processed_data)
+
+        self.assertFalse(result["is_valid"])
+        self.assertIn(
+            "VAT amount exceeds the configured 25.0% of total safety limit.",
+            result["errors"],
+        )
+        self.assertEqual(
+            result["fieldControls"]["vat"]["reason"],
+            "vat_exceeds_total_ratio",
+        )
+
+    def test_validate_receipt_rejects_implausible_transaction_year(self):
+        processed_data = {
+            "extracted_data": {
+                "vendor_name": "Example Shop",
+                "total_amount": 59.60,
+                "transaction_date": "2823-07-16",
+            },
+            "ocr_text": "Example Shop\n2823-07-16\nTotaal 59,60",
+        }
+
+        result = self.validator.validate_receipt(processed_data)
+
+        self.assertFalse(result["is_valid"])
+        self.assertIn("Implausible transaction_date year", result["errors"])
+        self.assertEqual(
+            result["fieldControls"]["transactionDate"]["reason"],
+            "implausible_record_date_year",
+        )
+
+    def test_validate_receipt_exposes_normalized_transaction_date_control(self):
+        processed_data = {
+            "extracted_data": {
+                "vendor_name": "Example Shop",
+                "total_amount": 59.60,
+                "transaction_date": "16-07-2023",
+            },
+            "ocr_text": "Example Shop\n16-07-2023\nTotaal 59,60",
+        }
+
+        result = self.validator.validate_receipt(processed_data)
+
+        self.assertTrue(result["is_valid"])
+        self.assertEqual(
+            result["fieldControls"]["transactionDate"]["normalizedValue"],
+            "2023-07-16",
+        )
+
     def test_validate_receipt_all_failures(self):
         processed_data = {
             "extracted_data": {

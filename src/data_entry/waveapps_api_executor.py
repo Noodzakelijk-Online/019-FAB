@@ -164,12 +164,16 @@ def _categorized_data(
     return {
         "document_id": document_id or bookkeeping_record_id or idempotency_key,
         "bookkeeping_record_id": bookkeeping_record_id,
+        "document_type": payload.get("documentType"),
+        "transaction_direction": payload.get("transactionDirection"),
         "target_system": target_system,
         "target_account": payload.get("account"),
         "category": payload.get("category"),
         "idempotency_key": str(idempotency_key or ""),
         "extracted_data": {
             "description": payload.get("description"),
+            "document_type": payload.get("documentType"),
+            "transaction_direction": payload.get("transactionDirection"),
             "vendor_name": payload.get("vendor"),
             "transaction_date": payload.get("date"),
             "total_amount": payload.get("amount"),

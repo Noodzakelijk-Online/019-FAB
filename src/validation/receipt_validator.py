@@ -1,6 +1,13 @@
 from typing import Dict, Any
 import re
 
+from src.validation.financial_consistency import (
+    DEFAULT_VAT_MAX_TOTAL_RATIO,
+    assess_record_date,
+    assess_vat_amount,
+    vat_issue_message,
+)
+
 class ReceiptValidator:
     """Validates receipts for legal compliance and completeness."""
 
@@ -13,6 +20,12 @@ class ReceiptValidator:
         self.required_field_confidence_threshold = float(
             self.config.get("receipt_required_field_confidence_threshold", 0.7)
         )
+        try:
+            self.vat_max_total_ratio = float(
+                self.config.get("vat_max_total_ratio", DEFAULT_VAT_MAX_TOTAL_RATIO)
+            )
+        except (TypeError, ValueError):
+            self.vat_max_total_ratio = DEFAULT_VAT_MAX_TOTAL_RATIO
 
     def validate_receipt(self, processed_data: Dict[str, Any]) -> Dict[str, Any]:
         """Performs validation checks on processed receipt data.
@@ -50,14 +63,23 @@ class ReceiptValidator:
                 errors.remove("Missing required field: vendor_name")
             errors.append("Invalid or empty vendor_name")
 
-        # 2. Validate BTW number (if present and relevant)
+        # 2. Validate VAT arithmetic before treating OCR tax evidence as financial data.
+        vat_assessment = assess_vat_amount(
+            extracted_data.get("vat_amount"),
+            extracted_data.get("total_amount"),
+            max_ratio=self.vat_max_total_ratio,
+        )
+        if not vat_assessment["valid"]:
+            errors.append(vat_issue_message(vat_assessment))
+
+        # 3. Validate BTW number (if present and relevant)
         if "btw_number" in extracted_data and extracted_data["btw_number"]:
             btw_number = str(extracted_data["btw_number"]).strip()
             if not re.match(self.btw_number_pattern, btw_number):
                 errors.append("Invalid BTW number format")
             if btw_number not in ocr_text:
                 errors.append("Extracted BTW number not found in OCR text")
-        elif "vat_amount" in extracted_data and extracted_data["vat_amount"] > 0:
+        elif vat_assessment["valid"] and (vat_assessment.get("vatAmount") or 0) > 0:
             # If VAT is present but no BTW number, it might be an issue for business expenses
             if not re.search(self.btw_number_pattern, ocr_text, re.IGNORECASE):
                 message = "VAT amount present but no valid BTW number found in document."
@@ -66,18 +88,18 @@ class ReceiptValidator:
                 else:
                     warnings.append(message)
 
-        # 3. Basic amount consistency check (e.g., total > 0)
+        # 4. Basic amount consistency check (e.g., total > 0)
         if extracted_data.get("total_amount") is not None and extracted_data["total_amount"] <= 0:
             errors.append("Total amount is zero or negative.")
 
-        # 4. Date format validation (assuming YYYY-MM-DD for internal use)
+        # 5. Date plausibility validation. The extractor normalizes to ISO, but
+        # retained OCR can contain valid-looking years that are not credible.
         transaction_date = extracted_data.get("transaction_date")
-        if transaction_date:
-            try:
-                # Attempt to parse date to ensure it's a valid format
-                import datetime
-                datetime.datetime.strptime(str(transaction_date), "%Y-%m-%d")
-            except ValueError:
+        transaction_date_assessment = assess_record_date(transaction_date)
+        if transaction_date and not transaction_date_assessment["valid"]:
+            if transaction_date_assessment["reason"] == "implausible_record_date_year":
+                errors.append("Implausible transaction_date year")
+            else:
                 errors.append("Invalid transaction_date format")
 
         is_valid = len(errors) == 0
@@ -89,6 +111,10 @@ class ReceiptValidator:
             "warnings": warnings,
             "reason": reason,
             "blocking": not is_valid,
+            "fieldControls": {
+                "transactionDate": transaction_date_assessment,
+                "vat": vat_assessment,
+            },
         }
 
 

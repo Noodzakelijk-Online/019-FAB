@@ -88,6 +88,287 @@ class TestLocalBookkeepingRecordService(unittest.TestCase):
             self.assertIn("vendorName", record["metadata"]["missingFields"])
             self.assertIn("amount", record["metadata"]["missingFields"])
 
+    def test_extractor_total_alias_becomes_a_reconciled_line_amount(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-total-alias",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 25.10,
+                "extractedData": {
+                    "currency": "EUR",
+                    "line_items": [{"description": "Hardware", "total": 25.10}],
+                },
+                "metadata": {
+                    "targetSystem": "waveapps_business",
+                    "targetAccount": "Construction Materials & Tools",
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(record["line_items"][0]["amount"], 25.10)
+            self.assertEqual(record["line_items"][0]["source"], "extracted_line_item")
+
+    def test_mismatched_extracted_lines_fall_back_to_one_document_total(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-mismatched-lines",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 25.10,
+                "extractedData": {
+                    "currency": "EUR",
+                    "line_items": [
+                        {"description": "OCR gross column", "total": 28.10},
+                        {"description": "OCR VAT column", "total": 4.36},
+                    ],
+                },
+                "metadata": {
+                    "targetSystem": "waveapps_business",
+                    "targetAccount": "Construction Materials & Tools",
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+            line_item = record["line_items"][0]
+
+            self.assertEqual(record["line_item_count"], 1)
+            self.assertEqual(line_item["amount"], 25.10)
+            self.assertEqual(line_item["source"], "document_total")
+            self.assertEqual(
+                line_item["metadata"]["fallbackReason"],
+                "extracted_line_total_mismatch",
+            )
+            self.assertEqual(line_item["metadata"]["evidenceLineItemCount"], 2)
+
+    def test_credit_note_lines_follow_negative_ledger_direction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "credit-note-lines",
+                "originalFilename": "credit-note.pdf",
+                "documentType": "credit_note",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.50,
+                "vatAmount": 7.38,
+                "extractedData": {
+                    "document_type": "credit_note",
+                    "currency": "EUR",
+                    "line_items": [{
+                        "description": "Returned paper",
+                        "amount": 35.12,
+                        "taxAmount": 7.38,
+                    }],
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+            line_item = record["line_items"][0]
+
+            self.assertEqual(record["amount"], -42.5)
+            self.assertEqual(record["vat_amount"], -7.38)
+            self.assertEqual(line_item["amount"], -35.12)
+            self.assertEqual(line_item["tax_amount"], -7.38)
+            self.assertTrue(line_item["metadata"]["postingDirectionNormalized"])
+
+    def test_impossible_legacy_vat_is_suppressed_but_preserved_as_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "legacy-btw-number-tax",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Hornbach",
+                "category": "Tools",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 59.6,
+                "vatAmount": 8075.08,
+                "confidenceScore": 0.94,
+            })
+            service = LocalBookkeepingRecordService(ledger, {})
+            initial_record_id = ledger.upsert_bookkeeping_record({
+                "documentId": document_id,
+                "sourceType": "document",
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "exportStatus": "ready",
+                "amount": 59.6,
+                "vatAmount": 8075.08,
+                "reviewRequired": False,
+            })
+
+            first = service.upsert_from_document(document_id)
+            second = service.upsert_from_document(document_id)
+
+            self.assertEqual(first["recordId"], initial_record_id)
+            self.assertEqual(first["financialFieldIssues"][0]["reason"], "vat_exceeds_total_ratio")
+            record = ledger.get_bookkeeping_record(initial_record_id)
+            self.assertEqual(record["status"], "needs_review")
+            self.assertEqual(record["export_status"], "blocked_invalid_financial_fields")
+            self.assertEqual(record["review_required"], 1)
+            self.assertIsNone(record["vat_amount"])
+            self.assertEqual(record["metadata"]["evidenceVatAmount"], 8075.08)
+            self.assertEqual(record["line_items"][0]["tax_amount"], None)
+            actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
+            self.assertEqual(
+                actions.count("local_bookkeeping_records.invalid_financial_fields_suppressed"),
+                1,
+            )
+            self.assertEqual(second["financialFieldIssues"][0]["reason"], "vat_exceeds_total_ratio")
+
+    def test_dutch_record_date_is_normalized_without_losing_source_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "dutch-date",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Example Shop",
+                "category": "Office Supplies",
+                "transactionDate": "21.06.23",
+                "totalAmount": 12.5,
+                "confidenceScore": 0.94,
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["record_date"], "2023-06-21")
+            self.assertEqual(record["metadata"]["evidenceRecordDate"], "21.06.23")
+            self.assertEqual(record["metadata"]["financialFieldIssues"], [])
+
+    def test_impossible_record_date_is_suppressed_and_blocks_export(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "future-date",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Example Shop",
+                "category": "Office Supplies",
+                "transactionDate": "3038-06-10",
+                "totalAmount": 12.5,
+                "confidenceScore": 0.94,
+            })
+            initial_record_id = ledger.upsert_bookkeeping_record({
+                "documentId": document_id,
+                "sourceType": "document",
+                "recordType": "expense",
+                "status": "ready_to_route",
+                "exportStatus": "ready",
+                "recordDate": "3038-06-10",
+                "amount": 12.5,
+                "reviewRequired": False,
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(initial_record_id)
+
+            self.assertEqual(result["financialFieldIssues"][0]["reason"], "implausible_record_date_year")
+            self.assertIsNone(record["record_date"])
+            self.assertEqual(record["status"], "needs_review")
+            self.assertEqual(record["export_status"], "blocked_invalid_financial_fields")
+            self.assertEqual(record["metadata"]["evidenceRecordDate"], "3038-06-10")
+
+    def test_impossible_line_item_tax_is_suppressed_and_blocks_export(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "line-item-tax",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "processed",
+                "vendorName": "Example Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 20.0,
+                "vatAmount": 2.0,
+                "confidenceScore": 0.94,
+                "extractedData": {
+                    "line_items": [{
+                        "description": "Paper",
+                        "amount": 10.0,
+                        "tax_amount": 50.0,
+                    }],
+                },
+            })
+
+            result = LocalBookkeepingRecordService(ledger, {}).upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(
+                result["financialFieldIssues"][0]["field"],
+                "lineItems[0].taxAmount",
+            )
+            self.assertEqual(record["status"], "needs_review")
+            self.assertEqual(record["export_status"], "blocked_invalid_financial_fields")
+            self.assertIsNone(record["line_items"][0]["tax_amount"])
+            self.assertEqual(
+                record["line_items"][0]["metadata"]["financialFieldIssue"]["evidenceValue"],
+                50.0,
+            )
+
+    def test_non_posting_document_becomes_supporting_evidence_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "policy-record",
+                "originalFilename": "policy.pdf",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Insurer",
+                "category": "Insurance",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 6100000,
+            })
+            service = LocalBookkeepingRecordService(ledger, {})
+            initial = service.upsert_from_document(document_id)
+            self.assertEqual(ledger.get_bookkeeping_record(initial["recordId"])["amount"], 6100000.0)
+            ledger.update_document(document_id, {
+                "documentType": "insurance_policy",
+                "category": "Supporting Evidence",
+            })
+
+            result = service.upsert_from_document(document_id)
+            record = ledger.get_bookkeeping_record(result["recordId"])
+
+            self.assertEqual(record["record_type"], "supporting_document")
+            self.assertEqual(record["status"], "supporting_evidence")
+            self.assertEqual(record["export_status"], "not_applicable")
+            self.assertIsNone(record["amount"])
+            self.assertEqual(record["metadata"]["evidenceAmount"], 6100000.0)
+            self.assertEqual(record["line_item_count"], 0)
+            self.assertFalse(record["metadata"]["exportReadiness"]["readyForWaveDraft"])
+
     def test_resolve_record_applies_corrections_and_audit_history(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

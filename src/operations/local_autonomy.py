@@ -12,12 +12,19 @@ from src.operations.local_bank_transactions import LocalBankTransactionImportSer
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_close_readiness import LocalCloseReadinessService
+from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.local_exceptions import LocalExceptionQueueService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
-from src.operations.local_processing import LocalDocumentProcessor
+from src.operations.local_processing import (
+    LocalDocumentProcessor,
+    duplicate_candidate_reassessment_plan,
+    duplicate_link_cycles,
+    trusted_category_suggestion_candidates,
+)
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_targets import resolve_document_target_system
 from src.operations.local_routing import (
     PREPARED_ROUTING_STATUSES,
     ROUTABLE_BOOKKEEPING_EXPORT_STATUSES,
@@ -38,6 +45,7 @@ AUTONOMY_LEASE_NAME = "local_autonomous_cycle"
 WAVE_ENTITY_TARGETS = ("waveapps_business", "waveapps_personal")
 WAVE_ENTITY_TYPES = ("customer", "product", "invoice")
 AUTONOMY_EXECUTION_ORDER = (
+    "sync_connector_sources",
     "rescan_intake",
     "process_imported",
     "refresh_bank_records",
@@ -56,11 +64,12 @@ AUTONOMY_EXECUTION_ORDER = (
 class LocalAutonomousService:
     """Policy-gated local autonomy loop for FAB operations.
 
-    The loop only executes low-risk local work: folder intake, local processing,
-    Wave draft preparation, reconciliation candidate creation, and read-only
-    Wave planning. External posting, review resolution, credential changes,
-    restore, deletion, and customer-facing communication stay outside this
-    executor.
+    The loop only executes low-risk local work: read-only connector collection,
+    folder intake, local processing, Wave draft preparation, reconciliation
+    candidate creation, and read-only Wave planning. External posting, review
+    decisions, credential changes, restore, deletion, and customer-facing
+    communication stay outside this executor. It may clear stale machine-created
+    gates when current deterministic evidence disproves the original condition.
     """
 
     def __init__(
@@ -83,6 +92,7 @@ class LocalAutonomousService:
         bank_transactions: Optional[List[Dict[str, Any]]] = None,
         include_wave_plan: bool = True,
         include_wave_sync: bool = True,
+        include_connector_sync: bool = True,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
         readiness = self._readiness_summary()
@@ -110,6 +120,8 @@ class LocalAutonomousService:
         counts["staleMasterLedgerDrafts"] = len(stale_rows)
         counts["staleMasterLedgerTargets"] = _target_breakdown(stale_rows, _master_row_target_system)
         wave_entity_sync = self._wave_entity_sync_plan(include_wave_sync)
+        connector_sync = self._connector_sync_plan(include_connector_sync)
+        counts["connectorSyncableSources"] = len(connector_sync["syncableSources"])
         counts["waveEntitySyncConfiguredTargets"] = len(wave_entity_sync["configuredTargets"])
         counts["waveEntitySyncTargetsDue"] = len(wave_entity_sync["dueTargets"])
         blocked_reasons = self._blocked_reasons(readiness, health)
@@ -117,6 +129,21 @@ class LocalAutonomousService:
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
 
         actions = [
+            _action(
+                "sync_connector_sources",
+                "Collect configured Gmail, Drive, and other read-only document sources",
+                "collect",
+                "low",
+                "read_only",
+                connector_sync["requested"] and bool(connector_sync["syncableSources"]) and not blocked,
+                _connector_sync_blocked_reason(connector_sync),
+                {
+                    "enabledSources": connector_sync["enabledSources"],
+                    "syncableSources": connector_sync["syncableSources"],
+                    "sourceStates": connector_sync["sourceStates"],
+                    "externalSubmission": "not_executed",
+                },
+            ),
             _action(
                 "rescan_intake",
                 "Collect approved local/scanner folders",
@@ -145,13 +172,35 @@ class LocalAutonomousService:
             ),
             _action(
                 "process_imported",
-                "Process imported documents through OCR, extraction, validation, and review gates",
+                "Process documents, repair duplicate evidence, and apply trusted categories",
                 "extract_validate",
                 "low",
                 "safe_auto",
-                counts["importedDocuments"] > 0 and not blocked,
-                "No imported documents are waiting." if counts["importedDocuments"] == 0 else None,
-                {"candidateDocuments": counts["importedDocuments"], "limit": limit},
+                (
+                    counts["importedDocuments"] > 0
+                    or counts["trustedCategorySuggestions"] > 0
+                    or counts["duplicateLinkCycles"] > 0
+                    or counts["duplicateCandidateReassessments"] > 0
+                )
+                and not blocked,
+                "No imported documents or deterministic evidence repairs are waiting."
+                if (
+                    counts["importedDocuments"] == 0
+                    and counts["trustedCategorySuggestions"] == 0
+                    and counts["duplicateLinkCycles"] == 0
+                    and counts["duplicateCandidateReassessments"] == 0
+                )
+                else None,
+                {
+                    "candidateDocuments": counts["importedDocuments"],
+                    "trustedCategorySuggestions": counts["trustedCategorySuggestions"],
+                    "duplicateLinkCycles": counts["duplicateLinkCycles"],
+                    "duplicateCandidateReassessments": counts[
+                        "duplicateCandidateReassessments"
+                    ],
+                    "limit": limit,
+                    "externalSubmission": "not_executed",
+                },
             ),
             _action(
                 "prepare_wave_drafts",
@@ -414,6 +463,7 @@ class LocalAutonomousService:
         include_wave_plan: bool = True,
         dry_run: bool = False,
         include_wave_sync: bool = True,
+        include_connector_sync: bool = True,
         allowed_action_ids: Optional[List[str]] = None,
         trigger_source: str = AUTONOMOUS_TRIGGER,
         workflow_metadata: Optional[Dict[str, Any]] = None,
@@ -427,6 +477,7 @@ class LocalAutonomousService:
                 include_wave_plan=include_wave_plan,
                 dry_run=True,
                 include_wave_sync=include_wave_sync,
+                include_connector_sync=include_connector_sync,
                 allowed_action_ids=allowed_action_ids,
                 trigger_source=trigger_source,
                 workflow_metadata=workflow_metadata,
@@ -451,6 +502,7 @@ class LocalAutonomousService:
                 bank_transactions=bank_transactions,
                 include_wave_plan=include_wave_plan,
                 include_wave_sync=include_wave_sync,
+                include_connector_sync=include_connector_sync,
             )
             self.ledger.record_audit_event({
                 "action": "local_autonomy.cycle_skipped_already_running",
@@ -478,6 +530,7 @@ class LocalAutonomousService:
                 include_wave_plan=include_wave_plan,
                 dry_run=False,
                 include_wave_sync=include_wave_sync,
+                include_connector_sync=include_connector_sync,
                 allowed_action_ids=allowed_action_ids,
                 trigger_source=trigger_source,
                 workflow_metadata=workflow_metadata,
@@ -511,6 +564,7 @@ class LocalAutonomousService:
         include_wave_plan: bool = True,
         dry_run: bool = False,
         include_wave_sync: bool = True,
+        include_connector_sync: bool = True,
         allowed_action_ids: Optional[List[str]] = None,
         trigger_source: str = AUTONOMOUS_TRIGGER,
         workflow_metadata: Optional[Dict[str, Any]] = None,
@@ -536,6 +590,7 @@ class LocalAutonomousService:
             bank_transactions=bank_transactions,
             include_wave_plan=include_wave_plan,
             include_wave_sync=include_wave_sync,
+            include_connector_sync=include_connector_sync,
         )
         if dry_run:
             return {
@@ -691,6 +746,15 @@ class LocalAutonomousService:
         })
 
         try:
+            connector_action = plan_actions["sync_connector_sources"]
+            execute_step(
+                "sync_connector_sources",
+                self._can_run(plan, "sync_connector_sources"),
+                lambda: self._run_connector_sync(
+                    list(connector_action["evidence"].get("syncableSources") or [])
+                ),
+            )
+
             execute_step(
                 "rescan_intake",
                 self._can_run(plan, "rescan_intake"),
@@ -878,6 +942,16 @@ class LocalAutonomousService:
 
     def _counts(self, limit: int) -> Dict[str, Any]:
         metrics = self.ledger.dashboard_metrics()
+        trusted_category_suggestions = trusted_category_suggestion_candidates(
+            self.ledger,
+            self.config,
+            limit=limit,
+        )
+        duplicate_candidate_reassessments = duplicate_candidate_reassessment_plan(
+            self.ledger,
+            self.config,
+            limit=500,
+        )
         routable_documents = self.ledger.list_documents(status=ROUTABLE_DOCUMENT_STATUSES, limit=limit)
         routable_records = [
             record for record in self.ledger.list_bookkeeping_records(
@@ -893,6 +967,11 @@ class LocalAutonomousService:
         approved_export_attempts = self.ledger.list_export_attempts(status="approved", limit=500)
         return {
             "importedDocuments": len(self.ledger.list_documents(status=IMPORTED_DOCUMENT_STATUSES, limit=limit)),
+            "duplicateLinkCycles": len(duplicate_link_cycles(self.ledger)),
+            "duplicateCandidateReassessments": len(
+                duplicate_candidate_reassessments
+            ),
+            "trustedCategorySuggestions": len(trusted_category_suggestions),
             "routableDocuments": len(routable_documents),
             "routableBookkeepingRecords": len(routable_records),
             "routableTargets": _merge_breakdowns(
@@ -930,6 +1009,28 @@ class LocalAutonomousService:
         ):
             reasons.append("operations_health_blocked")
         return reasons
+
+    def _connector_sync_plan(self, include_connector_sync: bool) -> Dict[str, Any]:
+        plan = LocalConnectorIntakeService(self.ledger, self.config).plan()
+        return {
+            "requested": bool(include_connector_sync),
+            "enabledSources": list(plan.get("enabledSources") or []),
+            "syncableSources": (
+                list(plan.get("syncableSources") or [])
+                if include_connector_sync
+                else []
+            ),
+            "sourceStates": [
+                {
+                    "source": source.get("source"),
+                    "status": source.get("status"),
+                    "enabled": bool(source.get("enabled")),
+                    "canSync": bool(source.get("canSync")),
+                    "targetSystem": source.get("targetSystem"),
+                }
+                for source in plan.get("sources") or []
+            ],
+        }
 
     def _wave_entity_sync_plan(self, include_wave_sync: bool) -> Dict[str, Any]:
         enabled = include_wave_sync and _bool_config(
@@ -1018,6 +1119,25 @@ class LocalAutonomousService:
             allowed_extensions=self.intake_extensions,
         ).rescan(self.intake_paths)
         return {"id": "rescan_intake", "status": "completed", "summary": summary}
+
+    def _run_connector_sync(self, sources: List[str]) -> Dict[str, Any]:
+        result = LocalConnectorIntakeService(self.ledger, self.config).sync(
+            sources=sources,
+            actor="local_autonomy",
+            trigger_source=AUTONOMOUS_TRIGGER,
+            workflow_metadata={"parentWorkflow": AUTONOMOUS_TRIGGER},
+        )
+        if not result.get("success"):
+            status = str(result.get("status") or "failed")
+            raise RuntimeError(f"Connector source collection ended as {status}")
+        return {
+            "id": "sync_connector_sources",
+            "status": "completed",
+            "summary": result.get("summary") or {},
+            "sources": sources,
+            "connectorWorkflowRunId": result.get("workflowRunId"),
+            "externalSubmission": "not_executed",
+        }
 
     def _run_processing(self, limit: int) -> Dict[str, Any]:
         summary = LocalDocumentProcessor(self.ledger, self.config).process_imported(limit=limit)
@@ -1574,6 +1694,16 @@ def _timestamp_age_hours(value: Any, now: datetime) -> Optional[float]:
     return max((now - parsed.astimezone(timezone.utc)).total_seconds() / 3600.0, 0.0)
 
 
+def _connector_sync_blocked_reason(sync_plan: Dict[str, Any]) -> Optional[str]:
+    if not sync_plan.get("requested"):
+        return "Connector source collection was disabled for this request."
+    if not sync_plan.get("enabledSources"):
+        return "No connector document sources are enabled."
+    if not sync_plan.get("syncableSources"):
+        return "Enabled connector sources require credentials, consent, or an approved source scope."
+    return None
+
+
 def _wave_entity_sync_blocked_reason(sync_plan: Dict[str, Any]) -> Optional[str]:
     if not sync_plan.get("requested"):
         return "Wave entity mirror refresh was disabled for this request."
@@ -1588,14 +1718,20 @@ def _wave_entity_sync_blocked_reason(sync_plan: Dict[str, Any]) -> Optional[str]
 
 def _registered_documents(executed: List[Dict[str, Any]]) -> bool:
     for action in executed:
-        if action.get("id") == "rescan_intake" and (action.get("summary") or {}).get("registered", 0) > 0:
+        if action.get("id") in {"sync_connector_sources", "rescan_intake"} and (
+            action.get("summary") or {}
+        ).get("registered", 0) > 0:
             return True
     return False
 
 
 def _processed_documents(executed: List[Dict[str, Any]]) -> bool:
     for action in executed:
-        if action.get("id") == "process_imported" and (action.get("summary") or {}).get("processed", 0) > 0:
+        if action.get("id") != "process_imported":
+            continue
+        summary = action.get("summary") or {}
+        trusted = summary.get("trustedCategoryAutomation") or {}
+        if summary.get("processed", 0) > 0 or trusted.get("readyDocuments", 0) > 0:
             return True
     return False
 
@@ -1658,18 +1794,7 @@ def _merge_breakdowns(*breakdowns: Dict[str, int]) -> Dict[str, int]:
 
 
 def _document_target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
-    return _first_present(
-        routing.get("targetSystem"),
-        routing.get("target_system"),
-        metadata.get("targetSystem"),
-        metadata.get("target_system"),
-        extracted.get("target_system"),
-        extracted.get("targetSystem"),
-        "waveapps",
-    )
+    return resolve_document_target_system(document, default="waveapps")
 
 
 def _record_target_system(record: Dict[str, Any]) -> str:

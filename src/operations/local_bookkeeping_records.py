@@ -1,7 +1,14 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
+from src.validation.financial_consistency import (
+    DEFAULT_VAT_MAX_TOTAL_RATIO,
+    assess_record_date,
+    assess_vat_amount,
+)
 
 
 BOOKKEEPING_RECORD_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored", "needs_review"}
@@ -34,16 +41,49 @@ class LocalBookkeepingRecordService:
             "ml_confidence_threshold",
             default=0.7,
         )
+        self.vat_max_total_ratio = _float_config(
+            self.config,
+            "vat_max_total_ratio",
+            "document_processing_vat_max_total_ratio",
+            default=DEFAULT_VAT_MAX_TOTAL_RATIO,
+        )
 
     def upsert_from_document(self, document_id: int, status: Optional[str] = None) -> Dict[str, Any]:
         document = self.ledger.get_document(document_id)
         if not document:
             return {"success": False, "status": "not_found", "error": "Document not found"}
 
+        existing_record = self.ledger.get_bookkeeping_record_by_document(document_id)
         payload = self._document_record_payload(document, status=status)
         record_id = self.ledger.upsert_bookkeeping_record(payload)
+        if payload.get("recordType") == "supporting_document":
+            self.ledger.clear_bookkeeping_record_financial_values(record_id)
+        else:
+            issue_fields = {
+                str(issue.get("field") or "")
+                for issue in payload.get("metadata", {}).get("financialFieldIssues") or []
+            }
+            if "vatAmount" in issue_fields:
+                self.ledger.clear_bookkeeping_record_vat_amount(record_id)
+            if "recordDate" in issue_fields:
+                self.ledger.clear_bookkeeping_record_date(record_id)
         line_items = _document_line_items(document, payload)
         self.ledger.replace_bookkeeping_record_line_items(record_id, line_items)
+        financial_field_issues = list(payload.get("metadata", {}).get("financialFieldIssues") or [])
+        previous_financial_field_issues = list(
+            ((existing_record or {}).get("metadata") or {}).get("financialFieldIssues") or []
+        )
+        if financial_field_issues and financial_field_issues != previous_financial_field_issues:
+            self.ledger.record_audit_event({
+                "action": "local_bookkeeping_records.invalid_financial_fields_suppressed",
+                "entityType": "bookkeeping_record",
+                "entityId": str(record_id),
+                "details": {
+                    "documentId": document_id,
+                    "issues": financial_field_issues,
+                    "externalSubmission": "not_executed",
+                },
+            })
         return {
             "success": True,
             "recordId": record_id,
@@ -53,6 +93,7 @@ class LocalBookkeepingRecordService:
             "reconciliationStatus": payload["reconciliationStatus"],
             "reviewRequired": bool(payload["reviewRequired"]),
             "lineItemCount": len(line_items),
+            "financialFieldIssues": financial_field_issues,
         }
 
     def upsert_from_bank_transaction(
@@ -132,11 +173,18 @@ class LocalBookkeepingRecordService:
 
     def refresh_documents(self, limit: int = 100) -> Dict[str, Any]:
         documents = self.ledger.list_documents(limit=limit)
-        summary = {"requested": len(documents), "updated": 0, "failed": 0, "records": []}
+        summary = {
+            "requested": len(documents),
+            "updated": 0,
+            "failed": 0,
+            "financialFieldIssues": 0,
+            "records": [],
+        }
         for document in documents:
             result = self.upsert_from_document(int(document["id"]))
             if result.get("success"):
                 summary["updated"] += 1
+                summary["financialFieldIssues"] += len(result.get("financialFieldIssues") or [])
             else:
                 summary["failed"] += 1
             summary["records"].append(result)
@@ -332,11 +380,42 @@ class LocalBookkeepingRecordService:
     ) -> Dict[str, Any]:
         extracted = dict(document.get("extracted_data") or {})
         metadata = dict(document.get("metadata") or {})
+        document_type = str(_first_present(document.get("document_type"), extracted.get("document_type"), "") or "").lower()
+        non_posting = is_non_posting_document_type(document_type)
         vendor_name = _first_present(document.get("vendor_name"), extracted.get("vendor_name"))
         category = _first_present(document.get("category"), extracted.get("category"))
-        record_date = _first_present(document.get("transaction_date"), extracted.get("transaction_date"))
-        amount = _float(_first_present(document.get("total_amount"), extracted.get("total_amount"), extracted.get("amount")))
-        vat_amount = _float(_first_present(document.get("vat_amount"), extracted.get("vat_amount")))
+        evidence_record_date = _first_present(document.get("transaction_date"), extracted.get("transaction_date"))
+        record_date_assessment = assess_record_date(evidence_record_date)
+        record_date = record_date_assessment["normalizedValue"] if record_date_assessment["valid"] else None
+        evidence_amount = _float(_first_present(
+            document.get("total_amount"),
+            extracted.get("total_amount"),
+            extracted.get("amount"),
+        ))
+        amount = _posting_amount(evidence_amount, document_type)
+        evidence_vat_amount = _float(_first_present(document.get("vat_amount"), extracted.get("vat_amount")))
+        posting_vat_amount = _posting_amount(evidence_vat_amount, document_type)
+        vat_assessment = assess_vat_amount(
+            posting_vat_amount,
+            amount,
+            max_ratio=self.vat_max_total_ratio,
+        )
+        vat_amount = posting_vat_amount if vat_assessment["valid"] else None
+        financial_field_issues = []
+        if not non_posting and not record_date_assessment["valid"]:
+            financial_field_issues.append({
+                "field": "recordDate",
+                "reason": record_date_assessment["reason"],
+                "evidenceValue": evidence_record_date,
+                "assessment": record_date_assessment,
+            })
+        if not non_posting and not vat_assessment["valid"]:
+            financial_field_issues.append({
+                "field": "vatAmount",
+                "reason": vat_assessment["reason"],
+                "evidenceValue": evidence_vat_amount,
+                "assessment": vat_assessment,
+            })
         currency = str(_first_present(extracted.get("currency"), metadata.get("currency"), "EUR") or "EUR").upper()
         confidence = _float(document.get("confidence_score"))
         target_account = _first_present(
@@ -345,11 +424,37 @@ class LocalBookkeepingRecordService:
             extracted.get("target_account"),
         )
         description = _first_present(extracted.get("description"), document.get("original_filename"))
+        line_items = [] if non_posting else _document_line_items_from_values(
+            extracted=extracted,
+            category=category,
+            target_account=target_account,
+            amount=amount,
+            vat_amount=vat_amount,
+            description=description,
+            confidence=confidence,
+        )
+        for index, item in enumerate(line_items):
+            item_metadata = item.get("metadata") or {}
+            line_item_issues = item_metadata.get("financialFieldIssues") or []
+            if not isinstance(line_item_issues, list):
+                line_item_issues = []
+            single_issue = item_metadata.get("financialFieldIssue")
+            if isinstance(single_issue, dict) and single_issue not in line_item_issues:
+                line_item_issues = [single_issue, *line_item_issues]
+            for line_item_issue in line_item_issues:
+                if not isinstance(line_item_issue, dict):
+                    continue
+                evidence_index = line_item_issue.get("evidenceLineItemIndex", index)
+                financial_field_issues.append({
+                    **line_item_issue,
+                    "field": f"lineItems[{evidence_index}].taxAmount",
+                    "lineItemIndex": evidence_index,
+                })
         open_reviews = [
             item for item in document.get("review_items") or []
             if item.get("status") in OPEN_REVIEW_STATUSES
         ]
-        missing_fields = _missing_document_fields(
+        missing_fields = [] if non_posting else _missing_document_fields(
             vendor_name=vendor_name,
             category=category,
             record_date=record_date,
@@ -361,35 +466,48 @@ class LocalBookkeepingRecordService:
             confidence=confidence,
             open_reviews=open_reviews,
             missing_fields=missing_fields,
-        )
+        ) or bool(financial_field_issues)
         latest_routing = _latest_routing_attempt(document)
-        record_status = status or _record_status_for_document(
-            str(document.get("processing_status") or "draft"),
+        if non_posting and not review_required:
+            record_status = status or "supporting_evidence"
+        else:
+            record_status = status or _record_status_for_document(
+                str(document.get("processing_status") or "draft"),
+                review_required=review_required,
+            )
+        if financial_field_issues:
+            record_status = "needs_review"
+        export_status = "not_applicable" if non_posting else _export_status_for_document(
+            document,
+            latest_routing,
             review_required=review_required,
         )
-        export_status = _export_status_for_document(document, latest_routing, review_required=review_required)
-        line_items = _document_line_items_from_values(
-            extracted=extracted,
-            category=category,
-            target_account=target_account,
-            amount=amount,
-            vat_amount=vat_amount,
-            description=description,
-            confidence=confidence,
+        if financial_field_issues:
+            export_status = "blocked_invalid_financial_fields"
+        export_readiness = (
+            {
+                "lineItemCount": 0,
+                "hasTaxEvidence": False,
+                "missingAccountMapping": [],
+                "missingTaxCode": [],
+                "postingEligible": False,
+                "readyForWaveDraft": False,
+            }
+            if non_posting
+            else _line_item_export_readiness(line_items, vat_amount)
         )
-        export_readiness = _line_item_export_readiness(line_items, vat_amount)
         return {
             "documentId": document.get("id"),
             "sourceType": "document",
-            "recordType": _record_type(document, extracted, amount),
+            "recordType": "supporting_document" if non_posting else _record_type(document, extracted, amount),
             "status": record_status,
             "targetSystem": _target_system(document, extracted),
             "targetAccount": target_account,
             "vendorName": vendor_name,
             "category": category,
             "recordDate": record_date,
-            "amount": amount,
-            "vatAmount": vat_amount,
+            "amount": None if non_posting else amount,
+            "vatAmount": None if non_posting else vat_amount,
             "currency": currency,
             "description": description,
             "confidenceScore": confidence,
@@ -401,6 +519,30 @@ class LocalBookkeepingRecordService:
                 "sourceDocumentId": document.get("source_document_id"),
                 "originalFilename": document.get("original_filename"),
                 "documentType": document.get("document_type"),
+                "nonPostingDocumentType": non_posting,
+                "postingDirection": "credit" if document_type == "credit_note" else "standard",
+                "evidenceAmount": (
+                    evidence_amount
+                    if non_posting or evidence_amount != amount
+                    else None
+                ),
+                "evidenceVatAmount": (
+                    evidence_vat_amount
+                    if non_posting or evidence_vat_amount != vat_amount or any(
+                        issue.get("field") == "vatAmount" for issue in financial_field_issues
+                    )
+                    else None
+                ),
+                "evidenceRecordDate": (
+                    evidence_record_date
+                    if evidence_record_date and evidence_record_date != record_date
+                    else None
+                ),
+                "financialFieldControls": {
+                    "recordDate": record_date_assessment,
+                    "vat": vat_assessment,
+                },
+                "financialFieldIssues": financial_field_issues,
                 "documentProcessingStatus": document.get("processing_status"),
                 "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
                 "missingFields": missing_fields,
@@ -558,27 +700,26 @@ def _export_status_for_document(
 
 
 def _target_system(document: Dict[str, Any], extracted: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    target = str(_first_present(
-        metadata.get("targetSystem"),
-        metadata.get("target_system"),
-        extracted.get("target_system"),
-        "waveapps",
-    ) or "waveapps").strip()
-    if target.lower() in {"", "none", "unknown"}:
-        return "waveapps"
-    return target
+    return resolve_document_target_system(document, extracted, default="waveapps")
 
 
 def _record_type(document: Dict[str, Any], extracted: Dict[str, Any], amount: Optional[float]) -> str:
     document_type = str(_first_present(document.get("document_type"), extracted.get("document_type"), "") or "").lower()
     if document_type in {"invoice", "sales_invoice", "estimate"}:
         return "income"
-    if document_type == "bill":
+    if document_type in {"bill", "purchase_invoice", "vendor_invoice", "unpaid_purchase"}:
         return "bill"
     if amount is not None and amount < 0:
         return "expense"
     return "expense"
+
+
+def _posting_amount(value: Optional[float], document_type: str) -> Optional[float]:
+    if value is None:
+        return None
+    if document_type == "credit_note":
+        return -abs(value)
+    return value
 
 
 def _latest_routing_attempt(document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -653,6 +794,8 @@ def _record_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _document_line_items(document: Dict[str, Any], record_payload: Dict[str, Any]) -> list:
+    if record_payload.get("recordType") == "supporting_document":
+        return []
     extracted = dict(document.get("extracted_data") or {})
     return _document_line_items_from_values(
         extracted=extracted,
@@ -690,15 +833,84 @@ def _document_line_items_from_values(
         if isinstance(item, dict)
     ]
     normalized = [item for item in normalized if _line_item_has_value(item)]
-    if normalized:
-        return normalized
+    normalized_with_amounts = [
+        item for item in normalized
+        if item.get("amount") is not None
+    ]
+    evidence_line_total = round(
+        sum(float(item["amount"]) for item in normalized_with_amounts),
+        2,
+    )
+    evidence_tax_total = round(
+        sum(float(item["taxAmount"]) for item in normalized_with_amounts if item.get("taxAmount") is not None),
+        2,
+    )
+    evidence_gross_total = round(evidence_line_total + evidence_tax_total, 2)
+    document_total = _float(amount)
+    tolerance = max(0.02, abs(document_total or 0.0) * 0.01)
+    direct_reconciliation = (
+        document_total is None
+        or abs(evidence_line_total - document_total) <= tolerance
+        or abs(evidence_gross_total - document_total) <= tolerance
+    )
+    absolute_reconciliation = (
+        document_total is not None
+        and (
+            abs(abs(evidence_line_total) - abs(document_total)) <= tolerance
+            or abs(abs(evidence_gross_total) - abs(document_total)) <= tolerance
+        )
+    )
+    if normalized_with_amounts and direct_reconciliation:
+        return normalized_with_amounts
+    if normalized_with_amounts and absolute_reconciliation:
+        direction = -1.0 if document_total < 0 else 1.0
+        return [
+            {
+                **item,
+                "amount": round(abs(float(item["amount"])) * direction, 2),
+                "taxAmount": (
+                    round(abs(float(item["taxAmount"])) * direction, 2)
+                    if item.get("taxAmount") is not None
+                    else None
+                ),
+                "metadata": {
+                    **dict(item.get("metadata") or {}),
+                    "postingDirectionNormalized": True,
+                },
+            }
+            for item in normalized_with_amounts
+        ]
 
+    fallback_financial_issues = [
+        {
+            **issue,
+            "evidenceLineItemIndex": index,
+        }
+        for index, item in enumerate(normalized)
+        for issue in [(item.get("metadata") or {}).get("financialFieldIssue")]
+        if isinstance(issue, dict)
+    ]
     return [_normalize_line_item(
         {
             "description": description,
             "amount": amount,
-            "taxAmount": vat_amount,
-            "metadata": {"fallback": "document_total"},
+            "taxAmount": None if fallback_financial_issues else vat_amount,
+            "metadata": {
+                "fallback": "document_total",
+                "fallbackReason": (
+                    "no_extracted_line_amounts"
+                    if not normalized_with_amounts
+                    else "extracted_line_total_mismatch"
+                ),
+                "evidenceLineItemCount": len(normalized),
+                "evidenceLineAmountCount": len(normalized_with_amounts),
+                "evidenceLineTotal": evidence_line_total if normalized_with_amounts else None,
+                "evidenceLineTaxTotal": evidence_tax_total if normalized_with_amounts else None,
+                "evidenceLineGrossTotal": evidence_gross_total if normalized_with_amounts else None,
+                "documentTotal": document_total,
+                "financialFieldIssue": fallback_financial_issues[0] if fallback_financial_issues else None,
+                "financialFieldIssues": fallback_financial_issues,
+            },
         },
         category=category,
         target_account=target_account,
@@ -741,19 +953,26 @@ def _normalize_line_item(
     fallback_source: str,
 ) -> Dict[str, Any]:
     quantity = _float(_first_present(item.get("quantity"), item.get("qty")))
-    amount = _float(_first_present(item.get("amount"), item.get("total_amount"), item.get("totalAmount")))
+    amount = _float(_first_present(
+        item.get("amount"),
+        item.get("total"),
+        item.get("total_amount"),
+        item.get("totalAmount"),
+    ))
     unit_price = _float(_first_present(item.get("unit_price"), item.get("unitPrice"), item.get("price")))
     if amount is None and unit_price is not None and quantity not in (None, 0):
         amount = unit_price * quantity
     if unit_price is None and amount is not None and quantity not in (None, 0):
         unit_price = amount / quantity
 
-    tax_amount = _float(_first_present(
+    evidence_tax_amount = _float(_first_present(
         item.get("tax_amount"),
         item.get("taxAmount"),
         item.get("vat_amount"),
         item.get("vatAmount"),
     ))
+    tax_assessment = assess_vat_amount(evidence_tax_amount, amount)
+    tax_amount = evidence_tax_amount if tax_assessment["valid"] else None
     tax_rate = _float(_first_present(
         item.get("tax_rate"),
         item.get("taxRate"),
@@ -775,6 +994,14 @@ def _normalize_line_item(
         item.get("targetAccount"),
         target_account,
     )
+    metadata = dict(item.get("metadata") or {})
+    if not tax_assessment["valid"]:
+        metadata["financialFieldIssue"] = {
+            "field": "taxAmount",
+            "reason": tax_assessment["reason"],
+            "evidenceValue": evidence_tax_amount,
+            "assessment": tax_assessment,
+        }
     return {
         "itemName": item_name,
         "description": description,
@@ -788,7 +1015,7 @@ def _normalize_line_item(
         "accountName": account_name,
         "source": item.get("source") or fallback_source,
         "confidenceScore": _float(_first_present(item.get("confidence_score"), item.get("confidenceScore"), fallback_confidence)),
-        "metadata": item.get("metadata") or {},
+        "metadata": metadata,
     }
 
 

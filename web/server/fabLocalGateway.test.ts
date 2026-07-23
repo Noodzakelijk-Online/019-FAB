@@ -3,11 +3,20 @@ import {
   fabLocalRequest,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
+  resetFabControlCenterCacheForTests,
+  resolveFabReviewItem,
   runFabOperatorCommand,
+  saveFabWaveSetup,
+  startFabGmailAuthorization,
+  startFabGoogleDriveAuthorization,
+  uploadFabGmailCredentials,
+  uploadFabGoogleDriveCredentials,
   uploadFabIntakeFile,
+  validateFabWaveSetup,
 } from "./fabLocalGateway";
 
 afterEach(() => {
+  resetFabControlCenterCacheForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -54,7 +63,10 @@ describe("FAB local API gateway", () => {
         exceptions: [{ id: "exception-1", severity: "high" }],
       },
       "/api/settings": {
-        sources: [{ id: "google_drive", label: "Google Drive", status: "ready", configured: true }],
+        sources: [
+          { id: "google_drive", label: "Google Drive", status: "ready", configured: true },
+          { id: "waveapps_business", label: "Wave - Noodzakelijk Online", status: "attention", configured: false },
+        ],
       },
       "/api/sources/readiness": {
         sources: [{ source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." }],
@@ -68,31 +80,324 @@ describe("FAB local API gateway", () => {
       "/api/close-readiness": { status: "blocked", canClose: false, blockingCount: 2 },
       "/api/hai/status": { status: "ready", enabled: true, allowedCommandIds: ["run_safe_cycle", "refresh_notifications"] },
       "/api/hai/manifest": { version: "fab-hai-connector-v1", commands: [] },
+      "/api/drive-wave/status": { status: "ready", archiveEnabled: true, driveTokenPresent: true },
+      "/api/drive-wave/work-orders": {
+        count: 1,
+        summary: { needsAttachmentVerification: 1, readyToArchive: 0 },
+        workOrders: [{
+          workOrderId: "drive-wave-7-abcd",
+          documentId: 7,
+          stage: "upload_and_verify_attachment",
+          actionRequired: "Verify the attachment.",
+          source: {
+            filename: "receipt.pdf",
+            mimeType: "application/pdf",
+            provider: "google_drive",
+            sha256: "abc123",
+            attachmentId: "private-provider-attachment",
+            localPath: "C:\\private\\receipt.pdf",
+          },
+          wave: {
+            externalTransactionId: null,
+            targetSystem: "waveapps_business",
+            expectedFields: { vendor: "Example" },
+          },
+          archivePlan: {
+            canArchive: false,
+            reasons: ["wave_attachment_evidence_missing"],
+            evidenceDigest: "private-evidence-digest",
+          },
+          reviews: { blocking: 1, open: 1, reasons: ["manual_review_category"] },
+          browserExecution: { transactionListUrl: "https://example.test/private" },
+          evidence: { template: { businessId: "private-business-id" } },
+        }],
+      },
+      "/api/connectors/google-drive/authorization": {
+        status: "ready_to_authorize",
+        credentialsPresent: true,
+        tokenPresent: false,
+        folderConfigured: true,
+      },
+      "/api/connectors/gmail/authorization": {
+        status: "ready_to_authorize",
+        credentialsPresent: true,
+        tokenPresent: false,
+        scannerMode: true,
+        trustedSenders: ["eprintcenter@hp8.us"],
+      },
+      "/api/wave/setup": {
+        status: "needs_mapping",
+        ready: false,
+        targetSystem: "waveapps_business",
+        businessId: "business-1",
+        accessTokenConfigured: true,
+        accounts: [{ id: "account-1", name: "Current Account" }],
+        mapping: { verified: false },
+      },
+      "/api/review": {
+        summary: {
+          reviewItems: 3,
+          documents: 2,
+          postingBlockedDocuments: 1,
+          postingBlockedReviewItems: 2,
+          evidenceOnlyDocuments: 1,
+          evidenceOnlyReviewItems: 1,
+          duplicateCandidates: 0,
+        },
+        categoryOptions: ["Operations | Office Supplies"],
+        workItems: [{
+          id: "document-7",
+          documentId: 7,
+          reasons: ["manual_review_category"],
+          reviewPath: "/documents/7",
+          document: {
+            filename: "receipt.pdf",
+            vendorName: "Example",
+            category: "Manual Review",
+            categorySuggestion: {
+              category: "Office Supplies",
+              confidenceScore: 0.97,
+              rationale: "Exact vendor match.",
+              privateModelTrace: "omit-this",
+            },
+            ocrExcerpt: "Source evidence",
+            privateInternalMetadata: { raw: true },
+          },
+          duplicateCandidates: [{
+            id: 11,
+            candidateDocumentId: 6,
+            matchType: "fuzzy_document_match",
+            confidenceScore: 0.96,
+            matchedIdentityFields: ["vendor", "date", "amount", "transaction_reference"],
+            conflictingIdentityFields: [],
+            comparableFields: 4,
+            similarityScore: 1,
+            currentIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+              privateReference: "omit-this",
+            },
+            candidateIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+            },
+            document: {
+              filename: "possible-duplicate.pdf",
+              vendorName: "Example",
+              transactionDate: "2026-07-01",
+              totalAmount: 42,
+              ocrExcerpt: "omit duplicate OCR",
+            },
+            evidence: { duplicateFingerprint: "omit-this" },
+          }],
+          reviewItems: [{
+            id: 9,
+            reason: "manual_review_category",
+            details: "Verify category.",
+            correctedData: { private: true },
+          }],
+        }],
+      },
     };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       const fixture = fixtures[url.pathname];
       return new Response(JSON.stringify(fixture ?? {}), {
         status: fixture ? 200 : 404,
         headers: { "content-type": "application/json" },
       });
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const result = await getFabControlCenter();
 
     expect(result.connection.connected).toBe(true);
-    expect(result.metrics).toMatchObject({ documents: 18, pendingReview: 4, unreconciled: 5, exceptions: 2 });
+    expect(result.metrics).toMatchObject({
+      documents: 18,
+      pendingReview: 4,
+      pendingReviewDocuments: 2,
+      postingBlockedReviewDocuments: 1,
+      unreconciled: 5,
+      exceptions: 2,
+    });
+    expect(result.resourceStates.metrics.state).toBe("live");
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
+      expect.objectContaining({
+        id: "waveapps_business",
+        status: "needs_mapping",
+        configured: true,
+        ready: false,
+        nextAction: "Map the verified funding account and every FAB category currently in use.",
+      }),
       expect.objectContaining({
         id: "hai",
         status: "ready",
         allowedCommandIds: ["run_safe_cycle", "refresh_notifications"],
-        details: "Governed machine control is enabled for 2 local-safe commands.",
+        details: "Governed machine control is enabled for 2 allowlisted commands.",
       }),
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
-    expect(JSON.stringify(result)).not.toContain("private-token");
+    expect(result.delivery).toMatchObject({
+      count: 1,
+      summary: { needsAttachmentVerification: 1 },
+      workOrders: [expect.objectContaining({
+        documentId: 7,
+        source: {
+          filename: "receipt.pdf",
+          mimeType: "application/pdf",
+          provider: "google_drive",
+          sha256: "abc123",
+        },
+        archivePlan: {
+          canArchive: false,
+          reasons: ["wave_attachment_evidence_missing"],
+        },
+      })],
+    });
+    expect(result.reviews).toMatchObject({
+      summary: {
+        reviewItems: 3,
+        documents: 2,
+        postingBlockedDocuments: 1,
+        evidenceOnlyDocuments: 1,
+      },
+      categoryOptions: ["Operations | Office Supplies"],
+      workItems: [expect.objectContaining({
+        documentId: 7,
+        document: expect.objectContaining({
+          filename: "receipt.pdf",
+          vendorName: "Example",
+          ocrExcerpt: "Source evidence",
+          categorySuggestion: {
+            category: "Office Supplies",
+            confidenceScore: 0.97,
+            rationale: "Exact vendor match.",
+          },
+        }),
+        duplicateCandidates: [
+          expect.objectContaining({
+            id: 11,
+            candidateDocumentId: 6,
+            matchType: "fuzzy_document_match",
+            matchedIdentityFields: ["vendor", "date", "amount", "transaction_reference"],
+            currentIdentity: {
+              vendor: "example",
+              date: "2026 07 01",
+              amount: "42.00",
+              transactionReference: "tx1234",
+            },
+            document: {
+              filename: "possible-duplicate.pdf",
+              vendorName: "Example",
+              transactionDate: "2026-07-01",
+              totalAmount: 42,
+            },
+          }),
+        ],
+        reviewItems: [
+          expect.objectContaining({
+            id: 9,
+            reason: "manual_review_category",
+            details: "Verify category.",
+          }),
+        ],
+      })],
+    });
+    expect(result.driveAuthorization).toMatchObject({
+      status: "ready_to_authorize",
+      credentialsPresent: true,
+      tokenPresent: false,
+    });
+    expect(result.gmailAuthorization).toMatchObject({
+      status: "ready_to_authorize",
+      scannerMode: true,
+      trustedSenders: ["eprintcenter@hp8.us"],
+    });
+    expect(result.waveSetup).toMatchObject({
+      status: "needs_mapping",
+      accessTokenConfigured: true,
+      businessId: "business-1",
+    });
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/api/review" && url.searchParams.get("limit") === "500";
+    })).toBe(true);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("private-token");
+    expect(serialized).not.toContain("private-provider-attachment");
+    expect(serialized).not.toContain("C:\\private\\receipt.pdf");
+    expect(serialized).not.toContain("private-evidence-digest");
+    expect(serialized).not.toContain("private-business-id");
+    expect(serialized).not.toContain("privateModelTrace");
+    expect(serialized).not.toContain("privateReference");
+    expect(serialized).not.toContain("privateInternalMetadata");
+    expect(serialized).not.toContain("omit duplicate OCR");
+    expect(serialized).not.toContain("duplicateFingerprint");
+    expect(serialized).not.toContain("correctedData");
+  });
+
+  it("does not turn unavailable resources into reassuring zeroes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error("local API offline");
+    }));
+
+    const result = await getFabControlCenter();
+
+    expect(result.connection.connected).toBe(false);
+    expect(result.metrics).toMatchObject({
+      documents: null,
+      pendingReview: null,
+      pendingReviewDocuments: null,
+      postingBlockedReviewDocuments: null,
+      unreconciled: null,
+      exceptions: null,
+    });
+    expect(result.resourceStates.metrics).toMatchObject({ state: "error", updatedAt: null });
+    expect(result.resourceStates.exceptions.state).toBe("error");
+  });
+
+  it("retains last valid resource data as visibly stale after a partial failure", async () => {
+    let failMetrics = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (failMetrics && ["/api/dashboard", "/api/exceptions"].includes(path)) {
+        return new Response(JSON.stringify({ error: "resource unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const value = path === "/api/dashboard"
+        ? { documents: 7, pending_review: 3, unreconciled_bank_transactions: 2, unreconciled_documents: 1, failed_documents: 0 }
+        : path === "/api/exceptions"
+          ? { summary: { total: 3 }, exceptions: [{ id: "held-exception" }] }
+          : path === "/api/health"
+            ? { status: "ok" }
+            : {};
+      return new Response(JSON.stringify(value), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }));
+
+    const live = await getFabControlCenter();
+    failMetrics = true;
+    const stale = await getFabControlCenter();
+
+    expect(live.metrics.pendingReview).toBe(3);
+    expect(stale.connection.connected).toBe(true);
+    expect(stale.metrics).toMatchObject({ documents: 7, pendingReview: 3, unreconciled: 3, exceptions: 3 });
+    expect(stale.exceptions).toEqual([{ id: "held-exception" }]);
+    expect(stale.resourceStates.metrics).toMatchObject({ state: "stale", error: "resource unavailable" });
+    expect(stale.resourceStates.exceptions.state).toBe("stale");
+    expect(stale.partialErrors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resource: "metrics", state: "stale" }),
+      expect.objectContaining({ resource: "exceptions", state: "stale" }),
+    ]));
   });
 
   it("maps dashboard commands only to fixed local API paths", async () => {
@@ -110,6 +415,38 @@ describe("FAB local API gateway", () => {
       body: { limit: 2, actor: "operator-12" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps unread-scan recovery to its bounded local endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({ status: "completed", path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runFabOperatorCommand("reprocess_incomplete", "operator-13", { limit: 10 });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      path: "/api/documents/reprocess-incomplete",
+      body: { limit: 10, actor: "operator-13" },
+    });
+  });
+
+  it("maps review reassessment to its backed-up local endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({ status: "completed", path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await runFabOperatorCommand("reprocess_review_queue", "operator-14", { limit: 20 });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      path: "/api/documents/reprocess-review-queue",
+      body: { limit: 20, actor: "operator-14" },
+    });
   });
 
   it("uploads intake files only through the fixed local API path", async () => {
@@ -135,5 +472,153 @@ describe("FAB local API gateway", () => {
       body: { filename: "receipt.pdf", mimeType: "application/pdf" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves a review only through its fixed local API record path", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolveFabReviewItem({
+      reviewItemId: 42,
+      status: "approved",
+      resolution: "Verified against the source receipt.",
+      corrections: {
+        category: "Operations | Office Supplies",
+        totalAmount: 42.5,
+        duplicateCandidateId: 7,
+      },
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      path: "/api/review/42/resolve",
+      body: {
+        status: "approved",
+        resolution: "Verified against the source receipt.",
+        corrections: {
+          category: "Operations | Office Supplies",
+          totalAmount: 42.5,
+          duplicateCandidateId: 7,
+        },
+        learnRule: true,
+        applyToMatchingVendor: false,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("installs Drive credentials and starts only the fixed authorization workflow", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 202, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const installed = await uploadFabGoogleDriveCredentials({
+      filename: "drive-client.json",
+      contentBase64: "e30=",
+      replace: false,
+      actor: "fab_dashboard:7",
+    });
+    const started = await startFabGoogleDriveAuthorization("fab_dashboard:7");
+
+    expect(installed).toMatchObject({
+      path: "/api/connectors/google-drive/credentials",
+      body: {
+        filename: "drive-client.json",
+        replace: false,
+        actor: "fab_dashboard:7",
+      },
+    });
+    expect(started).toMatchObject({
+      path: "/api/connectors/google-drive/authorization/start",
+      body: { actor: "fab_dashboard:7" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("installs Gmail credentials and starts only the read-only authorization workflow", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: JSON.parse(String(init?.body)),
+      }),
+      { status: 202, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const installed = await uploadFabGmailCredentials({
+      filename: "gmail-client.json",
+      contentBase64: "e30=",
+      replace: false,
+      actor: "fab_dashboard:7",
+    });
+    const started = await startFabGmailAuthorization("fab_dashboard:7");
+
+    expect(installed).toMatchObject({
+      path: "/api/connectors/gmail/credentials",
+      body: {
+        filename: "gmail-client.json",
+        replace: false,
+        actor: "fab_dashboard:7",
+      },
+    });
+    expect(started).toMatchObject({
+      path: "/api/connectors/gmail/authorization/start",
+      body: { actor: "fab_dashboard:7" },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stores and validates Wave setup only through fixed local API paths", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const requestBody = JSON.parse(String(init?.body));
+      const publicBody = { ...requestBody };
+      delete publicBody.accessToken;
+      return new Response(JSON.stringify({
+        success: true,
+        path: new URL(String(input)).pathname,
+        body: publicBody,
+        accessTokenConfigured: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const saved = await saveFabWaveSetup({
+      targetSystem: "waveapps_business",
+      accessToken: "user-owned-wave-token",
+      businessId: "business-1",
+      actor: "fab_dashboard:7",
+    });
+    const validated = await validateFabWaveSetup("waveapps_business");
+
+    expect(saved).toMatchObject({
+      path: "/api/wave/setup",
+      body: {
+        targetSystem: "waveapps_business",
+        businessId: "business-1",
+        actor: "fab_dashboard:7",
+      },
+      accessTokenConfigured: true,
+    });
+    expect(validated).toMatchObject({
+      path: "/api/wave/setup/validate",
+      body: { targetSystem: "waveapps_business" },
+    });
+    expect(JSON.stringify(saved)).not.toContain("user-owned-wave-token");
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body)).toContain("user-owned-wave-token");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

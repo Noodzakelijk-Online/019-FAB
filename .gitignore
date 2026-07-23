@@ -25,3 +25,7 @@ logs/
 # Build/package output
 dist/
 build/
+
+# Local QA artifacts
+.playwright-cli/
+output/

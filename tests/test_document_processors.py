@@ -87,6 +87,34 @@ class TestDocumentProcessors(unittest.TestCase):
         result = processor.process_document(self.dummy_image_path)
         self.assertIn("Tesseract OCR Text", result["ocr_text"])
         self.assertEqual(result["language"], "nld+eng")
+        self.assertEqual(result["ocr_strategy"], "standard")
+
+    @patch("src.document_processors.tesseract_processor.pytesseract.image_to_string")
+    def test_tesseract_processor_retries_blank_low_contrast_scan(self, mock_image_to_string):
+        mock_image_to_string.side_effect = [
+            "",
+            "Lidl Arnhem\nBETALING 01/06/2023\nTotaal EUR 12,02\nBTW 0,99",
+        ]
+
+        result = TesseractProcessor(self.config).process_document(self.dummy_image_path)
+
+        self.assertEqual(result["ocr_strategy"], "illumination_normalized_fallback")
+        self.assertEqual(result["ocr_fallback_pages"], 1)
+        self.assertEqual(result["ocr_fallback_recovered_pages"], 1)
+        self.assertEqual(result["extracted_data"]["vendor_name"], "Lidl Arnhem")
+        self.assertEqual(result["extracted_data"]["total_amount"], 12.02)
+        self.assertEqual(result["extracted_data"]["vat_amount"], 0.99)
+        self.assertIn("--psm 6", mock_image_to_string.call_args_list[1].kwargs["config"])
+
+    @patch("src.document_processors.tesseract_processor.pytesseract.image_to_string", return_value="")
+    def test_tesseract_processor_records_unsuccessful_fallback_attempt(self, mock_image_to_string):
+        result = TesseractProcessor(self.config).process_document(self.dummy_image_path)
+
+        self.assertEqual(result["ocr_text"], "")
+        self.assertEqual(result["ocr_strategy"], "illumination_normalized_fallback")
+        self.assertEqual(result["ocr_fallback_pages"], 1)
+        self.assertEqual(result["ocr_fallback_recovered_pages"], 0)
+        self.assertEqual(mock_image_to_string.call_count, 2)
 
     def test_tesseract_processor_extracts_dutch_receipt_fields(self):
         fields = TesseractProcessor._extract_data_from_text(

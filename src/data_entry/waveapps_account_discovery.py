@@ -42,11 +42,21 @@ class WaveappsAccountDiscoveryService:
         self.api_url = str(self.config.get("waveapps_api_url") or WAVE_GRAPHQL_URL)
         self.timeout_seconds = _timeout_seconds(self.config.get("waveapps_request_timeout_seconds"))
 
-    def mapping_status(self, target_system: Optional[str] = None) -> Dict[str, Any]:
+    def mapping_status(
+        self,
+        target_system: Optional[str] = None,
+        accounts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         targets = _targets(self.config, target_system)
         return {
             "externalSubmission": "not_executed",
-            "targets": [self._mapping_status_for_target(target) for target in targets],
+            "targets": [
+                self._mapping_status_for_target(
+                    target,
+                    accounts if target_system and target["id"] == target_system else None,
+                )
+                for target in targets
+            ],
         }
 
     def discover(self, target_system: str) -> Dict[str, Any]:
@@ -59,23 +69,24 @@ class WaveappsAccountDiscoveryService:
             if value in (None, "")
         ]
         if missing:
-            return {
-                "success": False,
-                "status": "not_configured",
-                "missingFields": missing,
-                "externalSubmission": "not_executed",
-                "mapping": self._mapping_status_for_target(target),
-            }
+            result = _discovery_failure(
+                "not_configured",
+                "Wave account validation requires a stored access token and business ID.",
+            )
+            result["missingFields"] = missing
+            result["mapping"] = self._mapping_status_for_target(target)
+            return result
 
         limiter = get_rate_limiter("waveapps")
         if not limiter.acquire(block=False):
             rate = limiter.get_current_rate()
-            return {
-                "success": False,
-                "status": "quota_exhausted" if rate.get("quotaExhausted") else "rate_limited",
-                "rateLimit": rate,
-                "externalSubmission": "not_executed",
-            }
+            status = "quota_exhausted" if rate.get("quotaExhausted") else "rate_limited"
+            result = _discovery_failure(
+                status,
+                "FAB deferred Wave account validation because the configured provider quota is unavailable.",
+            )
+            result["rateLimit"] = rate
+            return result
 
         try:
             response = requests.post(
@@ -84,24 +95,40 @@ class WaveappsAccountDiscoveryService:
                 json={"query": WAVE_ACCOUNTS_QUERY, "variables": {"businessId": target["business_id"]}},
                 timeout=self.timeout_seconds,
             )
+            response_status = getattr(response, "status_code", None)
+            if response_status == 401:
+                return _discovery_failure(
+                    "authentication_failed",
+                    "Wave rejected the access token. Replace it with a current user-owned token and validate again.",
+                )
+            if response_status == 403:
+                return _discovery_failure(
+                    "authorization_failed",
+                    "Wave accepted the token but denied access to this business or the required account data. Confirm the business, subscription, and token permissions.",
+                )
+            if response_status == 429:
+                return _discovery_failure(
+                    "rate_limited",
+                    "Wave rate-limited account validation. Wait briefly and validate again.",
+                )
             response.raise_for_status()
             payload = response.json()
         except requests.exceptions.RequestException as exc:
-            return {
-                "success": False,
-                "status": "provider_error",
-                "message": f"Wave account discovery failed: {exc}",
-                "externalSubmission": "not_executed",
-            }
+            return _discovery_failure(
+                "provider_error",
+                f"Wave account validation could not reach a healthy API response ({type(exc).__name__}).",
+            )
+        except ValueError:
+            return _discovery_failure(
+                "provider_error",
+                "Wave account validation returned an invalid response.",
+            )
 
         business = ((payload.get("data") or {}).get("business") or {}) if isinstance(payload, dict) else {}
         if not business:
-            return {
-                "success": False,
-                "status": "provider_error",
-                "message": _graph_errors(payload) or "Wave returned no business account data.",
-                "externalSubmission": "not_executed",
-            }
+            provider_message = _graph_errors(payload) or "Wave returned no business account data."
+            status = _graph_error_status(provider_message)
+            return _discovery_failure(status, _graph_failure_message(status))
         accounts = _accounts(business)
         mapping = self._mapping_status_for_target(target, accounts)
         operation_id = _operation_id(target["id"], business.get("id") or target["business_id"], accounts)
@@ -143,13 +170,17 @@ class WaveappsAccountDiscoveryService:
             required_missing.append("businessId")
         if not configured_anchor:
             required_missing.append("anchorAccountId")
-        if not category_accounts and not default_category_account_id:
+        # A catch-all account is not a substitute for an explicit category map.
+        # Treating it as complete can silently collapse unrelated expenses into
+        # one ledger account.
+        if not category_accounts:
             required_missing.append("categoryAccountIds")
         default_verified = None if accounts is None else (
             default_category_account_id in account_ids if default_category_account_id else True
         )
         verified = (
             accounts is not None
+            and not required_missing
             and configured_anchor in account_ids
             and all(row["verified"] for row in mapping_rows)
             and bool(default_verified)
@@ -267,3 +298,45 @@ def _timeout_seconds(value: Any) -> float:
         return max(float(value), 1.0)
     except (TypeError, ValueError):
         return 30.0
+
+
+def _discovery_failure(status: str, message: str) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "status": status,
+        "message": str(message or "Wave account validation failed.")[:1000],
+        "nextAction": _next_action(status),
+        "externalSubmission": "not_executed",
+    }
+
+
+def _graph_error_status(message: str) -> str:
+    normalized = str(message or "").casefold()
+    if any(token in normalized for token in ("unauthenticated", "invalid token", "access token")):
+        return "authentication_failed"
+    if any(token in normalized for token in ("unauthorized", "not authorized", "forbidden", "permission", "scope", "access denied")):
+        return "authorization_failed"
+    if "not found" in normalized:
+        return "business_not_found"
+    return "provider_error"
+
+
+def _next_action(status: str) -> str:
+    return {
+        "not_configured": "Store the user-owned Wave access token and confirm the Wave business ID before validating.",
+        "authentication_failed": "Replace the locally stored Wave token with a current token from the official Wave Developer Portal.",
+        "authorization_failed": "Confirm the token can access this Wave business and, for OAuth tokens, includes business:read and account:read.",
+        "business_not_found": "Confirm the Wave business ID belongs to the account authorized by this token.",
+        "rate_limited": "Wait for the provider limit to reset, then validate again.",
+        "quota_exhausted": "Wait for the configured daily quota to reset, then validate again.",
+        "provider_error": "Check Wave service availability and validate again without changing any bookkeeping records.",
+    }.get(status, "Review the Wave connection and validate again.")
+
+
+def _graph_failure_message(status: str) -> str:
+    return {
+        "authentication_failed": "Wave did not authenticate the stored access token.",
+        "authorization_failed": "Wave denied access to the selected business or its account data.",
+        "business_not_found": "Wave could not find the selected business for this authorized user.",
+        "provider_error": "Wave rejected account validation without returning usable business data.",
+    }.get(status, "Wave account validation failed.")

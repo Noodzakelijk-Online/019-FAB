@@ -100,7 +100,7 @@ Local operating ledger and optional web operations API settings.
 *   `worker_recovery_batch_limit`: Maximum due recoveries attempted per worker cycle. Default: `5`.
 *   `workflow_recovery_max_retries`: Maximum linked automatic retry depth. Default: `3`.
 *   `workflow_recovery_base_delay_seconds` / `workflow_recovery_max_delay_seconds`: Exponential retry backoff bounds. Defaults: `300` / `3600`.
-*   `workflow_recovery_stale_seconds`: Minimum age before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `21600`.
+*   `workflow_recovery_stale_seconds`: Grace period before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `900` (15 minutes). An active runtime lease always prevents finalization.
 *   `worker_run_legacy_workflow`: Compatibility switch for the old checkpoint pipeline. Default: `false`.
 *   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
 *   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
@@ -110,6 +110,8 @@ Local operating ledger and optional web operations API settings.
 The local ledger does not store API tokens or passwords. It can store financial document metadata and OCR text, so keep the file out of Git and protect it like bookkeeping records.
 
 The Workflow Runs panel shows recent autonomous and connector-intake runs with ordered step status, attempt, start time, duration, error, and aborted downstream work. `GET /api/workflows` filters runs by `status` or `triggerSource`; `GET /api/workflows/{id}` returns the exact run and its redacted step evidence. A failed autonomous action stops dependent downstream work and marks it `not_run`. For a recoverable run, FAB displays the exact safe retry plan and enables **Retry safe step**. `GET /api/workflows/{id}/recovery-plan` returns the current gate; authenticated `POST /api/workflows/{id}/retry` creates a new linked run rather than rewriting prior evidence. The Recovery policy summary and `GET /api/workflows/recovery` show due, deferred, blocked, and exhausted work; **Run due safe recovery** or authenticated `POST /api/workflows/recovery/run-due` executes the same bounded policy used by the worker. Connector recovery retries only failed read-only sources. Autonomous recovery retries only the first actual failed low-risk step and never approved export execution. The worker applies exponential backoff, prevents the normal connector stage from bypassing that backoff, and finalizes abandoned runs only when the workflow is stale and its runtime lease is inactive.
+One-click and HAI safe-cycle requests collect every currently syncable read-only connector before local folder intake and document processing. The background worker already has a dedicated connector stage, so it disables this nested collection step in its immediately following autonomous cycle to avoid duplicate provider reads.
+
 Run the local API with:
 
 ```bash
@@ -135,6 +137,16 @@ Configuration for fetching documents from Gmail.
 *   `query`: Gmail search query to filter emails. Examples:
     *   `has:attachment from:"example@vendor.com" subject:"Invoice"`
     *   `label:receipts after:2025/01/01`
+*   `scanner_mode`: Enables strict scanner-mailbox intake. In this mode FAB accepts only PDF filenames with an allowed PDF MIME type and a verified `%PDF-` file signature.
+*   `trusted_senders`: Comma-separated exact sender addresses accepted in scanner mode. The Noodzakelijk Online HP ePrint profile uses `eprintcenter@hp8.us`.
+*   `max_attachment_bytes`: Rejects oversized scanner attachments before writing them to the intake cache.
+*   `incremental_overlap_seconds`: Rechecks this many seconds before the durable last-successful checkpoint. The overlap prevents boundary loss while stable provider IDs keep repeated results idempotent.
+
+Use the **Gmail scanner** activation step in the operator dashboard to install a desktop OAuth client and complete user-owned, read-only Gmail consent. FAB reads matching attachments directly into its durable ledger; it does not stage them through Drive, mark messages read, add labels, or delete source email. The worker then runs OCR, field extraction, validation, duplicate detection, learned vendor categorization, routing, and the existing Wave approval/readback gates. Disable the older Apps Script trigger after activation so it cannot create a second, racing Drive copy.
+
+Normalized bookkeeping records apply fail-closed financial consistency controls. Dutch day-first dates are canonicalized to ISO dates; impossible or ambiguous dates are retained only as evidence and block export. VAT and line-item tax amounts that lack a non-zero total, conflict in sign, or exceed the configured `vat_max_total_ratio` are retained as evidence but removed from normalized posting totals until an operator corrects the source-backed review item.
+
+The operator activation checklist distinguishes posting-blocking decisions from evidence-only reviews. Bank statements, sensitive government documents, and other confidently non-posting material remain visible and retained for review, but they no longer inflate the number of documents blocking Wave delivery. The complete review workspace still shows both groups; no review item is silently resolved.
 
 ### 4.3. `[google_drive]` Section
 
@@ -197,6 +209,8 @@ Settings for document categorization.
 *   `categorization_rules`: Path to a JSON file defining rule-based categorization rules. (e.g., `config/categorization_rules.json`)
 *   `default_fallback_category`: The category to assign if no other categorization method yields a confident result. (e.g., `Manual Review`)
 *   `ml_confidence_threshold`: Minimum confidence score for ML categorizer to accept a prediction (0.0 to 1.0).
+*   `fab_auto_apply_trusted_category_suggestions`: Defaults to `true`. Applies only FAB's fixed, exact-normalized-vendor taxonomy automatically; it does not accept fuzzy or model-generated categories and never closes validation, duplicate, sensitive-document, credit-note, posting-approval, attachment, or archive gates.
+*   `fab_trusted_category_suggestion_min_confidence`: Defaults to `0.95` and cannot weaken the built-in 0.95 policy floor.
 *   `ml_model_path`: Path to the trained ML categorization model. (e.g., `models/ml_categorizer_model.joblib`)
 *   `ml_vectorizer_path`: Path to the TF-IDF vectorizer used by the ML model. (e.g., `models/tfidf_vectorizer.joblib`)
 

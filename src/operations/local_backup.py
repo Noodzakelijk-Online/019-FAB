@@ -127,6 +127,34 @@ class LocalBackupService:
             expected_bytes = manifest.get("ledgerBytes")
             if expected_bytes is not None and int(expected_bytes) != int(ledger_info.file_size):
                 raise ValueError("Backup ledger size does not match manifest")
+            expected_sha256 = str(manifest.get("ledgerSha256") or "").strip().lower()
+            if (
+                len(expected_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in expected_sha256)
+            ):
+                raise ValueError("Backup manifest has no valid ledger SHA-256")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                inspected_ledger_path = os.path.join(temp_dir, BACKUP_LEDGER_NAME)
+                digest = hashlib.sha256()
+                with archive.open(BACKUP_LEDGER_NAME) as source, open(
+                    inspected_ledger_path,
+                    "wb",
+                ) as target:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                        target.write(chunk)
+                if digest.hexdigest() != expected_sha256:
+                    raise ValueError("Backup ledger checksum does not match manifest")
+                connection = sqlite3.connect(
+                    f"file:{inspected_ledger_path}?mode=ro",
+                    uri=True,
+                )
+                try:
+                    integrity = connection.execute("PRAGMA quick_check").fetchone()
+                finally:
+                    connection.close()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    raise ValueError("Backup ledger failed SQLite integrity validation")
 
         return {
             "success": True,

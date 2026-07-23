@@ -35,13 +35,20 @@ def build_expense_transaction_input(
     default_category_account_id: Any = None,
     description: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Build a balanced Wave expense transaction from a normalized FAB record."""
+    """Build a balanced Wave expense or vendor-credit transaction."""
     extracted = data.get("extracted_data") if isinstance(data.get("extracted_data"), dict) else {}
+    document_type = _document_type(data, extracted)
+    transaction_direction = str(
+        data.get("transaction_direction")
+        or extracted.get("transaction_direction")
+        or ""
+    ).strip().lower()
+    is_credit = document_type == "credit_note" or transaction_direction == "deposit"
     category = str(data.get("category") or "").strip()
     mapped_category = str(_as_mapping(category_mapping).get(category) or category).strip()
     account_ids = _as_mapping(category_account_ids)
     resolved_description = str(description or extracted.get("description") or "Automated expense").strip()
-    amount = _amount(extracted.get("total_amount"))
+    amount = _unsigned_amount(extracted.get("total_amount"))
     transaction_date = _date(extracted.get("transaction_date"))
     raw_line_items = extracted.get("line_items") if isinstance(extracted.get("line_items"), list) else []
     line_items, line_item_missing = _expense_line_items(
@@ -52,6 +59,7 @@ def build_expense_transaction_input(
         category_account_ids=account_ids,
         default_category_account_id=default_category_account_id,
         total_amount=amount,
+        line_balance="DECREASE" if is_credit else "INCREASE",
     )
     missing = list(line_item_missing) + [
         name
@@ -83,7 +91,7 @@ def build_expense_transaction_input(
             "anchor": {
                 "accountId": str(anchor_account_id),
                 "amount": amount,
-                "direction": "WITHDRAWAL",
+                "direction": "DEPOSIT" if is_credit else "WITHDRAWAL",
             },
             "lineItems": line_items,
         },
@@ -99,20 +107,20 @@ def _expense_line_items(
     category_account_ids: Dict[str, Any],
     default_category_account_id: Any,
     total_amount: Optional[float],
+    line_balance: str,
 ) -> tuple[list[Dict[str, Any]], list[str]]:
     mappings = _as_mapping(category_mapping)
     if not raw_items:
         account_id = (
             category_account_ids.get(fallback_mapped_category)
             or category_account_ids.get(fallback_category)
-            or default_category_account_id
         )
         if not account_id:
             return [], ["categoryAccountId"]
         return [{
             "accountId": str(account_id),
             "amount": total_amount,
-            "balance": "INCREASE",
+            "balance": line_balance,
         }], []
 
     line_items = []
@@ -128,9 +136,8 @@ def _expense_line_items(
             category_account_ids.get(mapped_category)
             or category_account_ids.get(line_category)
             or category_account_ids.get(account_label)
-            or default_category_account_id
         )
-        line_amount = _amount(item.get("amount"))
+        line_amount = _unsigned_amount(item.get("amount"))
         if not account_id:
             missing.append(f"lineItems[{index}].accountId")
         if line_amount is None:
@@ -139,7 +146,7 @@ def _expense_line_items(
             line_items.append({
                 "accountId": str(account_id),
                 "amount": line_amount,
-                "balance": "INCREASE",
+                "balance": line_balance,
             })
 
     if not missing and total_amount is not None:
@@ -178,12 +185,23 @@ def _as_mapping(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _amount(value: Any) -> Optional[float]:
+def _unsigned_amount(value: Any) -> Optional[float]:
     try:
         amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except (InvalidOperation, TypeError, ValueError):
         return None
-    return float(amount) if amount > 0 else None
+    return float(abs(amount)) if amount != 0 else None
+
+
+def _document_type(data: Dict[str, Any], extracted: Dict[str, Any]) -> str:
+    value = (
+        data.get("document_type")
+        or data.get("documentType")
+        or extracted.get("document_type")
+        or extracted.get("documentType")
+        or ""
+    )
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _date(value: Any) -> Optional[str]:

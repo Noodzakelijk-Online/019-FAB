@@ -7,9 +7,12 @@ except ImportError:
     pytesseract = None
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageChops, ImageFilter, ImageOps
 except ImportError:
     Image = None
+    ImageChops = None
+    ImageFilter = None
+    ImageOps = None
 
 try:
     from pdf2image import convert_from_path
@@ -53,16 +56,39 @@ class TesseractProcessor(BaseProcessor):
             }
 
         pages = []
+        fallback_pages = 0
+        fallback_recovered_pages = 0
         try:
             pages = self._load_pages(document_path)
-            full_text = "\n\n".join(
-                pytesseract.image_to_string(page, lang=self.ocr_lang, config=self.ocr_config).strip()
-                for page in pages
-            ).strip()
+            page_texts = []
+            for page in pages:
+                text = pytesseract.image_to_string(
+                    page,
+                    lang=self.ocr_lang,
+                    config=self.ocr_config,
+                ).strip()
+                if not text:
+                    fallback_pages += 1
+                    prepared = self._prepare_low_contrast_page(page)
+                    try:
+                        text = pytesseract.image_to_string(
+                            prepared,
+                            lang=self.ocr_lang,
+                            config=self._fallback_ocr_config(),
+                        ).strip()
+                    finally:
+                        if prepared is not page:
+                            prepared.close()
+                    fallback_recovered_pages += int(bool(text))
+                page_texts.append(text)
+            full_text = "\n\n".join(page_texts).strip()
             return {
                 "ocr_text": full_text,
                 "extracted_data": self._extract_data_from_text(full_text),
                 "language": self.ocr_lang,
+                "ocr_strategy": "illumination_normalized_fallback" if fallback_pages else "standard",
+                "ocr_fallback_pages": fallback_pages,
+                "ocr_fallback_recovered_pages": fallback_recovered_pages,
             }
         except Exception as exc:
             return {
@@ -94,6 +120,36 @@ class TesseractProcessor(BaseProcessor):
             last_page=max_pages,
             poppler_path=resolve_poppler_path(self.config),
         )
+
+    def _fallback_ocr_config(self) -> str:
+        try:
+            page_segmentation_mode = max(
+                3,
+                min(int(self.config.get("tesseract_fallback_psm", 6)), 13),
+            )
+        except (TypeError, ValueError):
+            page_segmentation_mode = 6
+        return f"{self.ocr_config} --psm {page_segmentation_mode}".strip()
+
+    @staticmethod
+    def _prepare_low_contrast_page(page: Any) -> Any:
+        """Remove uneven paper/background color so faint receipt text survives OCR."""
+        if any(value is None for value in (ImageChops, ImageFilter, ImageOps)):
+            return page
+        grayscale = page.convert("L")
+        try:
+            width, height = grayscale.size
+            blur_radius = max(3, min(20, round(min(width, height) / 300)))
+            background = grayscale.filter(ImageFilter.GaussianBlur(blur_radius))
+            detail = ImageChops.subtract(background, grayscale)
+            normalized = ImageOps.autocontrast(detail, cutoff=0.3)
+            prepared = ImageOps.invert(normalized)
+            background.close()
+            detail.close()
+            normalized.close()
+            return prepared
+        finally:
+            grayscale.close()
 
     @staticmethod
     def _extract_data_from_text(text: str) -> Dict[str, Any]:
