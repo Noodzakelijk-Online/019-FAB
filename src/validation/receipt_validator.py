@@ -3,6 +3,7 @@ import re
 
 from src.validation.financial_consistency import (
     DEFAULT_VAT_MAX_TOTAL_RATIO,
+    assess_record_date,
     assess_vat_amount,
     vat_issue_message,
 )
@@ -91,14 +92,14 @@ class ReceiptValidator:
         if extracted_data.get("total_amount") is not None and extracted_data["total_amount"] <= 0:
             errors.append("Total amount is zero or negative.")
 
-        # 5. Date format validation (assuming YYYY-MM-DD for internal use)
+        # 5. Date plausibility validation. The extractor normalizes to ISO, but
+        # retained OCR can contain valid-looking years that are not credible.
         transaction_date = extracted_data.get("transaction_date")
-        if transaction_date:
-            try:
-                # Attempt to parse date to ensure it's a valid format
-                import datetime
-                datetime.datetime.strptime(str(transaction_date), "%Y-%m-%d")
-            except ValueError:
+        transaction_date_assessment = assess_record_date(transaction_date)
+        if transaction_date and not transaction_date_assessment["valid"]:
+            if transaction_date_assessment["reason"] == "implausible_record_date_year":
+                errors.append("Implausible transaction_date year")
+            else:
                 errors.append("Invalid transaction_date format")
 
         is_valid = len(errors) == 0
@@ -110,7 +111,10 @@ class ReceiptValidator:
             "warnings": warnings,
             "reason": reason,
             "blocking": not is_valid,
-            "fieldControls": {"vat": vat_assessment},
+            "fieldControls": {
+                "transactionDate": transaction_date_assessment,
+                "vat": vat_assessment,
+            },
         }
 
 

@@ -785,7 +785,7 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["total_amount"], 1.98)
             self.assertEqual(
                 document["metadata"]["processing"]["storedOcrReassessment"]["version"],
-                "financial_extraction_v4",
+                "financial_validation_v5",
             )
             open_reasons = {
                 item["reason"]
@@ -866,6 +866,57 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                 },
                 {"low_confidence_categorization", "manual_review_category"},
             )
+
+    def test_reprocess_review_queue_keeps_implausible_transaction_year_blocked(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            receipt_path = os.path.join(temp_dir, "future-year.pdf")
+            with open(receipt_path, "wb") as handle:
+                handle.write(b"retained source")
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "future-year-review",
+                "originalFilename": "future-year.pdf",
+                "mimeType": "application/pdf",
+                "storagePath": receipt_path,
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "ocrText": "Example Shop\n2823-07-16\nTOTAAL 59,60",
+                "vendorName": "Example Shop",
+                "category": "Manual Review",
+                "transactionDate": "2823-07-16",
+                "totalAmount": 59.60,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Machine review gate.",
+            })
+
+            summary = LocalDocumentProcessor(
+                ledger,
+                processor_pipeline=RaisingPipeline(),
+            ).reprocess_review_queue(
+                actor="test-operator",
+                create_backup=False,
+            )
+
+            self.assertEqual(summary["requested"], 1)
+            self.assertEqual(summary["resolvedReviewItems"], 0)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertEqual(
+                document["metadata"]["processing"]["validation"]["fieldControls"][
+                    "transactionDate"
+                ]["reason"],
+                "implausible_record_date_year",
+            )
+            open_reasons = {
+                item["reason"]
+                for item in document["review_items"]
+                if item["status"] in {"pending", "in_review"}
+            }
+            self.assertIn("validation_failed", open_reasons)
 
     def test_reprocess_review_queue_clears_unsupported_stale_amounts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -49,6 +49,7 @@ class ValidationManager:
             "warnings": receipt_validation_result.get("warnings", []),
             "reason": "; ".join(all_reasons) if all_reasons else "",
             "blocking": not overall_valid,
+            "fieldControls": receipt_validation_result.get("fieldControls", {}),
         }
 
 
