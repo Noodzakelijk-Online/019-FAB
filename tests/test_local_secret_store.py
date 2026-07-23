@@ -97,6 +97,35 @@ class TestLocalSecretStore(unittest.TestCase):
         self.assertIsNone(worker_config["waveapps_business"]["access_token"])
         self.assertFalse(store.public_wave_status("waveapps_business")["accessTokenStored"])
 
+    def test_unreadable_store_revokes_managed_settings_until_recovery(self):
+        store = LocalSecretStore(self.config)
+        store.update_wave_target("waveapps_business", {
+            "access_token": "first-token",
+            "business_id": "first-business",
+            "category_account_ids": {"Office": "expense-1"},
+        })
+        worker_config = apply_local_wave_settings(self.config)
+
+        with open(self.config["fab_local_secret_store_path"], "wb") as handle:
+            handle.write(b"not-valid-ciphertext")
+        apply_local_wave_settings(worker_config, mutate=True)
+
+        self.assertIsNone(worker_config["waveapps_business_access_token"])
+        self.assertIsNone(worker_config["waveapps_business_id"])
+        self.assertIsNone(worker_config["waveapps_business_category_account_ids"])
+        self.assertIn("could not be decrypted", worker_config["fab_local_secret_store_error"])
+
+        os.remove(self.config["fab_local_secret_store_path"])
+        store.update_wave_target("waveapps_business", {
+            "access_token": "replacement-token",
+            "business_id": "replacement-business",
+        })
+        apply_local_wave_settings(worker_config, mutate=True)
+
+        self.assertEqual(worker_config["waveapps_business_access_token"], "replacement-token")
+        self.assertEqual(worker_config["waveapps_business_id"], "replacement-business")
+        self.assertNotIn("fab_local_secret_store_error", worker_config)
+
 
 if __name__ == "__main__":
     unittest.main()

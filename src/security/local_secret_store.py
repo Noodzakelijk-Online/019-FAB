@@ -21,6 +21,7 @@ WAVE_SETTING_FIELDS = {
     "default_category_account_id",
     "category_account_ids",
 }
+LOCAL_WAVE_MANAGED_FIELDS_KEY = "_fab_local_wave_secret_fields"
 
 
 class LocalSecretStoreError(RuntimeError):
@@ -179,15 +180,35 @@ def apply_local_wave_settings(
     result = source if mutate else deepcopy(source)
     if not _configured_path(result, "fab_local_secret_store_path"):
         return result
+    previously_managed = _managed_wave_fields(result)
     try:
         payload = LocalSecretStore(result).load()
     except LocalSecretStoreError as exc:
+        _clear_managed_wave_settings(result, previously_managed)
         result["fab_local_secret_store_error"] = str(exc)
         return result
+    result.pop("fab_local_secret_store_error", None)
+    currently_managed: Dict[str, set[str]] = {}
+    for target, settings in (payload.get("wave") or {}).items():
+        if target not in SUPPORTED_WAVE_TARGETS or not isinstance(settings, dict):
+            continue
+        currently_managed[target] = {
+            field
+            for field in settings
+            if field in WAVE_SETTING_FIELDS and not _environment_overrides(target, field)
+        }
+    for target in SUPPORTED_WAVE_TARGETS:
+        removed_fields = previously_managed.get(target, set()) - currently_managed.get(target, set())
+        _clear_target_settings(result, target, removed_fields)
     for target, settings in (payload.get("wave") or {}).items():
         if target not in SUPPORTED_WAVE_TARGETS or not isinstance(settings, dict):
             continue
         _apply_target_settings(result, target, settings)
+    result[LOCAL_WAVE_MANAGED_FIELDS_KEY] = {
+        target: sorted(fields)
+        for target, fields in currently_managed.items()
+        if fields
+    }
     return result
 
 
@@ -212,6 +233,51 @@ def _apply_target_settings(config: Dict[str, Any], target: str, settings: Dict[s
         nested[field if field != "business_id" else id_option] = value
         if field == "business_id":
             nested["id"] = value
+
+
+def _managed_wave_fields(config: Dict[str, Any]) -> Dict[str, set[str]]:
+    raw = config.get(LOCAL_WAVE_MANAGED_FIELDS_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        target: {
+            field
+            for field in fields
+            if field in WAVE_SETTING_FIELDS
+        }
+        for target, fields in raw.items()
+        if target in SUPPORTED_WAVE_TARGETS and isinstance(fields, (list, tuple, set))
+    }
+
+
+def _clear_managed_wave_settings(
+    config: Dict[str, Any],
+    managed_fields: Dict[str, set[str]],
+) -> None:
+    for target, fields in managed_fields.items():
+        _clear_target_settings(config, target, fields)
+
+
+def _clear_target_settings(config: Dict[str, Any], target: str, fields: set[str]) -> None:
+    if not fields:
+        return
+    nested = config.get(target)
+    id_option = "business_id" if target == "waveapps_business" else "personal_id"
+    flat_fields = {
+        "access_token": f"{target}_access_token",
+        "business_id": "waveapps_business_id" if target == "waveapps_business" else "waveapps_personal_id",
+        "anchor_account_id": f"{target}_anchor_account_id",
+        "default_category_account_id": f"{target}_default_category_account_id",
+        "category_account_ids": f"{target}_category_account_ids",
+    }
+    for field in fields:
+        if field not in flat_fields or _environment_overrides(target, field):
+            continue
+        config[flat_fields[field]] = None
+        if isinstance(nested, dict):
+            nested[field if field != "business_id" else id_option] = None
+            if field == "business_id":
+                nested["id"] = None
 
 
 def _environment_overrides(target: str, field: str) -> bool:

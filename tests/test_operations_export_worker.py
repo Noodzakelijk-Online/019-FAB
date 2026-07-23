@@ -8,6 +8,7 @@ from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, LocalExportAtte
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_routing import LocalRoutingService
 from src.run_approved_postings import run_approved_postings
+from src.security.local_secret_store import LocalSecretStore
 from src.worker.scheduler import FabWorker
 
 
@@ -199,6 +200,40 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_worker.autonomy_cycle", audit_actions)
             self.assertIn("local_worker.cycle_completed", audit_actions)
             self.assertNotIn("local_worker.stage_failed", audit_actions)
+
+    def test_worker_refreshes_wave_settings_saved_after_startup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config.update({
+                "fab_local_secret_store_path": os.path.join(temp_dir, "credentials", "secrets.enc"),
+                "fab_local_secret_key_path": os.path.join(temp_dir, "credentials", "secrets.key"),
+                "worker_run_legacy_workflow": False,
+                "worker_run_local_autonomy": False,
+                "worker_sync_source_connectors": False,
+                "worker_recover_workflows": False,
+                "worker_generate_scheduled_reports": False,
+                "worker_refresh_notifications": False,
+                "worker_assess_compliance": False,
+                "worker_archive_verified_drive_sources": False,
+                "worker_process_approved_postings": False,
+            })
+            worker = FabWorker(config)
+            LocalSecretStore(config).update_wave_target("waveapps_business", {
+                "access_token": "saved-after-worker-started",
+                "business_id": "business-1",
+            })
+
+            with patch.object(worker, "install_signal_handlers"), patch.object(
+                worker,
+                "_process_operations_exports",
+            ):
+                worker.run()
+
+            self.assertEqual(
+                worker.config["waveapps_business_access_token"],
+                "saved-after-worker-started",
+            )
+            self.assertEqual(worker.config["waveapps_business_id"], "business-1")
 
     def test_scheduled_report_failure_does_not_suppress_export_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
