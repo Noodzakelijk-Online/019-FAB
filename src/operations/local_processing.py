@@ -46,7 +46,7 @@ PROCESSING_REVIEW_REASONS = {
     "validation_failed",
 }
 OCR_RECOVERY_VERSION = "illumination_normalization_v1"
-STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v8_vendor_signals"
+STORED_OCR_REASSESSMENT_VERSION = "financial_validation_v9_refund_totals"
 STORED_OCR_REASSESSMENT_REASONS = {
     "document_type_conflict",
     "low_confidence_categorization",

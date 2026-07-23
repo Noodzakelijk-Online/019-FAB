@@ -60,6 +60,10 @@ class FinancialFieldExtractor:
         "refund",
         "refunded",
     ]
+    COLUMNAR_REFUND_TOTAL_LABELS = (
+        "totaal te ontvangen",
+        "total to receive",
+    )
     NON_PAYABLE_TOTAL_PHRASES = [
         "totaal prijsvoordeel",
         "totale korting",
@@ -317,6 +321,16 @@ class FinancialFieldExtractor:
             label in normalized_text
             for label in self.TOTAL_LABELS
         )
+        columnar_refund_total = self._columnar_refund_total(text)
+        if columnar_refund_total:
+            candidates.append(columnar_refund_total)
+        has_refund_marker = bool(
+            any(label in normalized_text for label in self.REFUND_TOTAL_LABELS)
+            or any(
+                label in normalized_text
+                for label in self.COLUMNAR_REFUND_TOTAL_LABELS
+            )
+        )
         for line_index, line in enumerate(text.splitlines()):
             lowered = self._normalize_ocr_amount_labels(line)
             line_amounts: List[Tuple[float, Optional[str], int]] = []
@@ -370,10 +384,23 @@ class FinancialFieldExtractor:
             vat_summary_context = vat_summary_line or self._is_vat_summary_context(
                 previous_nonempty
             )
+            explicit_refund_total = (
+                has_refund_marker
+                and has_line_total_label
+                and len(line_amounts) >= 2
+                and any(amount < 0 for amount, _, _ in line_amounts)
+            )
 
             if has_rounding_label:
                 amount, currency, position = line_amounts[-1]
                 candidates.append((amount, currency, 1.0, line_index, position))
+            elif explicit_refund_total:
+                amount, currency, position = next(
+                    candidate
+                    for candidate in reversed(line_amounts)
+                    if candidate[0] < 0
+                )
+                candidates.append((amount, currency, 0.998, line_index, position))
             elif has_refund_label:
                 amount, currency, position = line_amounts[-1]
                 candidates.append((-abs(amount), currency, 0.997, line_index, position))
@@ -398,6 +425,10 @@ class FinancialFieldExtractor:
                 had_pending_total_label
                 and len(line_amounts) == 1
                 and not payment_metadata_line
+                and not any(
+                    label in previous_nonempty
+                    for label in self.COLUMNAR_REFUND_TOTAL_LABELS
+                )
             ):
                 amount, currency, position = line_amounts[0]
                 candidates.append((amount, currency, 0.88, line_index, position))
@@ -437,6 +468,69 @@ class FinancialFieldExtractor:
         else:
             chosen = max(finalists, key=lambda candidate: (candidate[3], candidate[4]))
         return chosen[0], chosen[1], chosen[2]
+
+    def _columnar_refund_total(
+        self,
+        text: str,
+    ) -> Optional[Tuple[float, Optional[str], float, int, int]]:
+        lines = text.splitlines()
+        for label_index, line in enumerate(lines):
+            normalized = self._normalize_ocr_amount_labels(line)
+            if not any(
+                label in normalized
+                for label in self.COLUMNAR_REFUND_TOTAL_LABELS
+            ):
+                continue
+            amount_rows: List[Tuple[float, Optional[str], int, int]] = []
+            for line_index in range(label_index + 1, min(len(lines), label_index + 9)):
+                candidate_line = lines[line_index].strip()
+                if not candidate_line:
+                    continue
+                match = re.match(
+                    rf"^\s*{self.AMOUNT_PATTERN}",
+                    candidate_line,
+                    flags=re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                trailing_ocr_noise = candidate_line[match.end():].strip()
+                if (
+                    len(trailing_ocr_noise) > 12
+                    or not re.fullmatch(r"[A-Za-z|.\s]*", trailing_ocr_noise)
+                ):
+                    continue
+                amount = self._amount_from_match(match)
+                if amount is None:
+                    continue
+                amount_rows.append((
+                    amount,
+                    self._currency_from_tokens(
+                        match.group("currency_code"),
+                        match.group("currency_symbol"),
+                    ),
+                    line_index,
+                    match.start(),
+                ))
+                if len(amount_rows) == 3:
+                    break
+            if len(amount_rows) != 3:
+                continue
+            first, second, total = (row[0] for row in amount_rows)
+            tolerance = max(0.02, abs(total) * 0.005)
+            if (
+                total < 0
+                and first < 0
+                and second < 0
+                and abs((first + second) - total) <= tolerance
+            ):
+                return (
+                    total,
+                    amount_rows[-1][1],
+                    0.998,
+                    amount_rows[-1][2],
+                    amount_rows[-1][3],
+                )
+        return None
 
     @staticmethod
     def _vat_summary_total(

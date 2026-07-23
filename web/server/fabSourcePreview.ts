@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "crypto";
 import type { Application, Request, Response } from "express";
 import { ENV } from "./_core/env";
 import { sdk } from "./_core/sdk";
-import { isLoopbackRequest } from "./_core/trpc";
+import { isLoopbackRequest } from "./lib/loopback";
 import { getFabLocalApiBaseUrl } from "./fabLocalGateway";
 
 export const MAX_FAB_SOURCE_PREVIEW_BYTES = 25 * 1024 * 1024;

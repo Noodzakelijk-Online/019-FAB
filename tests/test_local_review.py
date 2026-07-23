@@ -9,6 +9,122 @@ from src.operations.local_review import LocalReviewService
 
 
 class TestLocalReviewService(unittest.TestCase):
+    def test_credit_note_review_normalizes_negative_evidence_before_posting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "legacy-credit-note",
+                "originalFilename": "credit-note.pdf",
+                "documentType": "credit_note",
+                "processingStatus": "needs_review",
+                "vendorName": "ANWB",
+                "category": "Insurance",
+                "transactionDate": "2023-06-18",
+                "totalAmount": -7.2,
+                "vatAmount": -1.22,
+            })
+            review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "credit_note_posting_review",
+                "details": "Confirm signed reversal.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="approved",
+                resolution="Verified against retained source.",
+                corrections={
+                    "totalAmount": -7.2,
+                    "vatAmount": -1.22,
+                    "category": "Insurance",
+                },
+                learn_rule=False,
+            )
+
+            document = ledger.get_document(document_id)
+            self.assertTrue(result["success"])
+            self.assertEqual(result["corrections"]["totalAmount"], 7.2)
+            self.assertEqual(result["corrections"]["vatAmount"], 1.22)
+            self.assertEqual(
+                result["creditNoteEvidenceNormalization"]["normalizedFields"],
+                ["totalAmount", "vatAmount"],
+            )
+            self.assertEqual(document["total_amount"], 7.2)
+            self.assertEqual(document["vat_amount"], 1.22)
+            self.assertEqual(document["bookkeeping_record"]["amount"], -7.2)
+            self.assertEqual(document["bookkeeping_record"]["vat_amount"], -1.22)
+            correction = document["review_corrections"][0]["corrected_data"]
+            self.assertIn("_creditNoteEvidenceNormalization", correction)
+
+    def test_invalid_ordinary_negative_total_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "ordinary-invoice",
+                "originalFilename": "invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "category": "Manual Review",
+                "transactionDate": "2023-06-18",
+                "totalAmount": 12.0,
+            })
+            review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm values.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="approved",
+                resolution="Invalid signed correction.",
+                corrections={"totalAmount": -12.0, "category": "Office Supplies"},
+            )
+
+            document = ledger.get_document(document_id)
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "invalid_financial_correction")
+            self.assertEqual(result["field"], "totalAmount")
+            self.assertEqual(document["total_amount"], 12.0)
+            self.assertEqual(document["category"], "Manual Review")
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "pending")
+            self.assertEqual(document["review_corrections"], [])
+
+    def test_inconsistent_vat_is_rejected_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "invalid-vat-correction",
+                "originalFilename": "invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "category": "Manual Review",
+                "transactionDate": "2023-06-18",
+                "totalAmount": 12.0,
+            })
+            review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "validation_failed",
+                "details": "Confirm values.",
+            })
+
+            result = LocalReviewService(ledger).resolve_review_item(
+                review_id,
+                status="approved",
+                resolution="Invalid VAT correction.",
+                corrections={"totalAmount": 12.0, "vatAmount": 6.0},
+            )
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "invalid_financial_correction")
+            self.assertEqual(result["reason"], "vat_exceeds_total_ratio")
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "pending")
+
     def test_document_type_override_resolves_conflict_without_learning_non_posting_rule(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

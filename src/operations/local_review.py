@@ -1,3 +1,4 @@
+import math
 from datetime import date
 from typing import Any, Dict, Optional
 
@@ -6,6 +7,7 @@ from src.operations.local_bookkeeping_records import LocalBookkeepingRecordServi
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_reconciliation import LocalReconciliationService
 from src.operations.local_targets import resolve_document_target_system
+from src.validation.financial_consistency import assess_vat_amount, vat_issue_message
 
 
 APPLIED_REVIEW_STATUSES = {"approved", "resolved"}
@@ -52,7 +54,29 @@ class LocalReviewService:
             }
 
         document = self.ledger.get_document(int(review_item["document_id"])) if review_item.get("document_id") else None
-        normalized_corrections = normalize_corrections(corrections or {})
+        raw_corrections = corrections or {}
+        normalized_corrections = normalize_corrections(raw_corrections)
+        credit_note_normalization = None
+        if document:
+            (
+                normalized_corrections,
+                credit_note_normalization,
+                financial_correction_error,
+            ) = _validate_financial_corrections(
+                document,
+                raw_corrections,
+                normalized_corrections,
+            )
+            if financial_correction_error:
+                return {
+                    "success": False,
+                    "error": financial_correction_error["message"],
+                    "status": "invalid_financial_correction",
+                    "reviewItemId": review_item_id,
+                    "documentId": document.get("id"),
+                    "field": financial_correction_error.get("field"),
+                    "reason": financial_correction_error.get("reason"),
+                }
         if document and review_item.get("reason") == "duplicate_candidate":
             open_duplicate_candidates = [
                 item
@@ -121,11 +145,16 @@ class LocalReviewService:
             if document_update:
                 self.ledger.update_document(int(document["id"]), document_update)
 
+        recorded_corrections = dict(normalized_corrections)
+        if credit_note_normalization:
+            recorded_corrections["_creditNoteEvidenceNormalization"] = (
+                credit_note_normalization
+            )
         correction_payload = {
             "reviewItemId": review_item_id,
             "documentId": review_item.get("document_id"),
             "originalData": original_data,
-            "correctedData": normalized_corrections,
+            "correctedData": recorded_corrections,
             "status": status,
         }
         correction_id = self.ledger.record_review_correction(correction_payload)
@@ -136,6 +165,7 @@ class LocalReviewService:
             corrected_data={
                 "corrections": normalized_corrections,
                 "correctionId": correction_id,
+                "creditNoteEvidenceNormalization": credit_note_normalization,
             },
         )
 
@@ -194,6 +224,7 @@ class LocalReviewService:
                 "processingStatus": final_processing_status,
                 "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
                 "corrections": normalized_corrections,
+                "creditNoteEvidenceNormalization": credit_note_normalization,
             },
         })
         if normalized_corrections:
@@ -206,6 +237,7 @@ class LocalReviewService:
                     "correctionId": correction_id,
                     "before": original_data,
                     "after": normalized_corrections,
+                    "creditNoteEvidenceNormalization": credit_note_normalization,
                 },
             })
 
@@ -233,6 +265,7 @@ class LocalReviewService:
             "processingStatus": final_processing_status,
             "bookkeepingRecordId": bookkeeping_record.get("recordId") if bookkeeping_record else None,
             "corrections": normalized_corrections,
+            "creditNoteEvidenceNormalization": credit_note_normalization,
             "batchPropagation": batch_propagation,
         }
 
@@ -770,6 +803,114 @@ def normalize_corrections(corrections: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _validate_financial_corrections(
+    document: Dict[str, Any],
+    raw_corrections: Dict[str, Any],
+    corrections: Dict[str, Any],
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, str]]]:
+    financial_values = {
+        "totalAmount": _raw_correction_value(
+            raw_corrections,
+            "totalAmount",
+            "total_amount",
+        ),
+        "vatAmount": _raw_correction_value(
+            raw_corrections,
+            "vatAmount",
+            "vat_amount",
+        ),
+    }
+    supplied_fields = {
+        field_name
+        for field_name, (supplied, _) in financial_values.items()
+        if supplied
+    }
+    if not supplied_fields:
+        return corrections, None, None
+
+    normalized = dict(corrections)
+    effective_document_type = str(
+        normalized.get("documentType")
+        or document.get("document_type")
+        or ""
+    ).strip().lower()
+    is_credit_note = effective_document_type == "credit_note"
+    observed_values: Dict[str, float] = {}
+    normalized_values: Dict[str, float] = {}
+
+    for field_name in ("totalAmount", "vatAmount"):
+        supplied, raw_value = financial_values[field_name]
+        if not supplied:
+            continue
+        parsed = _float(raw_value)
+        if parsed is None:
+            return normalized, None, {
+                "field": field_name,
+                "reason": "not_finite",
+                "message": f"{field_name} must be a finite number.",
+            }
+        observed_values[field_name] = parsed
+        if is_credit_note and parsed < 0:
+            parsed = abs(parsed)
+            normalized_values[field_name] = parsed
+        if field_name == "totalAmount" and parsed <= 0:
+            return normalized, None, {
+                "field": field_name,
+                "reason": "non_positive_total",
+                "message": "totalAmount must be greater than zero.",
+            }
+        if field_name == "vatAmount" and parsed < 0:
+            return normalized, None, {
+                "field": field_name,
+                "reason": "negative_vat",
+                "message": "vatAmount cannot be negative.",
+            }
+        normalized[field_name] = parsed
+
+    total_amount = normalized.get("totalAmount", document.get("total_amount"))
+    vat_amount = normalized.get("vatAmount", document.get("vat_amount"))
+    if is_credit_note:
+        if isinstance(total_amount, (int, float)) and not isinstance(total_amount, bool):
+            total_amount = abs(float(total_amount))
+        if isinstance(vat_amount, (int, float)) and not isinstance(vat_amount, bool):
+            vat_amount = abs(float(vat_amount))
+    if vat_amount not in (None, ""):
+        assessment = assess_vat_amount(vat_amount, total_amount)
+        if not assessment["valid"]:
+            return normalized, None, {
+                "field": "vatAmount",
+                "reason": str(assessment.get("reason") or "invalid_vat"),
+                "message": vat_issue_message(assessment),
+            }
+
+    normalization = None
+    if normalized_values:
+        normalization = {
+            "policy": "credit_note_absolute_evidence_amount",
+            "normalizedFields": sorted(normalized_values),
+            "observedValues": {
+                field_name: observed_values[field_name]
+                for field_name in sorted(normalized_values)
+            },
+            "normalizedValues": {
+                field_name: normalized_values[field_name]
+                for field_name in sorted(normalized_values)
+            },
+            "ledgerDirection": "credit",
+        }
+    return normalized, normalization, None
+
+
+def _raw_correction_value(
+    corrections: Dict[str, Any],
+    *keys: str,
+) -> tuple[bool, Any]:
+    for key in keys:
+        if key in corrections and corrections[key] not in (None, ""):
+            return True, corrections[key]
+    return False, None
+
+
 def _build_document_update(document: Dict[str, Any], corrections: Dict[str, Any]) -> Dict[str, Any]:
     extracted_data = dict(document.get("extracted_data") or {})
     metadata = dict(document.get("metadata") or {})
@@ -897,9 +1038,10 @@ def _reconciliation_status_for_review(reason: str, review_status: str) -> str:
 
 def _float(value: Any) -> Optional[float]:
     try:
-        return float(str(value).replace(",", "."))
+        parsed = float(str(value).replace(",", "."))
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _int(value: Any) -> Optional[int]:

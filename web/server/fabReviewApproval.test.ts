@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { reviewApprovalBlockers } from "../client/src/components/fab/fabReviewApproval";
+import {
+  normalizedReviewEvidenceAmount,
+  reviewApprovalBlockers,
+} from "../client/src/components/fab/fabReviewApproval";
 
 const today = new Date("2026-07-23T00:00:00Z");
 const validInput = {
@@ -70,5 +73,12 @@ describe("FAB review approval readiness", () => {
         { nonPosting: true, today }
       )
     ).toEqual(["resolution"]);
+  });
+
+  it("presents legacy negative credit-note values as positive evidence", () => {
+    expect(normalizedReviewEvidenceAmount(-118.6, "credit_note")).toBe("118.6");
+    expect(normalizedReviewEvidenceAmount("-7,20", "credit_note")).toBe("7.2");
+    expect(normalizedReviewEvidenceAmount("-42.50", "vendor_invoice")).toBe("-42.50");
+    expect(normalizedReviewEvidenceAmount("", "credit_note")).toBe("");
   });
 });

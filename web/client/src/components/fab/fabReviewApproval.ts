@@ -41,6 +41,19 @@ export function reviewApprovalBlockers(
   return blockers;
 }
 
+export function normalizedReviewEvidenceAmount(
+  value: unknown,
+  documentType: string
+): string {
+  if (value === null || value === undefined || value === "") return "";
+  const raw = String(value).trim();
+  const parsed = parseDecimal(raw);
+  if (documentType === "credit_note" && parsed !== undefined) {
+    return String(Math.abs(parsed));
+  }
+  return raw;
+}
+
 function plausibleTransactionDate(value: string, today = new Date()): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
   if (!match) return false;

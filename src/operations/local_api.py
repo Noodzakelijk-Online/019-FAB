@@ -7031,6 +7031,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "duplicate_candidate_mismatch": 409,
             "duplicate_candidate_selection_required": 409,
             "invalid_duplicate_decision": 400,
+            "invalid_financial_correction": 400,
         }.get(result.get("status"), 200)
         return jsonify(result), status_code
 

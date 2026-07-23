@@ -1,3 +1,4 @@
+import math
 import re
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -5,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 class DocumentTypeClassifier:
     """Conservatively infer the bookkeeping role of an OCR document."""
 
-    CLASSIFIER_VERSION = "deterministic_financial_document_type_v5"
+    CLASSIFIER_VERSION = "deterministic_financial_document_type_v6"
 
     _PATTERNS: Tuple[Tuple[str, float, Tuple[str, ...]], ...] = (
         (
@@ -151,6 +152,28 @@ class DocumentTypeClassifier:
                     "evidence": [f"text:{_evidence_label(pattern)}" for pattern in evidence],
                 })
 
+        total_amount = _finite_number(extracted.get("total_amount"))
+        if total_amount is not None and total_amount < 0:
+            refund_evidence = []
+            if re.search(r"\btotaal\s+te\s+ontvangen\b", normalized_text):
+                refund_evidence.append("text:totaal_te_ontvangen")
+            if (
+                re.search(r"\bretour\s+van\b", normalized_text)
+                and re.search(r"\baantal\s+retouren\b", normalized_text)
+            ):
+                refund_evidence.append("text:retour_van_aantal_retouren")
+            if re.search(
+                r"\bterug\s*[\(\{]\s*(?:vpay|pin|bankpas)\b",
+                normalized_text,
+            ):
+                refund_evidence.append("text:payment_refund_marker")
+            if refund_evidence:
+                candidates.append({
+                    "documentType": "credit_note",
+                    "confidenceScore": 0.985,
+                    "evidence": ["field:negative_total_amount", *refund_evidence],
+                })
+
         selected = _select_candidate(candidates)
         document_type = selected.get("documentType", "unknown")
         return {
@@ -179,6 +202,14 @@ def is_non_posting_document_type(value: Any) -> bool:
 
 def _normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().lower()
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _evidence_label(pattern: str) -> str:

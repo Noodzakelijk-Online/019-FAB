@@ -9,6 +9,16 @@
  * - Webhook: Stripe webhook endpoint (generous but bounded)
  */
 import rateLimit from "express-rate-limit";
+import type { Request } from "express";
+import { ENV } from "../_core/env";
+import { isLoopbackRequest } from "./loopback";
+
+export function shouldBypassRelaxedRateLimit(
+  req: Pick<Request, "hostname" | "socket">,
+  localOperatorMode: boolean = ENV.fabOperatorLocalMode,
+): boolean {
+  return localOperatorMode && isLoopbackRequest(req);
+}
 
 /**
  * Strict rate limiter for sensitive operations:
@@ -59,6 +69,7 @@ export const standardLimiter = rateLimit({
 export const relaxedLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
+  skip: req => shouldBypassRelaxedRateLimit(req),
   standardHeaders: "draft-7",
   legacyHeaders: false,
   validate: { trustProxy: false, xForwardedForHeader: false },

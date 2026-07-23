@@ -84,7 +84,7 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertFalse(result["postingEligible"])
         self.assertTrue(result["reviewRequired"])
         self.assertTrue(is_non_posting_document_type(result["documentType"]))
-        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v5")
+        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v6")
 
     def test_government_benefits_letter_is_non_posting_supporting_evidence(self):
         result = self.classifier.classify(
@@ -140,6 +140,24 @@ class TestDocumentTypeClassifier(unittest.TestCase):
 
         self.assertEqual(result["documentType"], "vendor_invoice")
         self.assertTrue(result["postingEligible"])
+
+    def test_negative_receivable_total_is_a_credit_note(self):
+        result = self.classifier.classify(
+            "Factuur\nUw verzekering is beëindigd\nTotaal te ontvangen EUR\n-7,20",
+            {"total_amount": -7.2},
+        )
+
+        self.assertEqual(result["documentType"], "credit_note")
+        self.assertGreaterEqual(result["confidenceScore"], 0.98)
+        self.assertIn("field:negative_total_amount", result["evidence"])
+
+    def test_negative_amount_without_refund_semantics_is_not_a_credit_note(self):
+        result = self.classifier.classify(
+            "Factuur\nCorrectieboekingsregel -7,20",
+            {"total_amount": -7.2},
+        )
+
+        self.assertEqual(result["documentType"], "vendor_invoice")
 
 
 if __name__ == "__main__":

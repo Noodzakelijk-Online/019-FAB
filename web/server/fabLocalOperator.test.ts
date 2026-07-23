@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isLoopbackFabOperatorRequest } from "./_core/trpc";
 import type { TrpcContext } from "./_core/context";
+import { shouldBypassRelaxedRateLimit } from "./lib/rateLimiter";
 
 function context(hostname: string, remoteAddress: string): TrpcContext {
   return {
@@ -22,5 +23,14 @@ describe("FAB loopback operator access", () => {
   it("rejects remote addresses and non-loopback host headers", () => {
     expect(isLoopbackFabOperatorRequest(context("127.0.0.1", "10.10.0.8"))).toBe(false);
     expect(isLoopbackFabOperatorRequest(context("fab.example.com", "::1"))).toBe(false);
+  });
+
+  it("exempts only enabled loopback operators from the relaxed API limit", () => {
+    const localRequest = context("127.0.0.1", "::ffff:127.0.0.1").req;
+    const remoteRequest = context("fab.example.com", "10.10.0.8").req;
+
+    expect(shouldBypassRelaxedRateLimit(localRequest, true)).toBe(true);
+    expect(shouldBypassRelaxedRateLimit(localRequest, false)).toBe(false);
+    expect(shouldBypassRelaxedRateLimit(remoteRequest, true)).toBe(false);
   });
 });

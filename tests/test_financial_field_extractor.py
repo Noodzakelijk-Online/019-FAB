@@ -176,6 +176,34 @@ class TestFinancialFieldExtractor(unittest.TestCase):
         self.assertIsNone(result["extracted_data"]["total_amount"])
         self.assertEqual(result["field_confidences"]["total_amount"], 0.0)
 
+    def test_recovers_explicit_refund_total_from_vat_summary(self):
+        result = FinancialFieldExtractor().extract(
+            "Praxis\nTOTAAL\nTerug (Vpay)\n"
+            "BTW DETAIL BTW Excl.\n9% 0,00 -25,00\n"
+            "TOTAAL 0,00 -25,00\nTotaal\n-25,00"
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], -25.0)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.99)
+
+    def test_recovers_arithmetic_columnar_credit_total(self):
+        result = FinancialFieldExtractor().extract(
+            "ANWB\nFactuur\nUw verzekering is beëindigd\n"
+            "Termijnpremie EUR\nAssurantiebelasting EUR\n"
+            "Totaal te ontvangen EUR\n18-06-2023.\n"
+            "-5,98\n-1,22\n-7,20 ei ."
+        )
+
+        self.assertEqual(result["extracted_data"]["total_amount"], -7.2)
+        self.assertGreaterEqual(result["field_confidences"]["total_amount"], 0.99)
+
+    def test_does_not_infer_columnar_refund_without_arithmetic_consensus(self):
+        result = FinancialFieldExtractor().extract(
+            "ANWB\nTotaal te ontvangen\n-5,98\n-1,22\n-8,20"
+        )
+
+        self.assertIsNone(result["extracted_data"]["total_amount"])
+
     def test_insurance_coverage_limits_are_not_transaction_totals(self):
         result = FinancialFieldExtractor().extract(
             "Polisblad\nCataloguswaarde EUR 4.300,00\n"

@@ -502,7 +502,7 @@ export const appRouter = router({
           vendorName: z.string().trim().min(1).max(255).optional(),
           category: z.string().trim().min(1).max(255).optional(),
           transactionDate: z.iso.date().optional(),
-          totalAmount: z.number().finite().nonnegative().optional(),
+          totalAmount: z.number().finite().positive().optional(),
           vatAmount: z.number().finite().nonnegative().optional(),
           targetSystem: z.enum(["waveapps_business", "waveapps_personal", "mijngeldzaken"]).optional(),
           duplicateOfDocumentId: z.number().int().positive().optional(),

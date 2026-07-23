@@ -22,6 +22,7 @@ import {
   type FabReviewTriageFilter,
 } from "./fabReviewTriage";
 import {
+  normalizedReviewEvidenceAmount,
   reviewApprovalBlockers,
   type FabReviewApprovalBlocker,
 } from "./fabReviewApproval";
@@ -264,10 +265,15 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     setForm({
       vendorName: text(document.vendorName, ""),
       transactionDate: invalidDate ? "" : text(document.normalizedRecordDate, text(document.transactionDate, "")),
-      totalAmount: numericText(document.totalAmount),
+      totalAmount: normalizedReviewEvidenceAmount(document.totalAmount, documentType),
       vatAmount: invalidVat
         ? ""
-        : numericText(documentType === "credit_note" ? document.vatAmount : document.normalizedVatAmount ?? document.vatAmount),
+        : normalizedReviewEvidenceAmount(
+          documentType === "credit_note"
+            ? document.vatAmount
+            : document.normalizedVatAmount ?? document.vatAmount,
+          documentType,
+        ),
       category: text(document.category, "") === "Manual Review"
         ? text(categorySuggestion.category, "")
         : text(document.category, ""),
@@ -511,7 +517,15 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
               <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
-              {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => setForm({ ...form, documentType: event.target.value as ReviewDocumentType })}>{DOCUMENT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{humanize(option)}</option>)}</select><small>{copy(`Classifier suggestion: ${humanize(text(document.classifiedDocumentType, "unknown"))}`, `Classificatievoorstel: ${humanize(text(document.classifiedDocumentType, "unknown"))}`)}</small></label>}
+              {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => {
+                const documentType = event.target.value as ReviewDocumentType;
+                setForm((current) => ({
+                  ...current,
+                  documentType,
+                  totalAmount: normalizedReviewEvidenceAmount(current.totalAmount, documentType),
+                  vatAmount: normalizedReviewEvidenceAmount(current.vatAmount, documentType),
+                }));
+              }}>{DOCUMENT_TYPE_OPTIONS.map((option) => <option key={option} value={option}>{humanize(option)}</option>)}</select><small>{copy(`Classifier suggestion: ${humanize(text(document.classifiedDocumentType, "unknown"))}`, `Classificatievoorstel: ${humanize(text(document.classifiedDocumentType, "unknown"))}`)}</small></label>}
               {!selectedNonPosting && <>
                 {selectedCreditNote && <div className="fab-financial-warning" role="status"><AlertTriangle aria-hidden="true" /><div><strong>{copy("Expense reversal", "Kostenboeking terugdraaien")}</strong><span>{copy("FAB will post this credit note as a Wave deposit that decreases the selected expense account. Verify the positive source amount below; FAB stores the ledger reversal with a negative sign.", "FAB boekt deze creditnota als een Wave-storting die de gekozen kostenrekening verlaagt. Controleer hieronder het positieve bronbedrag; FAB bewaart de terugboeking negatief in het grootboek.")}</span></div></div>}
                 <label><span>{copy("Vendor", "Leverancier")}</span><input value={form.vendorName} onChange={(event) => setForm({ ...form, vendorName: event.target.value })} required /></label>
@@ -711,10 +725,6 @@ function normalizedDocumentType(value: unknown): ReviewDocumentType {
 
 function normalizedVendor(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
-}
-
-function numericText(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
 }
 
 function stringList(value: unknown): string[] {

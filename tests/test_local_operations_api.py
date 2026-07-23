@@ -21,6 +21,44 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_review_api_rejects_invalid_financial_correction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "invalid-api-amount",
+                "originalFilename": "invoice.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "category": "Manual Review",
+                "transactionDate": "2023-06-18",
+                "totalAmount": 12.0,
+            })
+            review_id = ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm values.",
+            })
+            app = create_app({"fab_local_ledger_path": ledger_path})
+
+            response = app.test_client().post(
+                f"/api/review/{review_id}/resolve",
+                json={
+                    "status": "approved",
+                    "resolution": "Invalid signed correction.",
+                    "corrections": {"totalAmount": -12.0},
+                },
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(
+                response.get_json()["status"],
+                "invalid_financial_correction",
+            )
+            self.assertEqual(ledger.get_review_item(review_id)["status"], "pending")
+
     def test_workflow_run_api_and_dashboard_expose_step_evidence(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
