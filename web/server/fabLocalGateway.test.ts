@@ -114,14 +114,15 @@ describe("FAB local API gateway", () => {
         workItems: [{ id: "document-7", documentId: 7, reasons: ["manual_review_category"] }],
       },
     };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       const fixture = fixtures[url.pathname];
       return new Response(JSON.stringify(fixture ?? {}), {
         status: fixture ? 200 : 404,
         headers: { "content-type": "application/json" },
       });
-    }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     const result = await getFabControlCenter();
 
@@ -170,6 +171,10 @@ describe("FAB local API gateway", () => {
       accessTokenConfigured: true,
       businessId: "business-1",
     });
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/api/review" && url.searchParams.get("limit") === "500";
+    })).toBe(true);
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
 

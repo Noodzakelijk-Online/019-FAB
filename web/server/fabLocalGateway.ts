@@ -102,7 +102,7 @@ const READ_PATHS = {
   gmailAuthorization: "/api/connectors/gmail/authorization",
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",
-  reviewQueue: "/api/review?status=open&limit=100",
+  reviewQueue: "/api/review?status=open&limit=500",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
