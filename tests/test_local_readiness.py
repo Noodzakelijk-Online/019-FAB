@@ -174,6 +174,11 @@ class TestLocalReadinessService(unittest.TestCase):
 
             self.assertEqual(missing["status"], "attention")
             self.assertFalse(missing["configured"])
+            self.assertFalse(missing["required"])
+            self.assertFalse(any(
+                issue.get("entity") == "category_model"
+                for issue in missing_summary["issues"]
+            ))
 
             for path in (model_path, vectorizer_path):
                 with open(path, "wb") as handle:
@@ -189,6 +194,56 @@ class TestLocalReadinessService(unittest.TestCase):
 
             self.assertEqual(ready["status"], "ok")
             self.assertTrue(ready["configured"])
+
+    def test_disabled_optional_sources_do_not_create_readiness_issues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = LocalReadinessService(
+                {
+                    "google_photos": {
+                        "enabled": False,
+                        "credentials_file": os.path.join(temp_dir, "missing-credentials.json"),
+                        "picker_token_file": os.path.join(temp_dir, "missing-token.json"),
+                    },
+                },
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                intake_paths=[temp_dir],
+            ).summarize()
+            photos = next(
+                source for source in summary["sources"]
+                if source["id"] == "google_photos"
+            )
+            issue_entities = {issue.get("entity") for issue in summary["issues"]}
+
+            self.assertEqual(photos["status"], "disabled")
+            self.assertFalse(photos["enabled"])
+            self.assertNotIn("photos_credentials", issue_entities)
+            self.assertNotIn("photos_token", issue_entities)
+            self.assertNotIn("category_model", issue_entities)
+            self.assertNotIn("playwright", issue_entities)
+
+    def test_enabled_photos_reports_missing_required_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = LocalReadinessService(
+                {
+                    "google_photos": {
+                        "enabled": True,
+                        "credentials_file": os.path.join(temp_dir, "missing-credentials.json"),
+                        "picker_token_file": os.path.join(temp_dir, "missing-token.json"),
+                    },
+                },
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                intake_paths=[temp_dir],
+            ).summarize()
+            photos = next(
+                source for source in summary["sources"]
+                if source["id"] == "google_photos"
+            )
+            issue_entities = {issue.get("entity") for issue in summary["issues"]}
+
+            self.assertEqual(photos["status"], "needs_attention")
+            self.assertTrue(photos["enabled"])
+            self.assertIn("photos_credentials", issue_entities)
+            self.assertIn("photos_token", issue_entities)
 
     def test_api_settings_and_dashboard_render_readiness_without_secrets(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -15,6 +15,7 @@ const dutchStatuses: Record<string, string> = {
   unavailable: "Niet beschikbaar",
   not_executed: "Niet uitgevoerd",
   not_configured: "Niet ingesteld",
+  disabled: "Uitgeschakeld",
   needs_token: "Token vereist",
   needs_business_id: "Bedrijfs-ID vereist",
   needs_validation: "Validatie vereist",

@@ -134,6 +134,14 @@ class LocalReadinessService:
         configured_languages = configured_tesseract_languages(self.config)
         available_languages = available_tesseract_languages(self.config)
         missing_languages = sorted(set(configured_languages) - set(available_languages))
+        google_connector_required = any(
+            _truthy(_config_value(self.config, key, nested_key, default=False))
+            for key, nested_key in (
+                ("gmail_enabled", "gmail.enabled"),
+                ("google_drive_enabled", "google_drive.enabled"),
+                ("google_photos_enabled", "google_photos.enabled"),
+            )
+        ) or _truthy(_config_value(self.config, "gmail_scanner_mode", default=False))
         poppler_path = resolve_poppler_path(self.config)
         ml_model_value = str(
             _config_value(self.config, "ml_model_path", default="data/models/ml_categorizer_model.joblib")
@@ -192,13 +200,24 @@ class LocalReadinessService:
                 "details": "Required to render PDF receipts before Tesseract OCR.",
             },
             _python_dependency("PIL", "Pillow", "Image loading for OCR processors"),
-            _python_dependency("sklearn", "scikit-learn", "Optional approved-feedback category model"),
-            _python_dependency("joblib", "joblib", "Optional category model persistence"),
+            _python_dependency(
+                "sklearn",
+                "scikit-learn",
+                "Optional approved-feedback category model",
+                required=False,
+            ),
+            _python_dependency(
+                "joblib",
+                "joblib",
+                "Optional category model persistence",
+                required=False,
+            ),
             {
                 "id": "category_model",
                 "label": "Category model artifacts",
                 "status": "ok" if ml_model_ready else "attention",
                 "configured": ml_model_ready,
+                "required": False,
                 "modelPath": ml_model_path,
                 "vectorizerPath": ml_vectorizer_path,
                 "details": (
@@ -207,8 +226,18 @@ class LocalReadinessService:
                     else "No approved model is trained yet; deterministic and approved vendor rules remain available."
                 ),
             },
-            _python_dependency("googleapiclient", "Google API client", "Gmail, Drive, Photos, and Vision integrations"),
-            _python_dependency("playwright", "Playwright", "Optional supervised browser tooling"),
+            _python_dependency(
+                "googleapiclient",
+                "Google API client",
+                "Gmail, Drive, Photos, and Vision integrations",
+                required=google_connector_required,
+            ),
+            _python_dependency(
+                "playwright",
+                "Playwright",
+                "Optional supervised browser tooling",
+                required=False,
+            ),
         ]
 
     def _paths(self) -> Dict[str, Any]:
@@ -243,14 +272,41 @@ class LocalReadinessService:
         }
 
     def _credentials(self) -> List[Dict[str, Any]]:
+        gmail_required = _truthy(
+            _config_value(self.config, "gmail_enabled", "gmail.enabled", default=False)
+        ) or _truthy(_config_value(self.config, "gmail_scanner_mode", default=False))
+        drive_required = _truthy(
+            _config_value(
+                self.config,
+                "google_drive_enabled",
+                "google_drive.enabled",
+                default=False,
+            )
+        )
+        photos_required = _truthy(
+            _config_value(
+                self.config,
+                "google_photos_enabled",
+                "google_photos.enabled",
+                default=False,
+            )
+        )
+        vision_required = _truthy(
+            _config_value(
+                self.config,
+                "google_vision_enabled",
+                "google_vision.enabled",
+                default=False,
+            )
+        )
         return [
-            _credential_file("gmail_credentials", "Gmail OAuth credentials", self.config, "gmail_credentials_file", "gmail.credentials_file", "gmail_credentials_path"),
-            _credential_file("gmail_token", "Gmail OAuth token", self.config, "gmail_token_file", "gmail.token_file", "gmail_token_path"),
-            _credential_file("drive_credentials", "Google Drive OAuth credentials", self.config, "google_drive_credentials_file", "google_drive.credentials_file", "drive.credentials_file", "drive_credentials_path"),
-            _credential_file("drive_token", "Google Drive OAuth token", self.config, "google_drive_token_file", "google_drive.token_file", "drive.token_file", "drive_token_path"),
-            _credential_file("photos_credentials", "Google Photos OAuth credentials", self.config, "google_photos_credentials_file", "google_photos.credentials_file", "photos.credentials_file", "photos_credentials_path"),
-            _credential_file("photos_token", "Google Photos Picker OAuth token", self.config, "google_photos_picker_token_file", "google_photos.picker_token_file", "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path"),
-            _credential_file("vision_credentials", "Google Vision credentials", self.config, "google_vision_credentials_file", "google_vision.credentials_file"),
+            _credential_file("gmail_credentials", "Gmail OAuth credentials", self.config, "gmail_credentials_file", "gmail.credentials_file", "gmail_credentials_path", required=gmail_required),
+            _credential_file("gmail_token", "Gmail OAuth token", self.config, "gmail_token_file", "gmail.token_file", "gmail_token_path", required=gmail_required),
+            _credential_file("drive_credentials", "Google Drive OAuth credentials", self.config, "google_drive_credentials_file", "google_drive.credentials_file", "drive.credentials_file", "drive_credentials_path", required=drive_required),
+            _credential_file("drive_token", "Google Drive OAuth token", self.config, "google_drive_token_file", "google_drive.token_file", "drive.token_file", "drive_token_path", required=drive_required),
+            _credential_file("photos_credentials", "Google Photos OAuth credentials", self.config, "google_photos_credentials_file", "google_photos.credentials_file", "photos.credentials_file", "photos_credentials_path", required=photos_required),
+            _credential_file("photos_token", "Google Photos Picker OAuth token", self.config, "google_photos_picker_token_file", "google_photos.picker_token_file", "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path", required=photos_required),
+            _credential_file("vision_credentials", "Google Vision credentials", self.config, "google_vision_credentials_file", "google_vision.credentials_file", required=vision_required),
             _credential_value("freshdesk_api_key", "Freshdesk API key", self.config, "freshdesk_api_key", "freshdesk.api_key"),
             _credential_value("freshdesk_domain", "Freshdesk domain", self.config, "freshdesk_domain", "freshdesk.domain", secret=False),
             _credential_value("wave_business_token", "Waveapps Business token", self.config, "waveapps_business_access_token", "waveapps_business.access_token"),
@@ -284,7 +340,18 @@ class LocalReadinessService:
                 credential_map["drive_token"],
                 self.config,
             ),
-            _photos_picker_source(credential_map["photos_credentials"], credential_map["photos_token"]),
+            _photos_picker_source(
+                credential_map["photos_credentials"],
+                credential_map["photos_token"],
+                enabled=_truthy(
+                    _config_value(
+                        self.config,
+                        "google_photos_enabled",
+                        "google_photos.enabled",
+                        default=False,
+                    )
+                ),
+            ),
             _pair_source(
                 "freshdesk",
                 "Freshdesk",
@@ -395,7 +462,7 @@ class LocalReadinessService:
                 "nextAction": "Set operations.api_token before using a tunnel or non-loopback host.",
             })
         for dependency in dependencies:
-            if dependency["status"] != "ok":
+            if dependency["status"] != "ok" and dependency.get("required", True):
                 issues.append({
                     "severity": "attention",
                     "type": "dependency_missing",
@@ -426,7 +493,7 @@ class LocalReadinessService:
                     "nextAction": "Create the folder or update the configured path.",
                 })
         for credential in credentials:
-            if credential.get("partial"):
+            if credential.get("partial") and credential.get("required", False):
                 issues.append({
                     "severity": "attention",
                     "type": "credential_path_missing",
@@ -444,13 +511,20 @@ class LocalReadinessService:
         return issues
 
 
-def _python_dependency(module_name: str, label: str, details: str) -> Dict[str, Any]:
+def _python_dependency(
+    module_name: str,
+    label: str,
+    details: str,
+    *,
+    required: bool = True,
+) -> Dict[str, Any]:
     found = importlib.util.find_spec(module_name) is not None
     return {
         "id": module_name.lower(),
         "label": label,
         "status": "ok" if found else "attention",
         "configured": found,
+        "required": required,
         "details": details,
     }
 
@@ -485,7 +559,13 @@ def _nearest_existing_parent(path: str) -> str:
     return current
 
 
-def _credential_file(identifier: str, label: str, config: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+def _credential_file(
+    identifier: str,
+    label: str,
+    config: Dict[str, Any],
+    *keys: str,
+    required: bool = False,
+) -> Dict[str, Any]:
     value = _config_value(config, *keys)
     configured = value not in (None, "")
     path = str(value or "")
@@ -497,6 +577,7 @@ def _credential_file(identifier: str, label: str, config: Dict[str, Any], *keys:
         "configured": configured,
         "exists": exists,
         "partial": configured and not exists,
+        "required": required,
         "path": path if configured else "",
         "secret": True,
     }
@@ -586,13 +667,31 @@ def _gmail_source(
     return source
 
 
-def _photos_picker_source(credentials: Dict[str, Any], token: Dict[str, Any]) -> Dict[str, Any]:
+def _photos_picker_source(
+    credentials: Dict[str, Any],
+    token: Dict[str, Any],
+    *,
+    enabled: bool,
+) -> Dict[str, Any]:
+    if not enabled:
+        return {
+            **_source_status(
+                "google_photos",
+                "Google Photos Picker",
+                configured=False,
+                ready=False,
+                details="Optional supervised Picker intake is disabled.",
+            ),
+            "enabled": False,
+            "status": "disabled",
+        }
     source = _oauth_source(
         "google_photos",
         "Google Photos Picker",
         credentials,
         token,
     )
+    source["enabled"] = True
     if token["exists"] and not str(token.get("path") or "").lower().endswith(".json"):
         source["ready"] = False
         source["status"] = "needs_attention"

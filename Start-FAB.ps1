@@ -224,12 +224,22 @@ if ($LASTEXITCODE -ne 0) {
 }
 $apiToken = [string]$apiToken
 
+$mijngeldzakenExportDir = & $python.Source -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('mijngeldzaken_export_dir') or c.get('operations_mijngeldzaken_export_dir') or 'data/exports/mijngeldzaken'))"
+if ($LASTEXITCODE -ne 0) {
+    throw "FAB could not read the configured MijnGeldzaken export directory."
+}
+$mijngeldzakenExportDir = [string]$mijngeldzakenExportDir
+if (-not [System.IO.Path]::IsPathRooted($mijngeldzakenExportDir)) {
+    $mijngeldzakenExportDir = Join-Path $root $mijngeldzakenExportDir
+}
+
 @(
     $dataRoot,
     (Join-Path $dataRoot "backups"),
     (Join-Path $dataRoot "reports"),
     (Join-Path $dataRoot "source_downloads"),
     (Join-Path $dataRoot "exports"),
+    $mijngeldzakenExportDir,
     (Join-Path $root "downloads\sort-out"),
     $logsRoot
 ) | ForEach-Object {

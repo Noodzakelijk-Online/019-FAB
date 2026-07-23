@@ -48,7 +48,9 @@ export function FabConnections({ connections, search, commandPending, resource, 
   const { copy, status: localizedStatus, dateLocale } = useFabLocale();
   const visibleConnections = connections.filter((item) => matchesSearch(item, search));
   const syncableConnections = connections.filter((item) => item.canSync === true);
-  const readyCount = connections.filter((item) => text(item.status) === "ready").length;
+  const activeConnections = connections.filter((item) => !["disabled", "not_configured"].includes(text(item.status)));
+  const readyCount = activeConnections.filter((item) => text(item.status) === "ready").length;
+  const setupCount = activeConnections.length - readyCount;
   const state = panelState(resource, connections.length);
 
   return (
@@ -57,7 +59,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
         <div><span>{copy("Source and downstream controls", "Bron- en vervolgkoppelingen")}</span><h2>{copy("Connections", "Koppelingen")}</h2></div>
         <div className="fab-connection-heading-actions">
           <FabDataStatus resource={resource} state={state} />
-          <span className={`fab-status-chip tone-${connections.length && readyCount === connections.length ? "good" : "warn"}`}>{resource?.state === "live" || resource?.state === "stale" ? `${readyCount}/${connections.length} ${copy("ready", "gereed")}` : `- ${copy("ready", "gereed")}`}</span>
+          <span className={`fab-status-chip tone-${setupCount === 0 ? "good" : "warn"}`}>{resource?.state === "live" || resource?.state === "stale" ? `${readyCount} ${copy("ready", "gereed")}${setupCount ? ` · ${setupCount} ${copy("setup", "instellen")}` : ""}` : `- ${copy("ready", "gereed")}`}</span>
           {syncableConnections.length ? (
             <button className="fab-secondary-button compact" onClick={() => onCommand("sync_sources")} disabled={commandPending}>
               <RefreshCw aria-hidden="true" /> {copy("Sync sources", "Bronnen synchroniseren")}
