@@ -84,7 +84,33 @@ describe("FAB local API gateway", () => {
       "/api/drive-wave/work-orders": {
         count: 1,
         summary: { needsAttachmentVerification: 1, readyToArchive: 0 },
-        workOrders: [{ workOrderId: "drive-wave-7-abcd", documentId: 7, stage: "upload_and_verify_attachment" }],
+        workOrders: [{
+          workOrderId: "drive-wave-7-abcd",
+          documentId: 7,
+          stage: "upload_and_verify_attachment",
+          actionRequired: "Verify the attachment.",
+          source: {
+            filename: "receipt.pdf",
+            mimeType: "application/pdf",
+            provider: "google_drive",
+            sha256: "abc123",
+            attachmentId: "private-provider-attachment",
+            localPath: "C:\\private\\receipt.pdf",
+          },
+          wave: {
+            externalTransactionId: null,
+            targetSystem: "waveapps_business",
+            expectedFields: { vendor: "Example" },
+          },
+          archivePlan: {
+            canArchive: false,
+            reasons: ["wave_attachment_evidence_missing"],
+            evidenceDigest: "private-evidence-digest",
+          },
+          reviews: { blocking: 1, open: 1, reasons: ["manual_review_category"] },
+          browserExecution: { transactionListUrl: "https://example.test/private" },
+          evidence: { template: { businessId: "private-business-id" } },
+        }],
       },
       "/api/connectors/google-drive/authorization": {
         status: "ready_to_authorize",
@@ -119,7 +145,41 @@ describe("FAB local API gateway", () => {
           duplicateCandidates: 0,
         },
         categoryOptions: ["Operations | Office Supplies"],
-        workItems: [{ id: "document-7", documentId: 7, reasons: ["manual_review_category"] }],
+        workItems: [{
+          id: "document-7",
+          documentId: 7,
+          reasons: ["manual_review_category"],
+          reviewPath: "/documents/7",
+          document: {
+            filename: "receipt.pdf",
+            vendorName: "Example",
+            category: "Manual Review",
+            categorySuggestion: {
+              category: "Office Supplies",
+              confidenceScore: 0.97,
+              rationale: "Exact vendor match.",
+              privateModelTrace: "omit-this",
+            },
+            ocrExcerpt: "Source evidence",
+            privateInternalMetadata: { raw: true },
+          },
+          duplicateCandidates: [{
+            candidateDocumentId: 6,
+            document: {
+              filename: "possible-duplicate.pdf",
+              transactionDate: "2026-07-01",
+              totalAmount: 42,
+              ocrExcerpt: "omit duplicate OCR",
+            },
+            evidence: { duplicateFingerprint: "omit-this" },
+          }],
+          reviewItems: [{
+            id: 9,
+            reason: "manual_review_category",
+            details: "Verify category.",
+            correctedData: { private: true },
+          }],
+        }],
       },
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -164,7 +224,19 @@ describe("FAB local API gateway", () => {
     expect(result.delivery).toMatchObject({
       count: 1,
       summary: { needsAttachmentVerification: 1 },
-      workOrders: [expect.objectContaining({ documentId: 7 })],
+      workOrders: [expect.objectContaining({
+        documentId: 7,
+        source: {
+          filename: "receipt.pdf",
+          mimeType: "application/pdf",
+          provider: "google_drive",
+          sha256: "abc123",
+        },
+        archivePlan: {
+          canArchive: false,
+          reasons: ["wave_attachment_evidence_missing"],
+        },
+      })],
     });
     expect(result.reviews).toMatchObject({
       summary: {
@@ -174,7 +246,36 @@ describe("FAB local API gateway", () => {
         evidenceOnlyDocuments: 1,
       },
       categoryOptions: ["Operations | Office Supplies"],
-      workItems: [expect.objectContaining({ documentId: 7 })],
+      workItems: [expect.objectContaining({
+        documentId: 7,
+        document: expect.objectContaining({
+          filename: "receipt.pdf",
+          vendorName: "Example",
+          ocrExcerpt: "Source evidence",
+          categorySuggestion: {
+            category: "Office Supplies",
+            confidenceScore: 0.97,
+            rationale: "Exact vendor match.",
+          },
+        }),
+        duplicateCandidates: [
+          expect.objectContaining({
+            candidateDocumentId: 6,
+            document: {
+              filename: "possible-duplicate.pdf",
+              transactionDate: "2026-07-01",
+              totalAmount: 42,
+            },
+          }),
+        ],
+        reviewItems: [
+          expect.objectContaining({
+            id: 9,
+            reason: "manual_review_category",
+            details: "Verify category.",
+          }),
+        ],
+      })],
     });
     expect(result.driveAuthorization).toMatchObject({
       status: "ready_to_authorize",
@@ -195,7 +296,17 @@ describe("FAB local API gateway", () => {
       const url = new URL(String(input));
       return url.pathname === "/api/review" && url.searchParams.get("limit") === "500";
     })).toBe(true);
-    expect(JSON.stringify(result)).not.toContain("private-token");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("private-token");
+    expect(serialized).not.toContain("private-provider-attachment");
+    expect(serialized).not.toContain("C:\\private\\receipt.pdf");
+    expect(serialized).not.toContain("private-evidence-digest");
+    expect(serialized).not.toContain("private-business-id");
+    expect(serialized).not.toContain("privateModelTrace");
+    expect(serialized).not.toContain("privateInternalMetadata");
+    expect(serialized).not.toContain("omit duplicate OCR");
+    expect(serialized).not.toContain("duplicateFingerprint");
+    expect(serialized).not.toContain("correctedData");
   });
 
   it("does not turn unavailable resources into reassuring zeroes", async () => {

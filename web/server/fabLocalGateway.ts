@@ -283,11 +283,11 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     delivery: {
       status: resources.driveWaveStatus || {},
       summary: asRecord(resources.driveWaveWorkOrders?.summary) || {},
-      workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders),
+      workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders).map(projectDeliveryWorkOrder),
       count: nullableNumber(resources.driveWaveWorkOrders?.count),
     },
     reviews: {
-      workItems: arrayValue(resources.reviewQueue?.workItems),
+      workItems: arrayValue(resources.reviewQueue?.workItems).map(projectReviewWorkItem),
       categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
       summary: asRecord(resources.reviewQueue?.summary) || {},
     },
@@ -517,6 +517,108 @@ function asRecord(value: unknown): JsonRecord | null {
 
 function arrayValue(value: unknown): JsonRecord[] {
   return Array.isArray(value) ? value.flatMap((item) => asRecord(item) ? [asRecord(item)!] : []) : [];
+}
+
+function projectDeliveryWorkOrder(value: JsonRecord): JsonRecord {
+  const source = selectFields(value.source, ["filename", "mimeType", "provider", "sha256"]);
+  const wave = selectFields(value.wave, ["externalTransactionId", "targetSystem"]);
+  const archivePlan = selectFields(value.archivePlan, [
+    "canArchive",
+    "evidenceVerified",
+    "externalSubmission",
+    "reasons",
+    "retentionStatus",
+    "status",
+  ]);
+  const reviews = selectFields(value.reviews, ["blocking", "open", "reasons"]);
+  return {
+    ...selectFields(value, [
+      "actionRequired",
+      "documentId",
+      "externalSubmission",
+      "stage",
+      "status",
+      "success",
+      "workOrderId",
+      "workOrderVersion",
+    ]),
+    source,
+    wave,
+    archivePlan,
+    reviews,
+  };
+}
+
+function projectReviewWorkItem(value: JsonRecord): JsonRecord {
+  const document = selectFields(value.document, [
+    "category",
+    "classifiedDocumentType",
+    "currency",
+    "documentType",
+    "duplicateOfDocumentId",
+    "filename",
+    "financialFieldIssues",
+    "normalizedRecordDate",
+    "normalizedVatAmount",
+    "ocrExcerpt",
+    "postingEligible",
+    "processingStatus",
+    "source",
+    "sourceUrl",
+    "targetSystem",
+    "totalAmount",
+    "transactionDate",
+    "vatAmount",
+    "vendorName",
+  ]);
+  const categorySuggestion = selectFields(
+    asRecord(value.document)?.categorySuggestion,
+    ["category", "confidenceScore", "matchPolicy", "rationale", "source"],
+  );
+  if (Object.keys(categorySuggestion).length) {
+    document.categorySuggestion = categorySuggestion;
+  }
+  const duplicateCandidates = arrayValue(value.duplicateCandidates).map((candidate) => ({
+    ...selectFields(candidate, [
+      "candidateDocumentId",
+      "confidenceScore",
+      "id",
+      "matchType",
+      "reason",
+    ]),
+    document: selectFields(candidate.document, [
+      "currency",
+      "filename",
+      "totalAmount",
+      "transactionDate",
+    ]),
+  }));
+  const reviewItems = arrayValue(value.reviewItems).map((item) => selectFields(
+    item,
+    ["createdAt", "details", "id", "reason", "status", "updatedAt"],
+  ));
+  return {
+    ...selectFields(value, [
+      "documentId",
+      "id",
+      "reasons",
+      "reviewPath",
+      "status",
+    ]),
+    document,
+    duplicateCandidates,
+    reviewItems,
+  };
+}
+
+function selectFields(value: unknown, fields: string[]): JsonRecord {
+  const source = asRecord(value);
+  if (!source) return {};
+  return Object.fromEntries(
+    fields
+      .filter((field) => Object.prototype.hasOwnProperty.call(source, field))
+      .map((field) => [field, source[field]]),
+  );
 }
 
 function stringArray(value: unknown): string[] {
