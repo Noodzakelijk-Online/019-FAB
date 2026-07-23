@@ -24,6 +24,7 @@ RECOVERABLE_RUN_STATUSES = {"failed", "completed_with_errors", "attention_requir
 RECOVERABLE_STEP_STATUSES = {"failed", "blocked", "skipped", "not_run"}
 SAFE_AUTONOMY_MODES = {"safe_auto", "safe_draft", "read_only"}
 WORKFLOW_RECOVERY_SCHEDULER_LEASE_NAME = "local_workflow_recovery_scheduler"
+DEFAULT_INTERRUPTED_RUN_GRACE_SECONDS = 900.0
 
 
 class LocalWorkflowRecoveryService:
@@ -473,7 +474,7 @@ class LocalWorkflowRecoveryScheduler:
             "fab_workflow_recovery_stale_seconds",
             "operations_workflow_recovery_stale_seconds",
             "workflow_recovery_stale_seconds",
-            default=21600.0,
+            default=DEFAULT_INTERRUPTED_RUN_GRACE_SECONDS,
         )
 
     def plan(

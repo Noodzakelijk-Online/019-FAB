@@ -10,6 +10,7 @@ from src.operations.local_connector_intake import (
 )
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_workflow_recovery import (
+    DEFAULT_INTERRUPTED_RUN_GRACE_SECONDS,
     WORKFLOW_RECOVERY_SCHEDULER_LEASE_NAME,
     LocalWorkflowRecoveryScheduler,
 )
@@ -31,6 +32,15 @@ class _Fetcher:
 
 
 class TestLocalWorkflowRecoveryScheduler(unittest.TestCase):
+    def test_default_interrupted_run_grace_is_fifteen_minutes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            scheduler = LocalWorkflowRecoveryScheduler(ledger)
+
+            self.assertEqual(DEFAULT_INTERRUPTED_RUN_GRACE_SECONDS, 900.0)
+            self.assertEqual(scheduler.stale_after_seconds, 900.0)
+
     def _connector_config(self, temp_dir):
         credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
         token_path = os.path.join(temp_dir, "gmail-token.pickle")

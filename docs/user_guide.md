@@ -100,7 +100,7 @@ Local operating ledger and optional web operations API settings.
 *   `worker_recovery_batch_limit`: Maximum due recoveries attempted per worker cycle. Default: `5`.
 *   `workflow_recovery_max_retries`: Maximum linked automatic retry depth. Default: `3`.
 *   `workflow_recovery_base_delay_seconds` / `workflow_recovery_max_delay_seconds`: Exponential retry backoff bounds. Defaults: `300` / `3600`.
-*   `workflow_recovery_stale_seconds`: Minimum age before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `21600`.
+*   `workflow_recovery_stale_seconds`: Grace period before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `900` (15 minutes). An active runtime lease always prevents finalization.
 *   `worker_run_legacy_workflow`: Compatibility switch for the old checkpoint pipeline. Default: `false`.
 *   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
 *   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
