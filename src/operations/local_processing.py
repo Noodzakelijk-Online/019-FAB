@@ -68,8 +68,7 @@ def trusted_category_suggestion_candidates(
         if len(candidates) >= bounded_limit:
             break
         if (
-            document.get("duplicate_of_document_id")
-            or str(document.get("processing_status") or "") in {"duplicate", "failed"}
+            str(document.get("processing_status") or "") in {"duplicate", "failed"}
             or is_non_posting_document_type(document.get("document_type"))
         ):
             continue
@@ -90,6 +89,11 @@ def trusted_category_suggestion_candidates(
             document_id=int(document["id"]),
             limit=100,
         )
+        if (
+            document.get("duplicate_of_document_id")
+            and not any(item.get("reason") == "duplicate_candidate" for item in open_reviews)
+        ):
+            continue
         category_reviews = [
             item
             for item in open_reviews
@@ -628,6 +632,41 @@ class LocalDocumentProcessor:
     def apply_trusted_category_suggestions(self, limit: int = 500) -> Dict[str, Any]:
         """Apply exact vendor taxonomy matches while preserving every other gate."""
         candidates = self.trusted_category_suggestion_candidates(limit=limit)
+        pre_mutation_backup = None
+        if candidates:
+            try:
+                backup_service = LocalBackupService(self.ledger, self.config)
+                backup = backup_service.create_backup(
+                    note=(
+                        "Automatic pre-mutation backup before applying "
+                        "trusted exact-vendor category suggestions"
+                    ),
+                )
+                inspection = backup_service.inspect_backup(str(backup["backupPath"]))
+                if not inspection.get("success") or inspection.get("status") != "valid":
+                    raise RuntimeError("The pre-mutation backup did not pass validation.")
+                manifest = inspection.get("manifest") or {}
+                pre_mutation_backup = {
+                    "backupFilename": backup.get("backupFilename"),
+                    "status": inspection.get("status"),
+                    "ledgerSha256": manifest.get("ledgerSha256"),
+                    "ledgerBytes": manifest.get("ledgerBytes"),
+                }
+            except Exception as exc:
+                self.ledger.record_audit_event({
+                    "action": "local_processing.trusted_category_batch_blocked",
+                    "entityType": "bookkeeping_document",
+                    "details": {
+                        "candidateCount": len(candidates),
+                        "reason": "pre_mutation_backup_failed",
+                        "errorType": type(exc).__name__,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                raise RuntimeError(
+                    "Trusted category automation was blocked because its "
+                    "pre-mutation backup could not be verified."
+                ) from exc
         summary = {
             "candidates": len(candidates),
             "updatedDocuments": 0,
@@ -635,6 +674,7 @@ class LocalDocumentProcessor:
             "stillNeedsReview": 0,
             "readyDocuments": 0,
             "documentIds": [],
+            "preMutationBackup": pre_mutation_backup,
             "externalSubmission": "not_executed",
         }
         for candidate in candidates:

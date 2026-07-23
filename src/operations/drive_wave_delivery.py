@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from src.document_fetchers.drive_archiver import DriveArchiveClient
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_wave_setup import LocalWaveSetupService
 
 
 EVIDENCE_ACTION = "drive_wave.attachment_verified"
@@ -73,15 +74,37 @@ class DriveWaveDeliveryService:
         )
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
         folders_distinct = bool(source_folder_id) and bool(archive_folder_id) and source_folder_id != archive_folder_id
-        configured = enabled and folders_distinct and bool(business_id)
+        archive_configured = enabled and folders_distinct and bool(business_id)
+        wave_setup = LocalWaveSetupService(self.config).status(
+            self.ledger,
+            "waveapps_business",
+        )
+        wave_activation = (
+            wave_setup.get("activation")
+            if isinstance(wave_setup.get("activation"), dict)
+            else {}
+        )
+        if not archive_configured:
+            status = "needs_configuration"
+        elif not token_present or reauthorization_required:
+            status = "needs_authorization"
+        elif wave_setup.get("ready") is not True:
+            status = "needs_wave_setup"
+        else:
+            status = "ready"
         gmail_scanner_ready = self._gmail_scanner_configured()
         return {
-            "status": "ready" if configured and token_present and not reauthorization_required else "needs_authorization" if configured else "needs_configuration",
+            "status": status,
             "archiveEnabled": enabled,
             "sourceFolderConfigured": bool(source_folder_id),
             "archiveFolderConfigured": bool(archive_folder_id),
             "foldersDistinct": folders_distinct,
-            "waveBusinessConfigured": bool(business_id),
+            "waveBusinessSelected": bool(business_id),
+            "waveBusinessConfigured": wave_setup.get("ready") is True,
+            "waveAccessTokenConfigured": wave_setup.get("accessTokenConfigured") is True,
+            "waveSetupStatus": wave_setup.get("status"),
+            "waveSetupCurrentStep": wave_activation.get("currentStep"),
+            "waveSetupNextAction": wave_activation.get("nextAction"),
             "driveTokenPresent": token_present,
             "driveReauthorizationRequired": reauthorization_required,
             "driveCredentialsPresent": credentials_present,
@@ -577,7 +600,12 @@ class DriveWaveDeliveryService:
     def plan_archive(self, document_id: int) -> Dict[str, Any]:
         document = self.ledger.get_document(int(document_id))
         if not document:
-            return {"status": "blocked", "canArchive": False, "reasons": ["document_not_found"]}
+            return {
+                "status": "blocked",
+                "canArchive": False,
+                "reasons": ["document_not_found"],
+                "externalSubmission": "not_executed",
+            }
         context = self._context_from_loaded_document(document)
         return self._plan_archive_for_document(
             context["document"],
@@ -609,6 +637,7 @@ class DriveWaveDeliveryService:
                 "reasons": [],
                 "archiveFolderId": lifecycle.get("archiveFolderId"),
                 "externalTransactionId": lifecycle.get("externalTransactionId"),
+                "externalSubmission": "already_executed",
             }
 
         reasons = self._document_reasons(document, record)
@@ -633,6 +662,7 @@ class DriveWaveDeliveryService:
             "verificationMethod": evidence.get("verificationMethod"),
             "moveOnly": True,
             "deleteSource": False,
+            "externalSubmission": "not_executed",
         }
 
     def archive_document(self, document_id: int, actor: str = "local_worker") -> Dict[str, Any]:
@@ -866,6 +896,7 @@ class DriveWaveDeliveryService:
             "verificationMethod": evidence.get("verificationMethod"),
             "moveOnly": False,
             "deleteSource": False,
+            "externalSubmission": "not_executed",
         }
 
     def _wave_evidence_plan(

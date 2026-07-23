@@ -241,6 +241,86 @@ class TestLocalAutonomousService(unittest.TestCase):
                 [],
             )
 
+    def test_trusted_category_keeps_duplicate_decision_open(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            original_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-original",
+                "originalFilename": "original.pdf",
+                "processingStatus": "processed",
+                "vendorName": "Praxis",
+                "category": "Construction Materials & Tools",
+            })
+            candidate_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "trusted-category-duplicate-candidate",
+                "originalFilename": "candidate.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "duplicateOfDocumentId": original_id,
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+                "transactionDate": "2026-06-28",
+                "totalAmount": 42.5,
+                "confidenceScore": 0.1,
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+                "duplicate_candidate",
+            ):
+                ledger.create_review_item({
+                    "documentId": candidate_id,
+                    "reason": reason,
+                    "details": "Review required.",
+                })
+
+            result = LocalAutonomousService(
+                ledger,
+                {},
+                intake_paths=[],
+            ).run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            processing = next(
+                action
+                for action in result["executedActions"]
+                if action["id"] == "process_imported"
+            )
+            trusted = processing["summary"]["trustedCategoryAutomation"]
+            backup = trusted.pop("preMutationBackup")
+            self.assertEqual(
+                trusted,
+                {
+                    "candidates": 1,
+                    "updatedDocuments": 1,
+                    "resolvedReviewItems": 2,
+                    "stillNeedsReview": 1,
+                    "readyDocuments": 0,
+                    "documentIds": [candidate_id],
+                    "externalSubmission": "not_executed",
+                },
+            )
+            self.assertEqual(backup["status"], "valid")
+            self.assertTrue(backup["backupFilename"].endswith(".zip"))
+            self.assertEqual(len(backup["ledgerSha256"]), 64)
+            self.assertGreater(backup["ledgerBytes"], 0)
+            document = ledger.get_document(candidate_id)
+            self.assertEqual(document["category"], "Construction Materials & Tools")
+            self.assertEqual(document["processing_status"], "needs_review")
+            open_reviews = ledger.list_review_items(
+                status=("pending", "in_review"),
+                document_id=candidate_id,
+            )
+            self.assertEqual(
+                [(item["reason"], item["status"]) for item in open_reviews],
+                [("duplicate_candidate", "pending")],
+            )
+
     def test_autonomy_repairs_legacy_duplicate_cycle_before_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

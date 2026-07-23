@@ -2,6 +2,7 @@ import hashlib
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_processing import (
@@ -1476,6 +1477,8 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(summary["stillNeedsReview"], 2)
             self.assertEqual(summary["readyDocuments"], 1)
             self.assertEqual(summary["externalSubmission"], "not_executed")
+            self.assertEqual(summary["preMutationBackup"]["status"], "valid")
+            self.assertEqual(len(summary["preMutationBackup"]["ledgerSha256"]), 64)
             duplicate_guarded = ledger.get_document(duplicate_guarded_id)
             self.assertEqual(
                 duplicate_guarded["category"],
@@ -1538,6 +1541,70 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertIn(
                 "local_processing.trusted_category_batch_completed",
                 audit_actions,
+            )
+
+    def test_trusted_category_automation_fails_closed_without_verified_backup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "backup-blocked-praxis",
+                "originalFilename": "praxis.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Praxis",
+                "category": "Manual Review",
+            })
+            for reason in (
+                "low_confidence_categorization",
+                "manual_review_category",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Category requires review.",
+                })
+
+            with patch(
+                "src.operations.local_processing.LocalBackupService.create_backup",
+                side_effect=OSError("simulated backup failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "pre-mutation backup could not be verified",
+                ):
+                    LocalDocumentProcessor(
+                        ledger,
+                    ).apply_trusted_category_suggestions()
+
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["category"], "Manual Review")
+            self.assertEqual(document["processing_status"], "needs_review")
+            self.assertEqual(
+                {
+                    item["reason"]
+                    for item in ledger.list_review_items(
+                        status=("pending", "in_review"),
+                        document_id=document_id,
+                    )
+                },
+                {
+                    "low_confidence_categorization",
+                    "manual_review_category",
+                },
+            )
+            blocked = next(
+                event
+                for event in ledger.list_audit_events(limit=10)
+                if event["action"] == "local_processing.trusted_category_batch_blocked"
+            )
+            self.assertEqual(
+                blocked["details"]["reason"],
+                "pre_mutation_backup_failed",
+            )
+            self.assertEqual(
+                blocked["details"]["externalSubmission"],
+                "not_executed",
             )
 
 

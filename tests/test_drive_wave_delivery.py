@@ -250,6 +250,74 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertFalse(plan["canArchive"])
         self.assertIn("drive_reauthorization_required", plan["reasons"])
 
+    def test_delivery_status_requires_complete_wave_setup(self):
+        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        with open(token_path, "wb") as handle:
+            handle.write(b"configured")
+        status = DriveWaveDeliveryService(
+            self.ledger,
+            {**self.config, "google_drive_token_file": token_path},
+        ).status()
+
+        self.assertEqual(status["status"], "needs_wave_setup")
+        self.assertTrue(status["waveBusinessSelected"])
+        self.assertFalse(status["waveBusinessConfigured"])
+        self.assertFalse(status["waveAccessTokenConfigured"])
+        self.assertEqual(status["waveSetupStatus"], "needs_token")
+        self.assertEqual(status["waveSetupCurrentStep"], "connection")
+        self.assertIn("Wave access token", status["waveSetupNextAction"])
+
+    def test_delivery_status_is_ready_after_live_wave_mapping_validation(self):
+        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        with open(token_path, "wb") as handle:
+            handle.write(b"configured")
+        self.ledger.record_wave_operation_snapshot({
+            "operationId": "wave-account-discovery:delivery-test",
+            "workflowId": "wave_account_discovery",
+            "surface": "chart_of_accounts",
+            "actionId": "chart_account_list_read",
+            "mode": "read_only",
+            "safety": "read_only",
+            "status": "read_result_captured",
+            "externalSubmission": "not_executed",
+            "metadata": {
+                "accountDiscovery": {
+                    "targetSystem": "waveapps_business",
+                    "business": {"id": BUSINESS_ID, "name": "FAB Test Business"},
+                    "accounts": [
+                        {
+                            "id": "anchor-1",
+                            "name": "Current Account",
+                            "subtype": {"name": "Cash and Bank", "value": "CASH_AND_BANK"},
+                        },
+                        {
+                            "id": "expense-1",
+                            "name": "Office Expenses",
+                            "subtype": {"name": "Expense", "value": "EXPENSE"},
+                        },
+                    ],
+                },
+            },
+        })
+        status = DriveWaveDeliveryService(
+            self.ledger,
+            {
+                **self.config,
+                "google_drive_token_file": token_path,
+                "waveapps_business_access_token": "private-wave-token",
+                "waveapps_business_anchor_account_id": "anchor-1",
+                "waveapps_business_category_account_ids": {
+                    "Office Supplies": "expense-1",
+                },
+            },
+        ).status()
+
+        self.assertEqual(status["status"], "ready")
+        self.assertTrue(status["waveBusinessConfigured"])
+        self.assertTrue(status["waveAccessTokenConfigured"])
+        self.assertEqual(status["waveSetupStatus"], "ready")
+        self.assertNotIn("private-wave-token", json.dumps(status))
+
     def test_transaction_presence_without_attachment_proof_never_archives(self):
         archiver = FakeDriveArchiver(self.source_hash, self.source_size)
         service = DriveWaveDeliveryService(self.ledger, self.config, drive_archiver=archiver)
