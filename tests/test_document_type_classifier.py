@@ -58,7 +58,7 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertFalse(result["postingEligible"])
         self.assertTrue(result["reviewRequired"])
         self.assertTrue(is_non_posting_document_type(result["documentType"]))
-        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v2")
+        self.assertEqual(result["classifier"], "deterministic_financial_document_type_v3")
 
     def test_government_benefits_letter_is_non_posting_supporting_evidence(self):
         result = self.classifier.classify(
@@ -69,6 +69,42 @@ class TestDocumentTypeClassifier(unittest.TestCase):
         self.assertEqual(result["documentType"], "government_correspondence")
         self.assertFalse(result["postingEligible"])
         self.assertTrue(result["reviewRequired"])
+
+    def test_specific_dutch_government_evidence_is_non_posting(self):
+        examples = (
+            "uwv Betaalspecificatie\nWajong Uitkering 01-06-2023 t/m 30-06-2023",
+            "Melding aan IND: Vragenlijst",
+            "Verwerking opgaaf/wijziging rekeningnummer voor uitbetalingen toeslagen",
+            "Alle raadsvergaderingen zijn openbaar. Volg de Arnhemse gemeenteraad.",
+            "Uw bezwaarschrift tegen het besluit inzake toekenning bijstand is ontvangen.",
+            "Belastingdienst Aanslag inkomstenbelasting\nTe betalen EUR 0,00",
+        )
+
+        for text in examples:
+            with self.subTest(text=text):
+                result = self.classifier.classify(text, {})
+                self.assertEqual(result["documentType"], "government_correspondence")
+                self.assertFalse(result["postingEligible"])
+                self.assertTrue(result["reviewRequired"])
+
+    def test_payable_tax_assessment_is_not_silently_made_non_posting(self):
+        result = self.classifier.classify(
+            "Belastingdienst Aanslag inkomstenbelasting\nTe betalen EUR 125,00",
+            {},
+        )
+
+        self.assertEqual(result["documentType"], "unknown")
+        self.assertFalse(result["postingEligible"])
+        self.assertFalse(result["reviewRequired"])
+
+    def test_municipal_invoice_remains_a_vendor_invoice(self):
+        result = self.classifier.classify(
+            "Gemeente Arnhem\nFactuur afvalstoffen\nTe betalen EUR 125,00",
+            {"invoice_number": "GEM-42"},
+        )
+
+        self.assertEqual(result["documentType"], "vendor_invoice")
+        self.assertTrue(result["postingEligible"])
 
     def test_invoice_with_policy_number_remains_an_invoice(self):
         result = self.classifier.classify(

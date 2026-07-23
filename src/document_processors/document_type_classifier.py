@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 class DocumentTypeClassifier:
     """Conservatively infer the bookkeeping role of an OCR document."""
 
-    CLASSIFIER_VERSION = "deterministic_financial_document_type_v2"
+    CLASSIFIER_VERSION = "deterministic_financial_document_type_v3"
 
     _PATTERNS: Tuple[Tuple[str, float, Tuple[str, ...]], ...] = (
         (
@@ -16,6 +16,14 @@ class DocumentTypeClassifier:
                 r"\bbijstandsnorm\b",
                 r"\buitkeringsspecificatie\b",
                 r"\btoeslagbeschikking\b",
+                r"\buwv\s+betaalspecificatie\b",
+                r"\bwajong\s+(?:uitkering|vakantietoeslag)\b",
+                r"\bmelding\s+aan\s+ind\b",
+                r"\bverwerking\s+opgaaf\s*/?\s*wijziging\s+rekeningnummer\b",
+                r"\b(?:arnhemse\s+)?gemeenteraad\b",
+                r"\braadsvergaderingen?\b",
+                r"\bbezwaarschrift\b.{0,800}\b(?:bijstand|participatiewet)\b",
+                r"\bbelastingdienst\b.{0,800}\bte\s+betalen\s*(?:€|eur)?\s*0(?:[,.]00)?\b",
             ),
         ),
         (

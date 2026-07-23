@@ -248,6 +248,62 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["bookkeeping_record"]["record_type"], "supporting_document")
             self.assertEqual(document["bookkeeping_record"]["export_status"], "not_applicable")
 
+    def test_government_evidence_backfill_clears_transaction_review_reasons(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "historic-uwv-statement-1",
+                "originalFilename": "historic-uwv.pdf",
+                "mimeType": "application/pdf",
+                "documentType": "pdf",
+                "processingStatus": "needs_review",
+                "category": "Manual Review",
+                "confidenceScore": 0.1,
+                "totalAmount": 821.98,
+                "ocrText": (
+                    "uwv Betaalspecificatie\nWajong Uitkering\n"
+                    "Netto te ontvangen EUR 821,98"
+                ),
+                "extractedData": {
+                    "vendor_name": "uwv Betaalspecificatie",
+                    "total_amount": 821.98,
+                },
+            })
+            for reason in (
+                "validation_failed",
+                "low_confidence_categorization",
+                "manual_review_category",
+                "sensitive_government_document",
+            ):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Historic processing gate",
+                })
+
+            result = LocalDocumentProcessor(ledger).backfill_document_types()
+
+            self.assertEqual(result["classified"], 1)
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["document_type"], "government_correspondence")
+            self.assertEqual(document["category"], "Supporting Evidence")
+            self.assertEqual(document["bookkeeping_record"]["record_type"], "supporting_document")
+            self.assertEqual(document["bookkeeping_record"]["export_status"], "not_applicable")
+            self.assertIsNone(document["bookkeeping_record"]["amount"])
+            self.assertEqual(document["bookkeeping_record"]["metadata"]["evidenceAmount"], 821.98)
+            open_reasons = {
+                item["reason"]
+                for item in ledger.list_review_items(
+                    status=("pending", "in_review"),
+                    document_id=document_id,
+                )
+            }
+            self.assertEqual(
+                open_reasons,
+                {"non_posting_document_type", "sensitive_government_document"},
+            )
+
     def test_process_text_document_queues_review_for_validation_and_sensitive_terms(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             letter_path = os.path.join(temp_dir, "belastingdienst.txt")
