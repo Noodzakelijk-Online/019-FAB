@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 BOOKKEEPING_RECORD_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored", "needs_review"}
@@ -584,16 +585,7 @@ def _export_status_for_document(
 
 
 def _target_system(document: Dict[str, Any], extracted: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    target = str(_first_present(
-        metadata.get("targetSystem"),
-        metadata.get("target_system"),
-        extracted.get("target_system"),
-        "waveapps",
-    ) or "waveapps").strip()
-    if target.lower() in {"", "none", "unknown"}:
-        return "waveapps"
-    return target
+    return resolve_document_target_system(document, extracted, default="waveapps")
 
 
 def _record_type(document: Dict[str, Any], extracted: Dict[str, Any], amount: Optional[float]) -> str:

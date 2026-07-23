@@ -18,6 +18,7 @@ from src.operations.local_master_ledger import LocalMasterLedgerService
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
 from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_targets import resolve_document_target_system
 from src.operations.local_routing import (
     PREPARED_ROUTING_STATUSES,
     ROUTABLE_BOOKKEEPING_EXPORT_STATUSES,
@@ -1658,18 +1659,7 @@ def _merge_breakdowns(*breakdowns: Dict[str, int]) -> Dict[str, int]:
 
 
 def _document_target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
-    return _first_present(
-        routing.get("targetSystem"),
-        routing.get("target_system"),
-        metadata.get("targetSystem"),
-        metadata.get("target_system"),
-        extracted.get("target_system"),
-        extracted.get("targetSystem"),
-        "waveapps",
-    )
+    return resolve_document_target_system(document, default="waveapps")
 
 
 def _record_target_system(record: Dict[str, Any]) -> str:

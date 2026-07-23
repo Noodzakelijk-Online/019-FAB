@@ -11,6 +11,7 @@ from src.document_fetchers.gmail_fetcher import GmailFetcher
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 CONNECTOR_SOURCES = ("gmail", "google_drive", "freshdesk", "google_photos")
@@ -429,6 +430,12 @@ class LocalConnectorIntakeService:
                     int(document_id)
                 )
 
+        counters["targetBackfills"] += self._backfill_source_target(
+            source,
+            source_account_id,
+            plan.get("targetSystem"),
+        )
+
         diagnostics = getattr(fetcher, "last_run", {})
         fetch_error = getattr(fetcher, "last_error", None) or getattr(fetcher, "auth_error", None)
         errors = [item for item in [_safe_error(fetch_error, self.config)] if item]
@@ -613,6 +620,53 @@ class LocalConnectorIntakeService:
             "targetSystem": target_system if target_system_valid else None,
         }
 
+    def _backfill_source_target(
+        self,
+        source: str,
+        source_account_id: int,
+        target_system: Any,
+    ) -> int:
+        target = str(target_system or "").strip()
+        if not target:
+            return 0
+        backfilled = 0
+        after_id = 0
+        while True:
+            documents = self.ledger.list_documents_for_source_account(
+                source_account_id,
+                after_id=after_id,
+                limit=500,
+            )
+            if not documents:
+                break
+            for document in documents:
+                document_id = int(document["id"])
+                after_id = max(after_id, document_id)
+                if _document_target_system(document):
+                    continue
+                metadata = dict(document.get("metadata") or {})
+                metadata["targetSystem"] = target
+                self.ledger.update_document(document_id, {"metadata": metadata})
+                if self.ledger.get_bookkeeping_record_by_document(document_id):
+                    LocalBookkeepingRecordService(self.ledger, self.config).upsert_from_document(
+                        document_id
+                    )
+                self.ledger.record_audit_event({
+                    "action": "local_connector_intake.target_system_backfilled",
+                    "entityType": "bookkeeping_document",
+                    "entityId": str(document_id),
+                    "details": {
+                        "source": source,
+                        "sourceAccountId": source_account_id,
+                        "targetSystem": target,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                backfilled += 1
+            if len(documents) < 500:
+                break
+        return backfilled
+
     def _configured(self, source: str) -> bool:
         if source == "gmail":
             return _existing_config_path(self.config, "gmail_credentials_file", "gmail_credentials_path") and _existing_config_path(
@@ -715,18 +769,16 @@ def _configured_target_system(config: Dict[str, Any], source: str) -> str:
 def _with_default_target_system(document: Dict[str, Any], target_system: Any) -> Dict[str, Any]:
     result = dict(document)
     metadata = dict(result.get("metadata") or {}) if isinstance(result.get("metadata"), dict) else {}
-    existing = str(
-        result.get("targetSystem")
-        or result.get("target_system")
-        or metadata.get("targetSystem")
-        or metadata.get("target_system")
-        or ""
-    ).strip()
+    existing = resolve_document_target_system(result)
     if not existing and str(target_system or "").strip():
         metadata["targetSystem"] = str(target_system).strip()
         result["targetSystem"] = str(target_system).strip()
     result["metadata"] = metadata
     return result
+
+
+def _document_target_system(document: Dict[str, Any]) -> str:
+    return resolve_document_target_system(document)
 
 
 def _list_config_value(value: Any) -> list:

@@ -13,6 +13,7 @@ from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 from src.validation.validation_manager import ValidationManager
 
 
@@ -1116,13 +1117,7 @@ def _extracted_field_records(
 
 
 def _target_system(document: Dict[str, Any], extracted_data: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    return str(
-        metadata.get("targetSystem")
-        or metadata.get("target_system")
-        or extracted_data.get("target_system")
-        or "none"
-    )
+    return resolve_document_target_system(document, extracted_data, default="none")
 
 
 def _field_confidence(field_name: str, value: Any, category_confidence: float) -> float:

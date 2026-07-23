@@ -103,10 +103,19 @@ class TestLocalConnectorIntake(unittest.TestCase):
                 "id": "gmail-business-1",
                 "original_filename": "business.pdf",
                 "local_path": first_path,
+            }, {
+                "id": "gmail-routed-personal-1",
+                "original_filename": "personal.pdf",
+                "local_path": second_path,
+                "metadata": {"routing": {"targetSystem": "waveapps_personal"}},
             }]
             ledger, service = self._service(temp_dir, documents)
 
             service.sync(["gmail"], actor="test")
+            personal_metadata = dict(ledger.get_document(2)["metadata"])
+            personal_metadata.pop("targetSystem", None)
+            personal_metadata["routing"] = {"targetSystem": "waveapps_personal"}
+            ledger.update_document(2, {"metadata": personal_metadata})
             ledger.update_document(1, {
                 "processingStatus": "reviewed",
                 "vendorName": "Example Vendor",
@@ -120,11 +129,17 @@ class TestLocalConnectorIntake(unittest.TestCase):
                 ledger.get_bookkeeping_record_by_document(1)["target_system"],
                 "waveapps",
             )
+            LocalBookkeepingRecordService(ledger).upsert_from_document(2)
+            self.assertEqual(
+                ledger.get_bookkeeping_record_by_document(2)["target_system"],
+                "waveapps_personal",
+            )
 
             service.config["gmail_target_system"] = "waveapps_business"
+            documents.clear()
             second = service.sync(["gmail"], actor="test")
 
-            self.assertEqual(second["summary"]["alreadyRegistered"], 1)
+            self.assertEqual(second["summary"]["alreadyRegistered"], 0)
             self.assertEqual(second["summary"]["targetBackfills"], 1)
             self.assertEqual(
                 ledger.get_document(1)["metadata"]["targetSystem"],
@@ -134,10 +149,20 @@ class TestLocalConnectorIntake(unittest.TestCase):
                 ledger.get_bookkeeping_record_by_document(1)["target_system"],
                 "waveapps_business",
             )
+            routed_personal = ledger.get_document(2)
+            self.assertNotIn("targetSystem", routed_personal["metadata"])
+            self.assertEqual(
+                routed_personal["metadata"]["routing"]["targetSystem"],
+                "waveapps_personal",
+            )
+            self.assertEqual(
+                ledger.get_bookkeeping_record_by_document(2)["target_system"],
+                "waveapps_personal",
+            )
             source = ledger.list_source_accounts(source_type="gmail")[0]
             self.assertEqual(source["metadata"]["targetSystem"], "waveapps_business")
             self.assertIn(
-                "local_intake.target_system_backfilled",
+                "local_connector_intake.target_system_backfilled",
                 [event["action"] for event in ledger.list_audit_events(limit=20)],
             )
 

@@ -4407,6 +4407,26 @@ class LocalOperationsLedger:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_documents_for_source_account(
+        self,
+        source_account_id: int,
+        *,
+        after_id: int = 0,
+        limit: int = 500,
+    ) -> list:
+        bounded_limit = self._bounded_limit(limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM bookkeeping_documents
+                WHERE source_account_id = ? AND id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (int(source_account_id), max(0, int(after_id)), bounded_limit),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def find_audit_event(
         self,
         action: str,

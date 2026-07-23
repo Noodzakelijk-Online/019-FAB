@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Set
 
 from src.document_handling.source_identity import source_document_id
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 DEFAULT_ALLOWED_EXTENSIONS = {
@@ -185,7 +186,7 @@ class LocalFolderIntake:
 
         source_document = dict(source_document or {})
         source_metadata = source_document.get("metadata") if isinstance(source_document.get("metadata"), dict) else {}
-        target_system = _source_document_target_system(source_document, source_metadata)
+        target_system = _source_document_target_system(source_document)
         mime_type = (
             source_document.get("mime_type")
             or source_metadata.get("mime_type")
@@ -450,28 +451,12 @@ def _document_content_hash(document: Dict[str, Any]) -> str:
     return ""
 
 
-def _source_document_target_system(
-    source_document: Dict[str, Any],
-    source_metadata: Dict[str, Any],
-) -> str:
-    return str(
-        source_document.get("targetSystem")
-        or source_document.get("target_system")
-        or source_metadata.get("targetSystem")
-        or source_metadata.get("target_system")
-        or ""
-    ).strip()
+def _source_document_target_system(source_document: Dict[str, Any]) -> str:
+    return resolve_document_target_system(source_document)
 
 
 def _stored_document_target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
-    extracted = document.get("extracted_data") if isinstance(document.get("extracted_data"), dict) else {}
-    return str(
-        metadata.get("targetSystem")
-        or metadata.get("target_system")
-        or extracted.get("target_system")
-        or ""
-    ).strip()
+    return resolve_document_target_system(document)
 
 
 def _document_type(path: str, mime_type: str) -> str:

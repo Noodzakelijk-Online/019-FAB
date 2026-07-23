@@ -5,6 +5,7 @@ from src.document_processors.document_type_classifier import is_non_posting_docu
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_reconciliation import LocalReconciliationService
+from src.operations.local_targets import resolve_document_target_system
 
 
 APPLIED_REVIEW_STATUSES = {"approved", "resolved"}
@@ -572,8 +573,7 @@ def _has_valid_required_fields(document: Dict[str, Any]) -> bool:
 
 
 def _target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    return str(metadata.get("targetSystem") or metadata.get("target_system") or "none")
+    return resolve_document_target_system(document, default="none")
 
 
 def _normalized_vendor_key(value: Any) -> str:

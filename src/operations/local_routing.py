@@ -15,6 +15,7 @@ from src.data_entry.waveapps_surface import (
 )
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_targets import resolve_document_target_system
 
 
 ROUTABLE_DOCUMENT_STATUSES = ("processed", "reviewed", "validated", "ready_to_route")
@@ -1413,14 +1414,7 @@ def _bookkeeping_record_snapshot(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _target_system(document: Dict[str, Any]) -> str:
-    metadata = document.get("metadata") or {}
-    routing = metadata.get("routing") if isinstance(metadata.get("routing"), dict) else {}
-    return str(
-        routing.get("targetSystem")
-        or metadata.get("targetSystem")
-        or metadata.get("target_system")
-        or "waveapps"
-    )
+    return resolve_document_target_system(document, default="waveapps")
 
 
 def _normalize_target_system(value: Any) -> str:
