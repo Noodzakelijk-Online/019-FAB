@@ -32,6 +32,14 @@ type CommandPayload = {
   targetSystem?: string;
 };
 
+type CompletedCommand = {
+  id: FabCommandId;
+  status: string;
+  startedAt: string | null;
+  finishedAt: string;
+  summary: string[];
+};
+
 export default function AdminOperations() {
   const { copy } = useFabLocale();
   const { user, loading: authLoading } = useAuth();
@@ -43,7 +51,7 @@ export default function AdminOperations() {
   const [waveSetupOpen, setWaveSetupOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
   const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
-  const [lastCommand, setLastCommand] = useState<{ id: FabCommandId; status: string; startedAt: string | null; finishedAt: string } | null>(null);
+  const [lastCommand, setLastCommand] = useState<CompletedCommand | null>(null);
   const [uploading, setUploading] = useState(false);
   const isAdmin = user?.role === "admin";
   const operatorAccess = trpc.fab.access.useQuery(undefined, {
@@ -59,8 +67,17 @@ export default function AdminOperations() {
   });
   const runCommand = trpc.fab.runCommand.useMutation({
     onSuccess: async (result) => {
-      const status = text(result.status, text(result.result && typeof result.result === "object" ? (result.result as FabRecord).status : "", "completed"));
-      if (pendingCommand) setLastCommand({ id: pendingCommand, status, startedAt: commandStartedAt, finishedAt: new Date().toISOString() });
+      const commandResult = asRecord(result.result);
+      const status = text(result.status, text(commandResult.status, "completed"));
+      if (pendingCommand) {
+        setLastCommand({
+          id: pendingCommand,
+          status,
+          startedAt: commandStartedAt,
+          finishedAt: new Date().toISOString(),
+          summary: summarizeCommandResult(commandResult),
+        });
+      }
       toast.success(`${pendingCommand ? humanize(pendingCommand) : "Command"}: ${humanize(status)}`);
       setPendingCommand(null);
       setCommandStartedAt(null);
@@ -68,7 +85,15 @@ export default function AdminOperations() {
     },
     onError: (error) => {
       toast.error(error.message || copy("FAB command failed", "FAB-opdracht mislukt"));
-      if (pendingCommand) setLastCommand({ id: pendingCommand, status: "failed", startedAt: commandStartedAt, finishedAt: new Date().toISOString() });
+      if (pendingCommand) {
+        setLastCommand({
+          id: pendingCommand,
+          status: "failed",
+          startedAt: commandStartedAt,
+          finishedAt: new Date().toISOString(),
+          summary: [],
+        });
+      }
       setPendingCommand(null);
       setCommandStartedAt(null);
     },
@@ -105,9 +130,9 @@ export default function AdminOperations() {
     runCommand.mutate({ commandId, payload: payload as CommandPayload });
   }, [controlCenter.data?.connection.connected, pendingCommand, runCommand]);
 
-  const uploadDocument = useCallback(async (file: File) => {
+  const uploadDocument = useCallback(async (file: File): Promise<FabRecord> => {
     if (!controlCenter.data?.connection.connected) throw new Error(copy("FAB local API is disconnected.", "De lokale FAB-API is niet verbonden."));
-    await uploadIntake.mutateAsync({
+    return uploadIntake.mutateAsync({
       filename: file.name,
       mimeType: file.type || "application/octet-stream",
       contentBase64: await readFileBase64(file),
@@ -215,6 +240,7 @@ export default function AdminOperations() {
       onRefresh={() => { void controlCenter.refetch(); }}
       refreshing={controlCenter.isFetching}
       onOpenCommands={() => setCommandDrawerOpen(true)}
+      reviewCount={data?.metrics.pendingReviewDocuments}
     >
       {!authLoading && !operatorAccess.isLoading && !hasOperatorAccess ? (
         <div className="fab-access-state">
@@ -239,16 +265,6 @@ export default function AdminOperations() {
               <div>{data?.partialErrors.map((item) => <p key={item.resource}><strong>{humanize(item.resource)} - {humanize(item.state)}</strong><span>{item.error}{item.updatedAt ? ` Last valid response: ${item.updatedAt}.` : ""}</span></p>)}</div>
             </details>
           )}
-          {connected && <FabActivationChecklist
-            waveSetup={data?.waveSetup || {}}
-            gmailAuthorization={data?.gmailAuthorization || {}}
-            driveAuthorization={data?.driveAuthorization || {}}
-            reviewSummary={data?.reviews.summary || {}}
-            onOpenWave={() => setWaveSetupOpen(true)}
-            onOpenGmail={() => setGmailSetupOpen(true)}
-            onOpenDrive={() => setDriveSetupOpen(true)}
-            onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-          />}
           <FabControlOverview
             connected={connected}
             metrics={data?.metrics || { documents: null, pendingReview: null, pendingReviewDocuments: null, unreconciled: null, unreconciledDocuments: null, unreconciledBankTransactions: null, exceptions: null, failedDocuments: null }}
@@ -259,6 +275,23 @@ export default function AdminOperations() {
             healthResource={data?.resourceStates.health}
             exceptionResource={data?.resourceStates.exceptions}
             closeResource={data?.resourceStates.closeReadiness}
+            decisionContext={data?.decisionContext || {
+              lastSafeCycleAt: null,
+              latestWorkflowStatus: null,
+              dataThroughDate: null,
+              sourceCount: null,
+              readySourceCount: null,
+              latestSourceSyncAt: null,
+              unreconciledAmountByCurrency: null,
+              oldestReviewAgeHours: null,
+              highPriorityExceptions: null,
+              ledgerReadyForApproval: null,
+            }}
+            workflowResource={data?.resourceStates.workflows}
+            sourceResource={data?.resourceStates.sources}
+            ledgerResource={data?.resourceStates.masterLedger}
+            bankResource={data?.resourceStates.bankTransactions}
+            reviewResource={data?.resourceStates.reviewQueue}
             checkedAt={data?.connection.checkedAt}
             latencyMs={data?.connection.latencyMs}
             commandPending={Boolean(pendingCommand) || uploading}
@@ -269,16 +302,6 @@ export default function AdminOperations() {
             onOpenIntake={() => setIntakeDrawerOpen(true)}
             onOpenCommands={() => setCommandDrawerOpen(true)}
           />
-          <FabReviewWorkspace
-            workItems={data?.reviews.workItems || []}
-            categoryOptions={data?.reviews.categoryOptions || []}
-            summary={data?.reviews.summary || {}}
-            resource={data?.resourceStates.reviewQueue}
-            search={search}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
-            resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
-            onResolve={resolveReviewItem}
-          />
           <div className="fab-priority-grid">
             <FabExceptionsPanel
               exceptions={data?.exceptions || []}
@@ -288,6 +311,7 @@ export default function AdminOperations() {
               closeResource={data?.resourceStates.closeReadiness}
               search={search}
               localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+              onOpenReview={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
             />
             <FabAutomationPanel
               autonomy={data?.autonomy || {}}
@@ -299,6 +323,26 @@ export default function AdminOperations() {
               onCommand={executeCommand}
             />
           </div>
+          {connected && <FabActivationChecklist
+            waveSetup={data?.waveSetup || {}}
+            gmailAuthorization={data?.gmailAuthorization || {}}
+            driveAuthorization={data?.driveAuthorization || {}}
+            reviewSummary={data?.reviews.summary || {}}
+            onOpenWave={() => setWaveSetupOpen(true)}
+            onOpenGmail={() => setGmailSetupOpen(true)}
+            onOpenDrive={() => setDriveSetupOpen(true)}
+            onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          />}
+          <FabReviewWorkspace
+            workItems={data?.reviews.workItems || []}
+            categoryOptions={data?.reviews.categoryOptions || []}
+            summary={data?.reviews.summary || {}}
+            resource={data?.resourceStates.reviewQueue}
+            search={search}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
+            onResolve={resolveReviewItem}
+          />
           <FabOperationsPanels
             recovery={data?.recovery || {}}
             activity={data?.activity || []}
@@ -404,6 +448,33 @@ function readFileBase64(file: File): Promise<string> {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function summarizeCommandResult(result: FabRecord): string[] {
+  const summaries: string[] = [];
+  const fields: Array<[string, string]> = [
+    ["documentsProcessed", "documents processed"],
+    ["documents_processed", "documents processed"],
+    ["documentsNeedingReview", "documents needing review"],
+    ["documents_needing_review", "documents needing review"],
+    ["executed", "steps executed"],
+    ["skipped", "steps skipped"],
+    ["failed", "steps failed"],
+    ["reconciled", "matches reconciled"],
+    ["created", "records created"],
+  ];
+  const seen = new Set<string>();
+  for (const [field, label] of fields) {
+    const value = result[field];
+    if ((typeof value !== "number" && typeof value !== "string") || seen.has(label)) continue;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) continue;
+    summaries.push(`${parsed} ${label}`);
+    seen.add(label);
+  }
+  const workflowId = text(result.workflowRunId || result.workflow_run_id || result.workflowId, "");
+  if (workflowId) summaries.unshift(`Workflow #${workflowId}`);
+  return summaries.slice(0, 4);
 }
 
 function FabLoadingState() {

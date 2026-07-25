@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, CheckCircle2, FileUp, Loader2, RotateCcw, Trash2, UploadCloud, X } from "lucide-react";
 import { useFabLocale } from "./fabLocale";
+import { asRecord, text, type FabRecord } from "./fabView";
 
 const MAX_UPLOAD_BYTES = 6 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = ["pdf", "jpg", "jpeg", "png", "heic", "tif", "tiff", "txt", "csv"];
@@ -11,13 +12,14 @@ type IntakeItem = {
   file: File;
   status: "queued" | "uploading" | "complete" | "error";
   error?: string;
+  result?: FabRecord;
 };
 
 type FabIntakeDrawerProps = {
   open: boolean;
   connected: boolean;
   onClose: () => void;
-  onUploadFile: (file: File) => Promise<void>;
+  onUploadFile: (file: File) => Promise<FabRecord>;
   onFinished: (uploadedCount: number) => Promise<void> | void;
   onBusyChange: (busy: boolean) => void;
 };
@@ -82,9 +84,9 @@ export function FabIntakeDrawer({ open, connected, onClose, onUploadFile, onFini
       if (!isUploadable(item.file)) continue;
       setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "uploading", error: undefined } : entry));
       try {
-        await onUploadFile(item.file);
+        const result = await onUploadFile(item.file);
         uploadedCount += 1;
-        setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "complete", error: undefined } : entry));
+        setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "complete", error: undefined, result } : entry));
       } catch (error) {
         setItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: "error", error: error instanceof Error ? error.message : copy("Upload failed.", "Upload mislukt.") } : entry));
       }
@@ -123,7 +125,11 @@ export function FabIntakeDrawer({ open, connected, onClose, onUploadFile, onFini
             {items.map((item) => (
               <div className={`fab-intake-row tone-${item.status === "error" ? "bad" : item.status === "complete" ? "good" : item.status === "uploading" ? "info" : "neutral"}`} key={item.id}>
                 {item.status === "uploading" ? <Loader2 className="is-spinning" aria-hidden="true" /> : item.status === "complete" ? <CheckCircle2 aria-hidden="true" /> : item.status === "error" ? <AlertCircle aria-hidden="true" /> : <FileUp aria-hidden="true" />}
-                <div><strong>{item.file.name}</strong><span>{formatBytes(item.file.size)}{item.error ? ` - ${item.error}` : ` - ${item.status}`}</span></div>
+                <div>
+                  <strong>{item.file.name}</strong>
+                  <span>{formatBytes(item.file.size)}{item.error ? ` - ${item.error}` : ` - ${intakeStatus(item, copy)}`}</span>
+                  {item.result && <small>{intakeResult(item.result, copy)}</small>}
+                </div>
                 <button className="fab-icon-button" onClick={() => setItems((current) => current.filter((entry) => entry.id !== item.id))} disabled={busy} aria-label={`${copy("Remove", "Verwijder")} ${item.file.name}`} title={`${copy("Remove", "Verwijder")} ${item.file.name}`}><Trash2 aria-hidden="true" /></button>
               </div>
             ))}
@@ -150,4 +156,24 @@ function formatBytes(value: number): string {
 function isUploadable(file: File): boolean {
   const extension = file.name.split(".").pop()?.toLowerCase() || "";
   return file.size <= MAX_UPLOAD_BYTES && ACCEPTED_EXTENSIONS.includes(extension);
+}
+
+function intakeStatus(item: IntakeItem, copy: (english: string, dutch: string) => string): string {
+  if (item.status === "complete") return copy("registered", "geregistreerd");
+  if (item.status === "uploading") return copy("uploading", "uploaden");
+  if (item.status === "error") return copy("retry required", "opnieuw proberen vereist");
+  return copy("ready", "gereed");
+}
+
+function intakeResult(result: FabRecord, copy: (english: string, dutch: string) => string): string {
+  const document = asRecord(result.document);
+  const documentId = text(document.id || document.documentId, "");
+  const registered = text(result.filename, "");
+  const submission = text(result.externalSubmission, "not_executed");
+  const details = [
+    documentId ? `${copy("Document", "Document")} #${documentId}` : "",
+    registered ? `${copy("stored as", "opgeslagen als")} ${registered}` : "",
+    submission === "not_executed" ? copy("no external submission", "geen externe indiening") : submission,
+  ].filter(Boolean);
+  return details.join(" · ");
 }

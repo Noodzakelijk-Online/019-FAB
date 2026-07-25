@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
-  Bot,
   ChevronLeft,
   DatabaseBackup,
   FileWarning,
@@ -9,6 +8,8 @@ import {
   History,
   LayoutDashboard,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
   PlugZap,
   SendToBack,
   RefreshCw,
@@ -21,8 +22,9 @@ import { useFabLocale } from "./fabLocale";
 
 const navigation = [
   { id: "control-room", label: "Overview", labelNl: "Overzicht", icon: LayoutDashboard },
+  { id: "exceptions", label: "Exceptions", labelNl: "Uitzonderingen", icon: FileWarning },
   { id: "review-workspace", label: "Review queue", labelNl: "Controlewachtrij", icon: FileCheck2 },
-  { id: "automation", label: "Automation", labelNl: "Automatisering", icon: FileWarning },
+  { id: "automation", label: "Automation", labelNl: "Automatisering", icon: Activity },
   { id: "audit", label: "Activity", labelNl: "Activiteit", icon: History },
   { id: "recovery", label: "Recovery", labelNl: "Herstel", icon: RotateCcw },
   { id: "backups", label: "Backups", labelNl: "Back-ups", icon: DatabaseBackup },
@@ -41,6 +43,7 @@ type FabOperatorShellProps = {
   onRefresh: () => void;
   refreshing: boolean;
   onOpenCommands: () => void;
+  reviewCount?: number | null;
 };
 
 export function FabOperatorShell({
@@ -54,12 +57,15 @@ export function FabOperatorShell({
   onRefresh,
   refreshing,
   onOpenCommands,
+  reviewCount,
 }: FabOperatorShellProps) {
   const { lang, setLang, copy } = useFabLocale();
   const [navOpen, setNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activeSection, setActiveSection] = useState("control-room");
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const manualNavigationRef = useRef<{ id: string; until: number } | null>(null);
 
   useEffect(() => {
     if (!navOpen) return;
@@ -88,6 +94,7 @@ export function FabOperatorShell({
     const sections = navigation.map(({ id }) => document.getElementById(id)).filter((element): element is HTMLElement => Boolean(element));
     if (!sections.length || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver((entries) => {
+      if (manualNavigationRef.current && Date.now() < manualNavigationRef.current.until) return;
       const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
       if (visible?.target.id) setActiveSection(visible.target.id);
     }, { rootMargin: "-15% 0px -70%", threshold: [0, 0.2, 0.6] });
@@ -96,17 +103,21 @@ export function FabOperatorShell({
   }, [children]);
 
   function navigate(sectionId: string) {
+    manualNavigationRef.current = { id: sectionId, until: Date.now() + 1_200 };
     setActiveSection(sectionId);
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
     setNavOpen(false);
   }
 
   return (
-    <div className="fab-operator">
+    <div className={`fab-operator ${sidebarCollapsed ? "is-sidebar-collapsed" : ""}`}>
       <aside id="fab-sidebar" className={`fab-sidebar ${navOpen ? "is-open" : ""}`} aria-label={copy("FAB navigation", "FAB-navigatie")} role={navOpen ? "dialog" : undefined} aria-modal={navOpen || undefined}>
         <div className="fab-brand">
-          <div className="fab-brand-mark"><Bot aria-hidden="true" /></div>
-          <div><strong>FAB</strong><span>Bookkeeping OS</span></div>
+          <div className="fab-brand-mark"><FabBrandMark /></div>
+          <div className="fab-brand-copy"><strong>FAB</strong><span>Bookkeeping OS</span></div>
+          <button className="fab-icon-button fab-sidebar-collapse" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? copy("Expand sidebar", "Zijbalk uitklappen") : copy("Collapse sidebar", "Zijbalk inklappen")} title={sidebarCollapsed ? copy("Expand sidebar", "Zijbalk uitklappen") : copy("Collapse sidebar", "Zijbalk inklappen")}>
+            {sidebarCollapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+          </button>
           <button ref={closeButtonRef} className="fab-icon-button fab-nav-close" onClick={() => setNavOpen(false)} aria-label={copy("Close navigation", "Navigatie sluiten")} title={copy("Close navigation", "Navigatie sluiten")}>
             <ChevronLeft aria-hidden="true" />
           </button>
@@ -114,8 +125,11 @@ export function FabOperatorShell({
         <nav className="fab-nav">
           <span className="fab-nav-label">{copy("Workspace", "Werkruimte")}</span>
           {navigation.map(({ id, label, labelNl, icon: Icon }) => (
-            <button key={id} className={activeSection === id ? "is-active" : ""} onClick={() => navigate(id)} aria-current={activeSection === id ? "location" : undefined}>
+            <button key={id} className={activeSection === id ? "is-active" : ""} onClick={() => navigate(id)} aria-current={activeSection === id ? "location" : undefined} title={sidebarCollapsed ? (lang === "nl" ? labelNl : label) : undefined}>
               <Icon aria-hidden="true" /><span>{lang === "nl" ? labelNl : label}</span>
+              {id === "review-workspace" && reviewCount !== null && reviewCount !== undefined && reviewCount > 0
+                ? <strong className="fab-nav-badge" aria-label={`${reviewCount} ${copy("documents waiting", "documenten wachten")}`}>{reviewCount > 999 ? "999+" : reviewCount}</strong>
+                : null}
             </button>
           ))}
         </nav>
@@ -155,5 +169,13 @@ export function FabOperatorShell({
         <main>{children}</main>
       </div>
     </div>
+  );
+}
+
+function FabBrandMark() {
+  return (
+    <svg viewBox="0 0 24 24" role="img" aria-label="FAB">
+      <path d="M4 4h7v5H4zM13 4h7v5h-7zM4 11h7v9H4zM13 11h7v4h-7zM13 17h7v3h-7z" fill="currentColor" stroke="none" />
+    </svg>
   );
 }

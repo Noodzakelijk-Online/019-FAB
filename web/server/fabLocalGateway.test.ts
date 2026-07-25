@@ -73,7 +73,14 @@ describe("FAB local API gateway", () => {
         sources: [{ source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." }],
       },
       "/api/sources": { sources: [{ source_type: "google_drive", status: "connected", updated_at: "2026-07-15T08:00:00Z" }] },
-      "/api/workflows": { workflowRuns: [{ id: 10, status: "completed" }] },
+      "/api/workflows": {
+        workflowRuns: [{
+          id: 10,
+          status: "completed",
+          trigger_source: "local_autonomous_cycle",
+          finished_at: "2026-07-25T09:15:00Z",
+        }],
+      },
       "/api/workflows/recovery": { status: "due", dueCount: 1, candidates: [{ workflowRunId: 9 }] },
       "/api/backups": {
         backupDir: "C:\\private\\backups",
@@ -232,9 +239,24 @@ describe("FAB local API gateway", () => {
             id: 9,
             reason: "manual_review_category",
             details: "Verify category.",
+            createdAt: "2026-07-24T09:00:00Z",
             correctedData: { private: true },
           }],
         }],
+      },
+      "/api/master-ledger": {
+        summary: { readyForApproval: 2 },
+        rows: [
+          { recordDate: "2026-06-30", amount: 42, vendorName: "Private ledger vendor" },
+          { recordDate: "2026-07-19", amount: 12, vendorName: "Private latest vendor" },
+        ],
+      },
+      "/api/bank-transactions": {
+        bankTransactions: [
+          { id: 90, amount: -125.5, currency: "EUR", description: "Private bank line" },
+          { id: 91, amount: 20, currency: "EUR", description: "Private bank line" },
+          { id: 92, amount: 8.25, currency: "GBP", description: "Private bank line" },
+        ],
       },
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -259,6 +281,18 @@ describe("FAB local API gateway", () => {
       exceptions: 2,
     });
     expect(result.resourceStates.metrics.state).toBe("live");
+    expect(result.decisionContext).toMatchObject({
+      lastSafeCycleAt: "2026-07-25T09:15:00Z",
+      latestWorkflowStatus: "completed",
+      dataThroughDate: "2026-07-19",
+      sourceCount: 1,
+      readySourceCount: 1,
+      latestSourceSyncAt: "2026-07-15T08:00:00Z",
+      unreconciledAmountByCurrency: { EUR: 145.5, GBP: 8.25 },
+      highPriorityExceptions: 1,
+      ledgerReadyForApproval: 2,
+    });
+    expect(result.decisionContext.oldestReviewAgeHours).toBeGreaterThan(0);
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
       expect.objectContaining({
@@ -385,6 +419,9 @@ describe("FAB local API gateway", () => {
     expect(serialized).not.toContain("omit duplicate OCR");
     expect(serialized).not.toContain("duplicateFingerprint");
     expect(serialized).not.toContain("correctedData");
+    expect(serialized).not.toContain("Private ledger vendor");
+    expect(serialized).not.toContain("Private latest vendor");
+    expect(serialized).not.toContain("Private bank line");
     expect(serialized).not.toContain("C:\\private\\backups");
     expect(serialized).not.toContain("RESTORE FAB LOCAL LEDGER");
   });
@@ -404,6 +441,15 @@ describe("FAB local API gateway", () => {
       postingBlockedReviewDocuments: null,
       unreconciled: null,
       exceptions: null,
+    });
+    expect(result.decisionContext).toMatchObject({
+      lastSafeCycleAt: null,
+      dataThroughDate: null,
+      sourceCount: null,
+      readySourceCount: null,
+      latestSourceSyncAt: null,
+      unreconciledAmountByCurrency: null,
+      ledgerReadyForApproval: null,
     });
     expect(result.resourceStates.metrics).toMatchObject({ state: "error", updatedAt: null });
     expect(result.resourceStates.exceptions.state).toBe("error");

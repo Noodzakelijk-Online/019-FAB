@@ -48,6 +48,18 @@ export type FabControlCenter = {
     exceptions: number | null;
     failedDocuments: number | null;
   };
+  decisionContext: {
+    lastSafeCycleAt: string | null;
+    latestWorkflowStatus: string | null;
+    dataThroughDate: string | null;
+    sourceCount: number | null;
+    readySourceCount: number | null;
+    latestSourceSyncAt: string | null;
+    unreconciledAmountByCurrency: Record<string, number> | null;
+    oldestReviewAgeHours: number | null;
+    highPriorityExceptions: number | null;
+    ledgerReadyForApproval: number | null;
+  };
   health: JsonRecord;
   autonomy: JsonRecord;
   closeReadiness: JsonRecord;
@@ -110,6 +122,8 @@ const READ_PATHS = {
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",
   reviewQueue: "/api/review?status=open&limit=500",
+  masterLedger: "/api/master-ledger?limit=500",
+  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=500",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
@@ -231,6 +245,10 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const sourceReadiness = resources.sourceReadiness || {};
   const waveSetup = resources.waveSetup || {};
   const registeredSources = arrayValue(resources.sources?.sources);
+  const workflowRuns = arrayValue(resources.workflows?.workflowRuns);
+  const reviewWorkItems = arrayValue(resources.reviewQueue?.workItems);
+  const masterLedgerRows = arrayValue(resources.masterLedger?.rows);
+  const bankTransactions = arrayValue(resources.bankTransactions?.bankTransactions);
   const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
     const sourceId = stringValue(source.id);
@@ -260,6 +278,12 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       nextAction: stringValue(asRecord(waveSetup.activation)?.nextAction, waveSetupNextAction(setupStatus)),
     };
   });
+  const latestSafeCycle = workflowRuns.find((workflow) => (
+    stringValue(workflow.status).toLowerCase() === "completed"
+      && ["local_autonomous_cycle", "autonomy_run"].includes(
+        stringValue(workflow.trigger_source, stringValue(workflow.triggerSource)).toLowerCase(),
+      )
+  ));
 
   return {
     connection: {
@@ -281,6 +305,38 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       unreconciledBankTransactions: nullableNumber(metrics.unreconciled_bank_transactions),
       exceptions: nullableNumber(asRecord(exceptionsPayload.summary)?.total),
       failedDocuments: nullableNumber(metrics.failed_documents),
+    },
+    decisionContext: {
+      lastSafeCycleAt: latestSafeCycle
+        ? nullableString(latestSafeCycle.finished_at || latestSafeCycle.finishedAt || latestSafeCycle.updated_at || latestSafeCycle.updatedAt)
+        : null,
+      latestWorkflowStatus: workflowRuns.length ? nullableString(workflowRuns[0].status) : null,
+      dataThroughDate: resourceStates.masterLedger.state === "live" || resourceStates.masterLedger.state === "stale"
+        ? latestDate(masterLedgerRows.map((row) => row.recordDate || row.transactionDate))
+        : null,
+      sourceCount: resourceStates.sources.state === "live" || resourceStates.sources.state === "stale"
+        ? registeredSources.length
+        : null,
+      readySourceCount: resourceStates.sources.state === "live" || resourceStates.sources.state === "stale"
+        ? registeredSources.filter((source) => ["connected", "ready", "ok"].includes(
+          stringValue(source.status).toLowerCase(),
+        )).length
+        : null,
+      latestSourceSyncAt: resourceStates.sources.state === "live" || resourceStates.sources.state === "stale"
+        ? latestDate(registeredSources.map((source) => source.last_sync_at || source.lastSyncAt || source.updated_at || source.updatedAt))
+        : null,
+      unreconciledAmountByCurrency: resourceStates.bankTransactions.state === "live" || resourceStates.bankTransactions.state === "stale"
+        ? amountByCurrency(bankTransactions)
+        : null,
+      oldestReviewAgeHours: resourceStates.reviewQueue.state === "live" || resourceStates.reviewQueue.state === "stale"
+        ? oldestReviewAgeHours(reviewWorkItems, checkedAt)
+        : null,
+      highPriorityExceptions: resourceStates.exceptions.state === "live" || resourceStates.exceptions.state === "stale"
+        ? nullableNumber(asRecord(asRecord(exceptionsPayload.summary)?.bySeverity)?.high)
+        : null,
+      ledgerReadyForApproval: resourceStates.masterLedger.state === "live" || resourceStates.masterLedger.state === "stale"
+        ? nullableNumber(asRecord(resources.masterLedger?.summary)?.readyForApproval)
+        : null,
     },
     health: resources.health || {},
     autonomy: resources.autonomy || {},
@@ -315,7 +371,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
         allowedCommandIds: haiAllowedCommandIds,
       },
     ],
-    workflows: arrayValue(resources.workflows?.workflowRuns),
+    workflows: workflowRuns,
     recovery: resources.recovery || {},
     backups: projectBackups(resources.backups),
     notifications: arrayValue(resources.notifications?.notifications),
@@ -524,6 +580,18 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
       unreconciledBankTransactions: null,
       exceptions: null,
       failedDocuments: null,
+    },
+    decisionContext: {
+      lastSafeCycleAt: null,
+      latestWorkflowStatus: null,
+      dataThroughDate: null,
+      sourceCount: null,
+      readySourceCount: null,
+      latestSourceSyncAt: null,
+      unreconciledAmountByCurrency: null,
+      oldestReviewAgeHours: null,
+      highPriorityExceptions: null,
+      ledgerReadyForApproval: null,
     },
     health: {},
     autonomy: {},
@@ -738,6 +806,43 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
+}
+
+function nullableString(value: unknown): string | null {
+  const result = stringValue(value).trim();
+  return result || null;
+}
+
+function latestDate(values: unknown[]): string | null {
+  const valid = values
+    .flatMap((value) => {
+      const raw = nullableString(value);
+      const timestamp = raw ? Date.parse(raw) : Number.NaN;
+      return raw && !Number.isNaN(timestamp) ? [{ raw, timestamp }] : [];
+    })
+    .sort((left, right) => right.timestamp - left.timestamp);
+  return valid[0]?.raw || null;
+}
+
+function amountByCurrency(transactions: JsonRecord[]): Record<string, number> {
+  return transactions.reduce<Record<string, number>>((totals, transaction) => {
+    const amount = nullableNumber(transaction.amount);
+    if (amount === null) return totals;
+    const currency = stringValue(transaction.currency, "UNKNOWN").toUpperCase();
+    totals[currency] = Number(((totals[currency] || 0) + Math.abs(amount)).toFixed(2));
+    return totals;
+  }, {});
+}
+
+function oldestReviewAgeHours(workItems: JsonRecord[], checkedAt: string): number | null {
+  const timestamps = workItems.flatMap((item) => arrayValue(item.reviewItems))
+    .flatMap((review) => {
+      const raw = nullableString(review.createdAt || review.created_at);
+      const timestamp = raw ? Date.parse(raw) : Number.NaN;
+      return Number.isNaN(timestamp) ? [] : [timestamp];
+    });
+  if (!timestamps.length) return null;
+  return Math.max(0, Math.round((Date.parse(checkedAt) - Math.min(...timestamps)) / 3_600_000));
 }
 
 function waveSetupNextAction(status: string): string {

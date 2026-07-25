@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   BellRing,
@@ -54,7 +54,7 @@ type FabCommandDrawerProps = {
   connected: boolean;
   pendingCommand: FabCommandId | null;
   commandStartedAt: string | null;
-  lastCommand: { id: FabCommandId; status: string; startedAt: string | null; finishedAt: string } | null;
+  lastCommand: { id: FabCommandId; status: string; startedAt: string | null; finishedAt: string; summary: string[] } | null;
   onClose: () => void;
   onCommand: (commandId: FabCommandId, payload?: FabRecord) => void;
 };
@@ -63,6 +63,14 @@ export function FabCommandDrawer({ open, connected, pendingCommand, commandStart
   const { lang, copy, status, dateLocale } = useFabLocale();
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (!open || !pendingCommand) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [open, pendingCommand]);
 
   useEffect(() => {
     if (!open) return;
@@ -100,8 +108,8 @@ export function FabCommandDrawer({ open, connected, pendingCommand, commandStart
         <div id="fab-command-description" className="fab-command-policy"><ShieldCheck aria-hidden="true" /><span>{copy("Commands mutate only FAB's local operating state. Approvals, exports, and external submissions remain excluded.", "Opdrachten wijzigen alleen de lokale operationele staat van FAB. Goedkeuringen, exports en externe indieningen blijven uitgesloten.")}</span></div>
 
         {!connected && <div className="fab-command-offline" role="alert"><Unplug aria-hidden="true" /><div><strong>{copy("Local API disconnected", "Lokale API niet verbonden")}</strong><span>{copy("Commands remain visible for inspection but cannot run. Reconnect FAB, then retry.", "Opdrachten blijven zichtbaar maar kunnen niet draaien. Verbind FAB opnieuw en probeer het opnieuw.")}</span></div></div>}
-        {pendingCommand && <div className="fab-command-progress" role="status"><RefreshCw className="is-spinning" aria-hidden="true" /><div><strong>{humanize(pendingCommand)} {copy("is running", "wordt uitgevoerd")}</strong><span>{copy("Started", "Gestart")} {exactDateTime(commandStartedAt, dateLocale)}. {copy("The dashboard will refresh when the API returns a final result.", "Het dashboard vernieuwt zodra de API een eindresultaat teruggeeft.")}</span></div></div>}
-        {!pendingCommand && lastCommand && <div className="fab-command-progress is-complete" role="status"><CheckCircle2 aria-hidden="true" /><div><strong>{humanize(lastCommand.id)}: {status(lastCommand.status)}</strong><span>{copy("Finished", "Voltooid")} {exactDateTime(lastCommand.finishedAt, dateLocale)}{lastCommand.startedAt ? ` ${copy("after", "na")} ${durationBetween(lastCommand.startedAt, lastCommand.finishedAt)}` : ""}.</span></div></div>}
+        {pendingCommand && <div className="fab-command-progress" role="status"><RefreshCw className="is-spinning" aria-hidden="true" /><div><strong>{humanize(pendingCommand)} {copy("is running", "wordt uitgevoerd")}</strong><span>{copy("Started", "Gestart")} {exactDateTime(commandStartedAt, dateLocale)}{commandStartedAt ? ` · ${copy("elapsed", "verstreken")} ${durationBetween(commandStartedAt, new Date(now).toISOString())}` : ""}. {copy("The dashboard will refresh when the API returns a final result.", "Het dashboard vernieuwt zodra de API een eindresultaat teruggeeft.")}</span></div></div>}
+        {!pendingCommand && lastCommand && <div className="fab-command-progress is-complete" role="status"><CheckCircle2 aria-hidden="true" /><div><strong>{humanize(lastCommand.id)}: {status(lastCommand.status)}</strong><span>{copy("Finished", "Voltooid")} {exactDateTime(lastCommand.finishedAt, dateLocale)}{lastCommand.startedAt ? ` ${copy("after", "na")} ${durationBetween(lastCommand.startedAt, lastCommand.finishedAt)}` : ""}.</span>{lastCommand.summary.length > 0 && <small>{lastCommand.summary.join(" · ")}</small>}</div></div>}
 
         <div className="fab-command-list">
           {commandGroups.map((group) => (

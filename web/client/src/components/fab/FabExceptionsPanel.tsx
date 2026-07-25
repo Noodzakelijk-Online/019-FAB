@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, ArrowUpRight, Filter, Search, X } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Search, X } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
 import {
@@ -25,28 +25,47 @@ type FabExceptionsPanelProps = {
   closeResource?: FabResourceState;
   search: string;
   localApiEndpoint: string;
+  onOpenReview: () => void;
 };
 
 type SeverityFilter = "all" | "high" | "medium" | "low";
 type SortMode = "risk" | "oldest" | "newest";
+type AgeFilter = "all" | "24" | "72" | "168";
 
 const severityRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+const PAGE_SIZE = 8;
 
-export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, closeReadiness, closeResource, search, localApiEndpoint }: FabExceptionsPanelProps) {
+export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, closeReadiness, closeResource, search, localApiEndpoint, onOpenReview }: FabExceptionsPanelProps) {
   const { copy, status, dateLocale } = useFabLocale();
   const [severity, setSeverity] = useState<SeverityFilter>("all");
+  const [exceptionType, setExceptionType] = useState("all");
+  const [entityType, setEntityType] = useState("all");
+  const [age, setAge] = useState<AgeFilter>("all");
   const [sort, setSort] = useState<SortMode>("risk");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<FabRecord | null>(null);
   const bySeverity = asRecord(exceptionSummary.bySeverity);
+  const exceptionTypes = useMemo(() => uniqueValues(exceptions, "type"), [exceptions]);
+  const entityTypes = useMemo(() => uniqueValues(exceptions, "entityType"), [exceptions]);
   const visibleExceptions = useMemo(() => exceptions
     .filter((item) => matchesSearch(item, search))
     .filter((item) => severity === "all" || text(item.severity, "low") === severity)
-    .sort((left, right) => compareExceptions(left, right, sort)), [exceptions, search, severity, sort]);
+    .filter((item) => exceptionType === "all" || text(item.type, "") === exceptionType)
+    .filter((item) => entityType === "all" || text(item.entityType, "") === entityType)
+    .filter((item) => age === "all" || count(item.ageHours) >= Number(age))
+    .sort((left, right) => compareExceptions(left, right, sort)), [age, entityType, exceptionType, exceptions, search, severity, sort]);
+  const pageCount = Math.max(1, Math.ceil(visibleExceptions.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedExceptions = visibleExceptions.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
   const state = panelState(resource, exceptions.length);
   const displayState = resource?.state === "live" && visibleExceptions.length === 0 ? "empty" : state;
   const total = exceptionSummary.total === null || exceptionSummary.total === undefined
     ? exceptions.length
     : count(exceptionSummary.total);
+
+  useEffect(() => {
+    setPage(1);
+  }, [age, entityType, exceptionType, search, severity, sort]);
 
   return (
     <section id="exceptions" className="fab-section fab-exceptions">
@@ -78,6 +97,29 @@ export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, clo
             </select>
           </label>
           <label>
+            <span>{copy("Type", "Type")}</span>
+            <select value={exceptionType} onChange={(event) => setExceptionType(event.target.value)}>
+              <option value="all">{copy("All types", "Alle typen")}</option>
+              {exceptionTypes.map((value) => <option key={value} value={value}>{compactHumanize(value)}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>{copy("Entity", "Entiteit")}</span>
+            <select value={entityType} onChange={(event) => setEntityType(event.target.value)}>
+              <option value="all">{copy("All entities", "Alle entiteiten")}</option>
+              {entityTypes.map((value) => <option key={value} value={value}>{compactHumanize(value)}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>{copy("Age", "Leeftijd")}</span>
+            <select value={age} onChange={(event) => setAge(event.target.value as AgeFilter)}>
+              <option value="all">{copy("Any age", "Elke leeftijd")}</option>
+              <option value="24">{copy("Older than 24h", "Ouder dan 24u")}</option>
+              <option value="72">{copy("Older than 3d", "Ouder dan 3d")}</option>
+              <option value="168">{copy("Older than 7d", "Ouder dan 7d")}</option>
+            </select>
+          </label>
+          <label>
             <span>{copy("Sort", "Sorteren")}</span>
             <select value={sort} onChange={(event) => setSort(event.target.value as SortMode)}>
               <option value="risk">{copy("Highest risk", "Hoogste risico")}</option>
@@ -85,7 +127,9 @@ export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, clo
               <option value="newest">{copy("Newest first", "Nieuwste eerst")}</option>
             </select>
           </label>
-          <span className="fab-result-count">{copy("Showing", "Getoond")} {visibleExceptions.length} {copy("of", "van")} {total}. {copy("Local API limit", "Lokale API-limiet")}: 25.</span>
+          <span className="fab-result-count">
+            {copy("Loaded", "Geladen")} {exceptions.length} {copy("of", "van")} {total}. {copy("API page limit", "API-paginalimiet")}: 25.
+          </span>
         </div>
       )}
 
@@ -105,7 +149,7 @@ export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, clo
           <table className="fab-table">
             <thead><tr><th>{copy("Severity", "Ernst")}</th><th>{copy("Exception", "Uitzondering")}</th><th>{copy("Entity", "Entiteit")}</th><th>{copy("Age", "Leeftijd")}</th><th>{copy("Owner / due", "Eigenaar / deadline")}</th><th>{copy("Required next action", "Vereiste volgende actie")}</th><th><span className="sr-only">{copy("Actions", "Acties")}</span></th></tr></thead>
             <tbody>
-              {visibleExceptions.map((exception) => {
+              {pagedExceptions.map((exception) => {
                 const entity = asRecord(exception.entity);
                 const age = exception.ageHours === null || exception.ageHours === undefined ? null : Math.round(count(exception.ageHours));
                 return (
@@ -124,8 +168,20 @@ export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, clo
           </table>
         </div>
       )}
+      {visibleExceptions.length > PAGE_SIZE && (
+        <div className="fab-pagination" aria-label={copy("Exception pagination", "Paginering uitzonderingen")}>
+          <span>
+            {copy("Showing", "Getoond")} {(currentPage - 1) * PAGE_SIZE + 1}-{Math.min(currentPage * PAGE_SIZE, visibleExceptions.length)} {copy("of", "van")} {visibleExceptions.length} {copy("loaded matches", "geladen resultaten")}
+          </span>
+          <div>
+            <button className="fab-icon-button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1} aria-label={copy("Previous exception page", "Vorige uitzonderingspagina")} title={copy("Previous page", "Vorige pagina")}><ChevronLeft aria-hidden="true" /></button>
+            <strong>{currentPage} / {pageCount}</strong>
+            <button className="fab-icon-button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} aria-label={copy("Next exception page", "Volgende uitzonderingspagina")} title={copy("Next page", "Volgende pagina")}><ChevronRight aria-hidden="true" /></button>
+          </div>
+        </div>
+      )}
       <FabNextDecisions closeReadiness={closeReadiness} resource={closeResource} localApiEndpoint={localApiEndpoint} />
-      <FabExceptionDrawer exception={selected} localApiEndpoint={localApiEndpoint} onClose={() => setSelected(null)} />
+      <FabExceptionDrawer exception={selected} localApiEndpoint={localApiEndpoint} onOpenReview={onOpenReview} onClose={() => setSelected(null)} />
     </section>
   );
 }
@@ -149,7 +205,7 @@ function FabNextDecisions({ closeReadiness, resource, localApiEndpoint }: { clos
   );
 }
 
-function FabExceptionDrawer({ exception, localApiEndpoint, onClose }: { exception: FabRecord | null; localApiEndpoint: string; onClose: () => void }) {
+function FabExceptionDrawer({ exception, localApiEndpoint, onOpenReview, onClose }: { exception: FabRecord | null; localApiEndpoint: string; onOpenReview: () => void; onClose: () => void }) {
   const { copy, status } = useFabLocale();
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -179,7 +235,10 @@ function FabExceptionDrawer({ exception, localApiEndpoint, onClose }: { exceptio
   }, [exception, onClose]);
 
   if (!exception) return null;
-  const actions = records(exception.actions);
+  const actions = records(exception.actions).filter((action) => {
+    const path = text(action.dashboardPath || action.path, "");
+    return Boolean(path) && text(action.method, "GET") === "GET";
+  });
   return createPortal(
     <div className="fab-command-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <aside className="fab-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="fab-exception-title" aria-describedby="fab-exception-description">
@@ -198,10 +257,10 @@ function FabExceptionDrawer({ exception, localApiEndpoint, onClose }: { exceptio
           <div className="fab-detail-actions">
             {actions.map((action, index) => {
               const path = text(action.dashboardPath || action.path, "");
-              if (!path || text(action.method, "GET") !== "GET") return null;
-              return <a key={`${path}-${index}`} className="fab-primary-button" href={`${localApiEndpoint}${path}`} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {text(action.label, copy("Open evidence", "Bewijs openen"))}</a>;
+              return <a key={`${path}-${index}`} className="fab-primary-button" href={`${localApiEndpoint}${path}`} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {text(action.label, compactHumanize(action.id || copy("Open evidence", "Bewijs openen")))}</a>;
             })}
             {!actions.length && <a className="fab-primary-button" href={`${localApiEndpoint}/#exceptions`} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {copy("Open advanced evidence", "Geavanceerd bewijs openen")}</a>}
+            <button className="fab-secondary-button" onClick={() => { onClose(); onOpenReview(); }}><Search aria-hidden="true" /> {copy("Open review queue", "Controlewachtrij openen")}</button>
           </div>
         </div>
       </aside>
@@ -217,4 +276,8 @@ function compareExceptions(left: FabRecord, right: FabRecord, mode: SortMode): n
   if (mode === "newest") return leftAge - rightAge;
   const risk = (severityRank[text(right.severity, "low")] || 0) - (severityRank[text(left.severity, "low")] || 0);
   return risk || rightAge - leftAge;
+}
+
+function uniqueValues(items: FabRecord[], field: string): string[] {
+  return Array.from(new Set(items.map((item) => text(item[field], "")).filter(Boolean))).sort();
 }

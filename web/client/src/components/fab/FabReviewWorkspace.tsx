@@ -249,6 +249,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 }) {
   const { copy } = useFabLocale();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
   const [form, setForm] = useState(() => emptyForm());
   const [error, setError] = useState("");
   const [selectedDuplicateCandidateId, setSelectedDuplicateCandidateId] = useState(0);
@@ -300,13 +301,27 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
 
   useEffect(() => {
     if (!item) return;
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     globalThis.document.body.classList.add("fab-dialog-open");
     closeRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key !== "Tab") return;
+      const dialog = closeRef.current?.closest<HTMLElement>("[role=dialog]");
+      const focusable = dialog ? Array.from(dialog.querySelectorAll<HTMLElement>(
+        "button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary",
+      )) : [];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       globalThis.document.body.classList.remove("fab-dialog-open");
+      restoreFocusRef.current?.focus();
     };
   }, [item, onClose]);
 
