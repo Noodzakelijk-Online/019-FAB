@@ -66,6 +66,9 @@ Local deployment is suitable for development, testing, and running the solution 
     local_intake_paths = C:\Users\<you>\Google Drive\sort out
     local_intake_extensions = pdf,jpg,jpeg,png,heic,tif,tiff,txt,csv
     backup_dir = C:\Users\<you>\AppData\Local\FAB\backups
+    worker_create_scheduled_backups = true
+    backup_schedule_interval_hours = 24
+    backup_require_complete_source_evidence = true
     categorization_review_confidence_threshold = 0.7
     waveapps_default_account = Uncategorized
     review_stale_hours = 48
@@ -78,7 +81,7 @@ Local deployment is suitable for development, testing, and running the solution 
     worker_run_legacy_workflow = false
     enabled = false
     ```
-    This SQLite ledger records workflow runs and ordered step evidence, document statuses, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events without requiring the web database/API to be online. Local intake stores file metadata and SHA-256 duplicate fingerprints, not raw document bytes. Do not put this database in a Git-tracked directory when it contains real financial metadata.
+    This SQLite ledger records workflow runs and ordered step evidence, document statuses, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events without requiring the web database/API to be online. Local intake stores file metadata and SHA-256 duplicate fingerprints, not raw document bytes. The worker creates an atomic recovery package on the configured interval containing a verified SQLite snapshot and every source document that has a safe, checksum-matching ledger path. With `backup_require_complete_source_evidence=true`, any missing or changed source blocks the package instead of reporting a false-success backup. Keep the ledger and backup directory outside Git when they contain real financial data.
 
 5.  **Run the Application:**
 

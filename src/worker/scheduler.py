@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from src.data_entry.posting_executor import PostingExecutor
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_backup import LocalBackupService
 from src.operations.local_compliance import LocalComplianceService
 from src.operations.local_connector_intake import LocalConnectorIntakeService
 from src.operations.drive_wave_delivery import DriveWaveDeliveryService
@@ -51,6 +52,9 @@ class FabWorker:
         )
         self.include_wave_plan = _as_bool(self.config.get("worker_include_wave_plan", True))
         self.include_wave_sync = _as_bool(self.config.get("worker_include_wave_sync", True))
+        self.create_scheduled_backups = bool(self.operations_ledger) and _as_bool(
+            self.config.get("worker_create_scheduled_backups", True)
+        )
         self.generate_scheduled_reports = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_generate_scheduled_reports", True)
         )
@@ -87,6 +91,7 @@ class FabWorker:
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")
             stage_errors = []
             stages = (
+                ("scheduled_backup", self._process_scheduled_backup),
                 ("workflow_recovery", self._recover_workflows),
                 ("connector_intake", self._sync_source_connectors),
                 ("legacy_workflow", self._run_legacy_workflow),
@@ -269,6 +274,21 @@ class FabWorker:
                 "Operations-ledger approved export cycle completed",
             )
 
+    def _process_scheduled_backup(self) -> None:
+        if not self.create_scheduled_backups or not self.operations_ledger:
+            return
+        result = LocalBackupService(
+            self.operations_ledger,
+            self.config,
+        ).run_due(actor="local_worker")
+        self._record_audit(
+            "scheduled_backup_cycle",
+            _compact_scheduled_backup(result),
+            f"Scheduled backup cycle ended as {result.get('status')}",
+        )
+        if not result.get("success"):
+            raise RuntimeError(result.get("error") or "Scheduled backup failed")
+
     def _process_scheduled_reports(self) -> None:
         if not self.generate_scheduled_reports or not self.operations_ledger:
             return
@@ -375,6 +395,33 @@ def _compact_export_preparation(result: Dict[str, Any]) -> Dict[str, Any]:
         "prepared": result.get("prepared", 0),
         "alreadyPrepared": result.get("alreadyPrepared", 0),
         "blocked": result.get("blocked", 0),
+        "externalSubmission": result.get("externalSubmission", "not_executed"),
+    }
+
+
+def _compact_scheduled_backup(result: Dict[str, Any]) -> Dict[str, Any]:
+    backup = result.get("backup") if isinstance(result.get("backup"), dict) else {}
+    manifest = backup.get("manifest") if isinstance(backup.get("manifest"), dict) else {}
+    source_evidence = (
+        manifest.get("sourceEvidence")
+        if isinstance(manifest.get("sourceEvidence"), dict)
+        else {}
+    )
+    schedule = (
+        result.get("schedule")
+        if isinstance(result.get("schedule"), dict)
+        else {}
+    )
+    return {
+        "success": result.get("success"),
+        "status": result.get("status"),
+        "backupFilename": backup.get("backupFilename"),
+        "ledgerSha256": manifest.get("ledgerSha256"),
+        "sourceEvidenceStatus": source_evidence.get("coverageStatus"),
+        "sourceEvidenceDocuments": source_evidence.get("includedDocuments", 0),
+        "sourceEvidenceFiles": source_evidence.get("includedFiles", 0),
+        "sourceEvidenceGaps": source_evidence.get("gapCount", 0),
+        "nextDueAt": schedule.get("nextDueAt"),
         "externalSubmission": result.get("externalSubmission", "not_executed"),
     }
 

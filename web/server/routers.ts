@@ -88,6 +88,7 @@ import {
 } from "@shared/masterLedgerProjection";
 import {
   FAB_OPERATOR_COMMAND_IDS,
+  createFabBackup,
   getFabControlCenter,
   resolveFabReviewItem,
   runFabOperatorCommand,
@@ -439,6 +440,10 @@ export const appRouter = router({
       operatorLabel: ctx.user?.name || ctx.user?.email || "Local operator",
     })),
     controlCenter: fabOperatorProcedure.query(async () => getFabControlCenter()),
+    createBackup: fabOperatorProcedure
+      .mutation(async ({ ctx }) => createFabBackup(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
     uploadIntake: fabOperatorProcedure
       .input(z.object({
         filename: z.string().trim().min(1).max(255),

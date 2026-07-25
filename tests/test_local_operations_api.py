@@ -2231,11 +2231,17 @@ class TestLocalOperationsApi(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
             backup_dir = os.path.join(temp_dir, "backups")
+            original_path = os.path.join(temp_dir, "original.pdf")
+            original_bytes = b"source-complete API backup evidence"
+            with open(original_path, "wb") as handle:
+                handle.write(original_bytes)
             ledger = LocalOperationsLedger(ledger_path)
             original_id = ledger.register_document({
                 "source": "scanner",
                 "sourceDocumentId": "scan-api-backup",
                 "originalFilename": "original.pdf",
+                "storagePath": original_path,
+                "contentSha256": hashlib.sha256(original_bytes).hexdigest(),
             })
             app = create_app({
                 "fab_local_ledger_path": ledger_path,
@@ -2243,8 +2249,15 @@ class TestLocalOperationsApi(unittest.TestCase):
             })
             client = app.test_client()
 
-            created = client.post("/api/backups", json={"note": "api test"})
+            created = client.post("/api/backups", json={
+                "note": "api test",
+                "actor": "test-operator",
+            })
             self.assertEqual(created.status_code, 200)
+            self.assertEqual(
+                created.get_json()["manifest"]["sourceEvidence"]["coverageStatus"],
+                "complete",
+            )
             backup_path = created.get_json()["backupPath"]
             ledger.register_document({
                 "source": "scanner",
@@ -2268,15 +2281,22 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual([document["id"] for document in documents], [original_id])
             backups = client.get("/api/backups").get_json()
             self.assertGreaterEqual(len(backups["backups"]), 2)
+            self.assertIn(backups["schedule"]["status"], {"current", "due"})
 
     def test_dashboard_backup_form_shows_backup_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
             backup_dir = os.path.join(temp_dir, "backups")
+            source_path = os.path.join(temp_dir, "receipt.pdf")
+            source_bytes = b"source-complete dashboard backup evidence"
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
             LocalOperationsLedger(ledger_path).register_document({
                 "source": "scanner",
                 "sourceDocumentId": "scan-dashboard-backup",
                 "originalFilename": "receipt.pdf",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
             })
             app = create_app({
                 "fab_local_ledger_path": ledger_path,
@@ -2290,8 +2310,32 @@ class TestLocalOperationsApi(unittest.TestCase):
             html = page.data.decode("utf-8")
             self.assertIn("Backups", html)
             self.assertIn("Last backup action", html)
-            self.assertIn("fab-local-ledger-backup", html)
+            self.assertIn("fab-recovery-package", html)
             self.assertIn(RESTORE_CONFIRMATION_PHRASE, html)
+
+    def test_api_blocks_strict_backup_when_source_evidence_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            backup_dir = os.path.join(temp_dir, "backups")
+            LocalOperationsLedger(ledger_path).register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scan-missing-backup-source",
+                "originalFilename": "missing.pdf",
+            })
+            client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_backup_dir": backup_dir,
+            }).test_client()
+
+            response = client.post("/api/backups", json={
+                "actor": "test-operator",
+                "requireCompleteSourceEvidence": True,
+            })
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.get_json()["status"], "blocked")
+            self.assertIn("Source-complete backup blocked", response.get_json()["error"])
+            self.assertEqual(os.listdir(backup_dir), [])
 
     def test_api_rescans_configured_intake_folder(self):
         with tempfile.TemporaryDirectory() as temp_dir:

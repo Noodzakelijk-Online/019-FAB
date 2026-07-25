@@ -1,12 +1,15 @@
+import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
+import uuid
 import zipfile
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
 
 from src.operations.local_ledger import LocalOperationsLedger
 
@@ -14,6 +17,14 @@ from src.operations.local_ledger import LocalOperationsLedger
 BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_LEDGER_NAME = "fab_operations.sqlite3"
 RESTORE_CONFIRMATION_PHRASE = "RESTORE FAB LOCAL LEDGER"
+BACKUP_FORMAT_V1 = "fab-local-ledger-backup-v1"
+BACKUP_FORMAT_V2 = "fab-recovery-package-v2"
+SOURCE_EVIDENCE_PREFIX = "source_evidence/"
+SCHEDULED_BACKUP_LEASE_NAME = "local_scheduled_backup"
+MAX_BACKUP_ARCHIVE_FILES = 10_000
+MAX_BACKUP_EVIDENCE_FILE_BYTES = 250 * 1024 * 1024
+MAX_BACKUP_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
+_INSPECTION_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 class LocalBackupService:
@@ -26,48 +37,83 @@ class LocalBackupService:
         self.backup_dir = self._backup_dir()
         os.makedirs(self.backup_dir, exist_ok=True)
 
-    def create_backup(self, note: Optional[str] = None) -> Dict[str, Any]:
+    def create_backup(
+        self,
+        note: Optional[str] = None,
+        require_complete_source_evidence: bool = False,
+        actor: str = "local_backup",
+    ) -> Dict[str, Any]:
         timestamp = _timestamp()
-        backup_filename = f"fab-local-ledger-backup_{timestamp}.zip"
+        backup_filename = f"fab-recovery-package_{timestamp}.zip"
         backup_path = os.path.join(self.backup_dir, backup_filename)
+        temporary_backup_path = f"{backup_path}.{os.getpid()}.tmp"
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            ledger_snapshot_path = os.path.join(temp_dir, BACKUP_LEDGER_NAME)
-            self._snapshot_ledger(ledger_snapshot_path)
-            ledger_sha256 = _sha256_file(ledger_snapshot_path)
-            ledger_bytes = os.path.getsize(ledger_snapshot_path)
-            manifest = {
-                "format": "fab-local-ledger-backup-v1",
-                "createdAt": _now(),
-                "ledgerFilename": BACKUP_LEDGER_NAME,
-                "ledgerSha256": ledger_sha256,
-                "ledgerBytes": ledger_bytes,
-                "sourceLedgerBasename": os.path.basename(self.ledger_path),
-                "note": note,
-                "configSummary": self._safe_config_summary(),
-                "safety": {
-                    "containsSecrets": False,
-                    "containsRawDocumentBytes": False,
-                    "restoreRequiresConfirmation": RESTORE_CONFIRMATION_PHRASE,
-                },
-            }
-            manifest_path = os.path.join(temp_dir, BACKUP_MANIFEST_NAME)
-            with open(manifest_path, "w", encoding="utf-8") as handle:
-                json.dump(manifest, handle, sort_keys=True, indent=2, default=str)
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                ledger_snapshot_path = os.path.join(temp_dir, BACKUP_LEDGER_NAME)
+                self._snapshot_ledger(ledger_snapshot_path)
+                ledger_sha256 = _sha256_file(ledger_snapshot_path)
+                ledger_bytes = os.path.getsize(ledger_snapshot_path)
+                source_evidence, evidence_files = self._snapshot_source_evidence(
+                    ledger_snapshot_path,
+                    temp_dir,
+                    require_complete=require_complete_source_evidence,
+                )
+                manifest = {
+                    "format": BACKUP_FORMAT_V2,
+                    "createdAt": _now(),
+                    "ledgerFilename": BACKUP_LEDGER_NAME,
+                    "ledgerSha256": ledger_sha256,
+                    "ledgerBytes": ledger_bytes,
+                    "sourceLedgerBasename": os.path.basename(self.ledger_path),
+                    "note": note,
+                    "configSummary": self._safe_config_summary(),
+                    "sourceEvidence": source_evidence,
+                    "safety": {
+                        "containsSecrets": False,
+                        "containsRawDocumentBytes": bool(evidence_files),
+                        "restoreRequiresConfirmation": RESTORE_CONFIRMATION_PHRASE,
+                    },
+                }
+                manifest_path = os.path.join(temp_dir, BACKUP_MANIFEST_NAME)
+                with open(manifest_path, "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle, sort_keys=True, indent=2, default=str)
 
-            with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                archive.write(manifest_path, BACKUP_MANIFEST_NAME)
-                archive.write(ledger_snapshot_path, BACKUP_LEDGER_NAME)
+                with zipfile.ZipFile(
+                    temporary_backup_path,
+                    "w",
+                    zipfile.ZIP_DEFLATED,
+                    allowZip64=True,
+                ) as archive:
+                    archive.write(manifest_path, BACKUP_MANIFEST_NAME)
+                    archive.write(ledger_snapshot_path, BACKUP_LEDGER_NAME)
+                    for archive_path, evidence_path in sorted(evidence_files.items()):
+                        archive.write(evidence_path, archive_path)
+                os.replace(temporary_backup_path, backup_path)
+                inspected = self.inspect_backup(backup_path)
+                manifest = inspected["manifest"]
+        except Exception:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            raise
+        finally:
+            if os.path.exists(temporary_backup_path):
+                os.remove(temporary_backup_path)
 
         self.ledger.record_audit_event({
             "action": "local_backup.created",
             "entityType": "backup",
             "entityId": os.path.basename(backup_path),
             "details": {
+                "actor": str(actor or "local_backup")[:200],
                 "backupPath": backup_path,
                 "ledgerSha256": ledger_sha256,
                 "ledgerBytes": ledger_bytes,
                 "note": note,
+                "sourceEvidenceStatus": source_evidence["coverageStatus"],
+                "sourceEvidenceDocuments": source_evidence["includedDocuments"],
+                "sourceEvidenceFiles": source_evidence["includedFiles"],
+                "sourceEvidenceBytes": source_evidence["includedBytes"],
             },
         })
         return {
@@ -80,12 +126,11 @@ class LocalBackupService:
 
     def list_backups(self, limit: int = 25) -> Dict[str, Any]:
         backups = []
-        for name in os.listdir(self.backup_dir) if os.path.isdir(self.backup_dir) else []:
-            if not name.lower().endswith(".zip"):
-                continue
-            path = os.path.join(self.backup_dir, name)
+        for path in self._backup_paths(limit):
+            name = os.path.basename(path)
             try:
                 inspected = self.inspect_backup(path)
+                source_evidence = inspected.get("manifest", {}).get("sourceEvidence") or {}
                 backups.append({
                     "backupFilename": name,
                     "backupPath": path,
@@ -94,8 +139,24 @@ class LocalBackupService:
                     "ledgerBytes": inspected.get("manifest", {}).get("ledgerBytes"),
                     "ledgerSha256": inspected.get("manifest", {}).get("ledgerSha256"),
                     "sizeBytes": os.path.getsize(path),
+                    "format": inspected.get("manifest", {}).get("format"),
+                    "sourceEvidenceStatus": (
+                        source_evidence.get("coverageStatus")
+                        if source_evidence
+                        else "legacy_ledger_only"
+                    ),
+                    "sourceEvidenceDocuments": source_evidence.get("includedDocuments", 0),
+                    "sourceEvidenceFiles": source_evidence.get("includedFiles", 0),
+                    "sourceEvidenceBytes": source_evidence.get("includedBytes", 0),
+                    "sourceEvidenceGaps": source_evidence.get("gapCount", 0),
                 })
-            except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                json.JSONDecodeError,
+                zipfile.BadZipFile,
+            ) as exc:
                 backups.append({
                     "backupFilename": name,
                     "backupPath": path,
@@ -103,11 +164,11 @@ class LocalBackupService:
                     "error": str(exc),
                     "sizeBytes": os.path.getsize(path) if os.path.exists(path) else 0,
                 })
-        backups.sort(key=lambda item: item.get("createdAt") or "", reverse=True)
         return {
             "backupDir": self.backup_dir,
             "restoreConfirmationPhrase": RESTORE_CONFIRMATION_PHRASE,
             "backups": backups[: _bounded_limit(limit)],
+            "schedule": self.schedule_status(),
         }
 
     def inspect_backup(self, backup_path: str) -> Dict[str, Any]:
@@ -116,22 +177,39 @@ class LocalBackupService:
             raise ValueError(f"Backup not found: {resolved_path}")
         if not resolved_path.lower().endswith(".zip"):
             raise ValueError("Only .zip local FAB backups are supported")
+        signature = _file_signature(resolved_path)
+        cached = _INSPECTION_CACHE.get(resolved_path)
+        if cached and cached.get("signature") == signature:
+            return copy.deepcopy(cached["result"])
 
         with zipfile.ZipFile(resolved_path, "r") as archive:
-            self._validate_archive_names(archive.namelist())
-            with archive.open(BACKUP_MANIFEST_NAME) as handle:
-                manifest = json.loads(handle.read().decode("utf-8"))
-            if manifest.get("format") != "fab-local-ledger-backup-v1":
+            names = archive.namelist()
+            self._validate_member_names(names)
+            try:
+                with archive.open(BACKUP_MANIFEST_NAME) as handle:
+                    manifest = json.loads(handle.read().decode("utf-8"))
+            except KeyError:
+                raise ValueError("Backup archive is missing manifest.json") from None
+            if not isinstance(manifest, dict):
+                raise ValueError("Backup manifest must be a JSON object")
+            backup_format = manifest.get("format")
+            if backup_format not in {BACKUP_FORMAT_V1, BACKUP_FORMAT_V2}:
                 raise ValueError("Unsupported FAB backup format")
+            expected_names = {BACKUP_MANIFEST_NAME, BACKUP_LEDGER_NAME}
+            if backup_format == BACKUP_FORMAT_V2:
+                expected_names.update(
+                    self._validate_source_evidence_manifest(manifest, archive)
+                )
+            self._validate_expected_archive_names(names, expected_names)
             ledger_info = archive.getinfo(BACKUP_LEDGER_NAME)
             expected_bytes = manifest.get("ledgerBytes")
             if expected_bytes is not None and int(expected_bytes) != int(ledger_info.file_size):
                 raise ValueError("Backup ledger size does not match manifest")
+            total_uncompressed = sum(info.file_size for info in archive.infolist())
+            if total_uncompressed > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                raise ValueError("Backup exceeds the maximum uncompressed size")
             expected_sha256 = str(manifest.get("ledgerSha256") or "").strip().lower()
-            if (
-                len(expected_sha256) != 64
-                or any(character not in "0123456789abcdef" for character in expected_sha256)
-            ):
+            if not _valid_sha256(expected_sha256):
                 raise ValueError("Backup manifest has no valid ledger SHA-256")
             with tempfile.TemporaryDirectory() as temp_dir:
                 inspected_ledger_path = os.path.join(temp_dir, BACKUP_LEDGER_NAME)
@@ -156,7 +234,7 @@ class LocalBackupService:
                 if not integrity or str(integrity[0]).lower() != "ok":
                     raise ValueError("Backup ledger failed SQLite integrity validation")
 
-        return {
+        result = {
             "success": True,
             "status": "valid",
             "backupPath": resolved_path,
@@ -164,6 +242,134 @@ class LocalBackupService:
             "manifest": manifest,
             "restoreConfirmationPhrase": RESTORE_CONFIRMATION_PHRASE,
         }
+        _INSPECTION_CACHE[resolved_path] = {
+            "signature": signature,
+            "result": copy.deepcopy(result),
+        }
+        return result
+
+    def schedule_status(self) -> Dict[str, Any]:
+        interval_hours = _positive_float_config(
+            self.config,
+            "backup_schedule_interval_hours",
+            "fab_backup_schedule_interval_hours",
+            default=24.0,
+        )
+        require_complete = _bool_config(
+            self.config,
+            "backup_require_complete_source_evidence",
+            "fab_backup_require_complete_source_evidence",
+            default=True,
+        )
+        latest = None
+        invalid_count = 0
+        for path in self._backup_paths(100):
+            try:
+                latest = self.inspect_backup(path)
+                break
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                json.JSONDecodeError,
+                zipfile.BadZipFile,
+            ):
+                invalid_count += 1
+        now = datetime.now(timezone.utc)
+        if not latest:
+            return {
+                "status": "due",
+                "due": True,
+                "intervalHours": interval_hours,
+                "requireCompleteSourceEvidence": require_complete,
+                "lastSuccessfulAt": None,
+                "nextDueAt": None,
+                "invalidBackupCount": invalid_count,
+                "reason": "no_valid_backup",
+            }
+
+        manifest = latest.get("manifest") or {}
+        created_at = _parse_timestamp(manifest.get("createdAt"))
+        source_evidence = manifest.get("sourceEvidence") or {}
+        source_complete = (
+            manifest.get("format") == BACKUP_FORMAT_V2
+            and source_evidence.get("coverageStatus") == "complete"
+        )
+        next_due = created_at + timedelta(hours=interval_hours) if created_at else now
+        reason = "interval_elapsed" if now >= next_due else "current"
+        if require_complete and not source_complete:
+            reason = "source_evidence_backup_required"
+        due = now >= next_due or (require_complete and not source_complete)
+        return {
+            "status": "due" if due else "current",
+            "due": due,
+            "intervalHours": interval_hours,
+            "requireCompleteSourceEvidence": require_complete,
+            "lastSuccessfulAt": manifest.get("createdAt"),
+            "nextDueAt": _iso(next_due),
+            "invalidBackupCount": invalid_count,
+            "reason": reason,
+            "latestBackupFilename": latest.get("backupFilename"),
+            "latestLedgerSha256": manifest.get("ledgerSha256"),
+            "sourceEvidenceStatus": (
+                source_evidence.get("coverageStatus")
+                if source_evidence
+                else "legacy_ledger_only"
+            ),
+            "sourceEvidenceDocuments": source_evidence.get("includedDocuments", 0),
+            "sourceEvidenceFiles": source_evidence.get("includedFiles", 0),
+            "sourceEvidenceBytes": source_evidence.get("includedBytes", 0),
+            "sourceEvidenceGaps": source_evidence.get("gapCount", 0),
+        }
+
+    def run_due(self, actor: str = "local_worker") -> Dict[str, Any]:
+        schedule = self.schedule_status()
+        if not schedule.get("due"):
+            return {
+                "success": True,
+                "status": "not_due",
+                "schedule": schedule,
+                "externalSubmission": "not_executed",
+            }
+        owner_token = f"{str(actor or 'local_worker')[:80]}:{os.getpid()}:{uuid.uuid4().hex}"
+        lease = self.ledger.acquire_runtime_lease(
+            SCHEDULED_BACKUP_LEASE_NAME,
+            owner_token,
+            ttl_seconds=1800,
+            metadata={"actor": str(actor or "local_worker")[:200]},
+        )
+        if not lease.get("acquired"):
+            return {
+                "success": True,
+                "status": "already_running",
+                "schedule": schedule,
+                "runtimeLease": lease.get("lease"),
+                "externalSubmission": "not_executed",
+            }
+        try:
+            backup = self.create_backup(
+                note="Automatic scheduled source-complete recovery package.",
+                require_complete_source_evidence=_bool_config(
+                    self.config,
+                    "backup_require_complete_source_evidence",
+                    "fab_backup_require_complete_source_evidence",
+                    default=True,
+                ),
+                actor=actor,
+            )
+            return {
+                "success": True,
+                "status": "created",
+                "backup": backup,
+                "schedule": self.schedule_status(),
+                "runtimeLease": lease.get("lease"),
+                "externalSubmission": "not_executed",
+            }
+        finally:
+            self.ledger.release_runtime_lease(
+                SCHEDULED_BACKUP_LEASE_NAME,
+                owner_token,
+            )
 
     def restore_backup(self, backup_path: str, confirmation: str) -> Dict[str, Any]:
         if confirmation != RESTORE_CONFIRMATION_PHRASE:
@@ -240,21 +446,290 @@ class LocalBackupService:
             raise ValueError("Backup path must be inside the configured FAB backup directory")
         return candidate
 
+    def _snapshot_source_evidence(
+        self,
+        ledger_snapshot_path: str,
+        temp_dir: str,
+        require_complete: bool,
+    ) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        connection = sqlite3.connect(ledger_snapshot_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT id, storage_path, content_sha256, original_filename
+                FROM bookkeeping_documents
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+
+        trusted_roots = self._source_evidence_roots()
+        entries = []
+        gaps = []
+        evidence_files: Dict[str, str] = {}
+        archive_by_sha: Dict[str, str] = {}
+        bytes_by_archive: Dict[str, int] = {}
+
+        for row in rows:
+            document_id = int(row["id"])
+            source_path = str(row["storage_path"] or "").strip()
+            if not source_path:
+                gaps.append({"documentId": document_id, "reason": "storage_path_missing"})
+                continue
+            resolved_path = os.path.abspath(os.path.expanduser(source_path))
+            if not _path_within_roots(resolved_path, trusted_roots):
+                gaps.append({"documentId": document_id, "reason": "outside_trusted_source_roots"})
+                continue
+            if not os.path.isfile(resolved_path):
+                gaps.append({"documentId": document_id, "reason": "source_file_missing"})
+                continue
+            file_size = os.path.getsize(resolved_path)
+            if file_size > MAX_BACKUP_EVIDENCE_FILE_BYTES:
+                gaps.append({"documentId": document_id, "reason": "source_file_too_large"})
+                continue
+
+            captured_path = os.path.join(temp_dir, f"source-evidence-{document_id}.bin")
+            actual_sha256, captured_bytes = _copy_with_sha256(
+                resolved_path,
+                captured_path,
+            )
+            expected_sha256 = str(row["content_sha256"] or "").strip().lower()
+            if expected_sha256 and not _valid_sha256(expected_sha256):
+                os.remove(captured_path)
+                raise ValueError(
+                    f"Document #{document_id} has an invalid source SHA-256."
+                )
+            if expected_sha256 and expected_sha256 != actual_sha256:
+                os.remove(captured_path)
+                raise ValueError(
+                    f"Document #{document_id} source evidence no longer matches its ledger SHA-256."
+                )
+
+            archive_path = archive_by_sha.get(actual_sha256)
+            if archive_path:
+                os.remove(captured_path)
+            else:
+                extension = _safe_extension(
+                    row["original_filename"] or resolved_path
+                )
+                archive_path = (
+                    f"{SOURCE_EVIDENCE_PREFIX}{actual_sha256[:2]}/"
+                    f"{actual_sha256}{extension}"
+                )
+                archive_by_sha[actual_sha256] = archive_path
+                evidence_files[archive_path] = captured_path
+                bytes_by_archive[archive_path] = captured_bytes
+            entries.append({
+                "documentId": document_id,
+                "archivePath": archive_path,
+                "sha256": actual_sha256,
+                "bytes": captured_bytes,
+                "originalFilename": os.path.basename(
+                    str(row["original_filename"] or resolved_path)
+                ),
+            })
+
+        if require_complete and gaps:
+            raise ValueError(
+                "Source-complete backup blocked because "
+                f"{len(gaps)} document(s) have missing or unsafe source evidence."
+            )
+        coverage_status = "complete" if len(entries) == len(rows) else "incomplete"
+        return {
+            "coverageStatus": coverage_status,
+            "totalDocuments": len(rows),
+            "includedDocuments": len(entries),
+            "includedFiles": len(evidence_files),
+            "includedBytes": sum(bytes_by_archive.values()),
+            "gapCount": len(gaps),
+            "gaps": gaps,
+            "entries": entries,
+        }, evidence_files
+
+    def _source_evidence_roots(self) -> list:
+        roots = [os.path.dirname(self.ledger_path)]
+        for key in (
+            "fab_local_intake_paths",
+            "operations_local_intake_paths",
+            "local_intake_paths",
+            "operations_scanner_folder",
+            "operations_scanner_watch_folder",
+            "scanner_folder",
+            "scanner_watch_folder",
+        ):
+            value = _config_value(self.config, key)
+            roots.extend(_path_values(value))
+        return sorted({
+            os.path.abspath(os.path.expanduser(root))
+            for root in roots
+            if str(root or "").strip()
+        })
+
+    def _backup_paths(self, limit: int) -> list:
+        if not os.path.isdir(self.backup_dir):
+            return []
+        paths = [
+            os.path.join(self.backup_dir, name)
+            for name in os.listdir(self.backup_dir)
+            if name.lower().endswith(".zip")
+        ]
+        paths.sort(
+            key=lambda path: os.path.getmtime(path)
+            if os.path.exists(path)
+            else 0,
+            reverse=True,
+        )
+        return paths[: _bounded_limit(limit)]
+
     @staticmethod
-    def _validate_archive_names(names: Any) -> None:
-        allowed = {BACKUP_MANIFEST_NAME, BACKUP_LEDGER_NAME}
-        normalized_names = set()
+    def _validate_member_names(names: Any) -> None:
+        if len(names) > MAX_BACKUP_ARCHIVE_FILES:
+            raise ValueError("Backup archive contains too many files")
+        if len(names) != len(set(names)):
+            raise ValueError("Backup archive contains duplicate file names")
         for name in names:
             normalized = os.path.normpath(str(name)).replace("\\", "/")
             if normalized.startswith("../") or normalized == ".." or os.path.isabs(str(name)):
                 raise ValueError("Backup archive contains an unsafe path")
-            normalized_names.add(normalized.rstrip("/"))
+            if normalized != str(name).replace("\\", "/"):
+                raise ValueError("Backup archive contains a non-canonical path")
+
+    @staticmethod
+    def _validate_expected_archive_names(names: Any, allowed: set) -> None:
+        normalized_names = {str(name).replace("\\", "/").rstrip("/") for name in names}
         unexpected = normalized_names - allowed
         if unexpected:
             raise ValueError(f"Backup archive contains unexpected files: {sorted(unexpected)}")
         missing = allowed - normalized_names
         if missing:
             raise ValueError(f"Backup archive is missing required files: {sorted(missing)}")
+
+    @staticmethod
+    def _validate_source_evidence_manifest(
+        manifest: Dict[str, Any],
+        archive: zipfile.ZipFile,
+    ) -> set:
+        source_evidence = manifest.get("sourceEvidence")
+        if not isinstance(source_evidence, dict):
+            raise ValueError("Recovery package has no source-evidence manifest")
+        entries = source_evidence.get("entries")
+        gaps = source_evidence.get("gaps")
+        if not isinstance(entries, list) or not isinstance(gaps, list):
+            raise ValueError("Recovery package source-evidence manifest is invalid")
+        coverage_status = str(source_evidence.get("coverageStatus") or "")
+        if coverage_status not in {"complete", "incomplete"}:
+            raise ValueError("Recovery package source-evidence coverage status is invalid")
+
+        declared_files: Dict[str, Dict[str, Any]] = {}
+        document_ids = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("Recovery package has an invalid source-evidence entry")
+            try:
+                document_id = int(entry.get("documentId"))
+                declared_bytes = int(entry.get("bytes"))
+            except (TypeError, ValueError):
+                raise ValueError("Recovery package source-evidence entry has invalid numeric fields") from None
+            archive_path = str(entry.get("archivePath") or "").replace("\\", "/")
+            sha256 = str(entry.get("sha256") or "").strip().lower()
+            if document_id <= 0 or document_id in document_ids:
+                raise ValueError("Recovery package has duplicate or invalid document evidence")
+            if (
+                not archive_path.startswith(SOURCE_EVIDENCE_PREFIX)
+                or os.path.normpath(archive_path).replace("\\", "/") != archive_path
+            ):
+                raise ValueError("Recovery package has an unsafe source-evidence path")
+            if not _valid_sha256(sha256) or declared_bytes < 0:
+                raise ValueError("Recovery package source-evidence checksum is invalid")
+            expected_path_prefix = (
+                f"{SOURCE_EVIDENCE_PREFIX}{sha256[:2]}/{sha256}"
+            )
+            if (
+                not archive_path.startswith(f"{expected_path_prefix}.")
+                or not re.fullmatch(
+                    rf"{re.escape(expected_path_prefix)}\.[a-z0-9]{{1,16}}",
+                    archive_path,
+                )
+            ):
+                raise ValueError(
+                    "Recovery package source-evidence path is not content addressed"
+                )
+            existing = declared_files.get(archive_path)
+            if existing and (
+                existing["sha256"] != sha256
+                or existing["bytes"] != declared_bytes
+            ):
+                raise ValueError("Recovery package has conflicting source-evidence declarations")
+            document_ids.add(document_id)
+            declared_files[archive_path] = {
+                "sha256": sha256,
+                "bytes": declared_bytes,
+            }
+
+        gap_document_ids = set()
+        for gap in gaps:
+            if not isinstance(gap, dict):
+                raise ValueError("Recovery package has an invalid source-evidence gap")
+            try:
+                gap_document_id = int(gap.get("documentId"))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "Recovery package source-evidence gap has an invalid document id"
+                ) from None
+            reason = str(gap.get("reason") or "").strip()
+            if (
+                gap_document_id <= 0
+                or gap_document_id in document_ids
+                or gap_document_id in gap_document_ids
+                or not reason
+            ):
+                raise ValueError(
+                    "Recovery package has duplicate or invalid source-evidence gaps"
+                )
+            gap_document_ids.add(gap_document_id)
+
+        included_documents = int(source_evidence.get("includedDocuments") or 0)
+        included_files = int(source_evidence.get("includedFiles") or 0)
+        included_bytes = int(source_evidence.get("includedBytes") or 0)
+        total_documents = int(source_evidence.get("totalDocuments") or 0)
+        gap_count = int(source_evidence.get("gapCount") or 0)
+        if included_documents != len(entries):
+            raise ValueError("Recovery package source-evidence document count is invalid")
+        if included_files != len(declared_files):
+            raise ValueError("Recovery package source-evidence file count is invalid")
+        if gap_count != len(gaps):
+            raise ValueError("Recovery package source-evidence gap count is invalid")
+        if included_documents + gap_count != total_documents:
+            raise ValueError("Recovery package source-evidence coverage count is invalid")
+        if coverage_status == "complete" and gap_count:
+            raise ValueError("Recovery package claims complete evidence with documented gaps")
+        if coverage_status == "incomplete" and not gap_count:
+            raise ValueError("Recovery package claims incomplete evidence without documented gaps")
+
+        actual_total_bytes = 0
+        for archive_path, declaration in declared_files.items():
+            try:
+                info = archive.getinfo(archive_path)
+            except KeyError:
+                raise ValueError(
+                    f"Recovery package is missing source evidence: {archive_path}"
+                ) from None
+            if info.file_size != declaration["bytes"]:
+                raise ValueError("Recovery package source-evidence size does not match manifest")
+            if info.file_size > MAX_BACKUP_EVIDENCE_FILE_BYTES:
+                raise ValueError("Recovery package contains an oversized source-evidence file")
+            digest = hashlib.sha256()
+            with archive.open(archive_path) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != declaration["sha256"]:
+                raise ValueError("Recovery package source-evidence checksum does not match manifest")
+            actual_total_bytes += info.file_size
+        if actual_total_bytes != included_bytes:
+            raise ValueError("Recovery package source-evidence byte count is invalid")
+        return set(declared_files)
 
     def _safe_config_summary(self) -> Dict[str, Any]:
         keys = (
@@ -304,6 +779,107 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_with_sha256(source_path: str, destination_path: str) -> Tuple[str, int]:
+    digest = hashlib.sha256()
+    byte_count = 0
+    with open(source_path, "rb") as source, open(destination_path, "wb") as destination:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+            destination.write(chunk)
+            byte_count += len(chunk)
+    return digest.hexdigest(), byte_count
+
+
+def _file_signature(path: str) -> Tuple[int, int, int]:
+    stat = os.stat(path)
+    return (
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
+    )
+
+
+def _valid_sha256(value: Any) -> bool:
+    normalized = str(value or "").strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{64}", normalized))
+
+
+def _safe_extension(value: Any) -> str:
+    extension = os.path.splitext(str(value or ""))[1].lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,16}", extension):
+        return extension
+    return ".bin"
+
+
+def _path_values(value: Any) -> list:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item or "").strip()
+        ]
+    return [
+        item.strip()
+        for item in re.split(r"[,;\n]+", str(value))
+        if item.strip()
+    ]
+
+
+def _path_within_roots(path: str, roots: Any) -> bool:
+    for root in roots:
+        try:
+            if os.path.commonpath([path, root]) == root:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _bool_config(
+    config: Dict[str, Any],
+    *keys: str,
+    default: bool = False,
+) -> bool:
+    value = _config_value(config, *keys)
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _positive_float_config(
+    config: Dict[str, Any],
+    *keys: str,
+    default: float,
+) -> float:
+    value = _config_value(config, *keys)
+    try:
+        parsed = float(value) if value not in (None, "") else float(default)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(1.0, min(parsed, 24.0 * 365.0))
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _bounded_limit(value: Any) -> int:

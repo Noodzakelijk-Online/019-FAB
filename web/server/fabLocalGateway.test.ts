@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createFabBackup,
   fabLocalRequest,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
@@ -74,6 +75,39 @@ describe("FAB local API gateway", () => {
       "/api/sources": { sources: [{ source_type: "google_drive", status: "connected", updated_at: "2026-07-15T08:00:00Z" }] },
       "/api/workflows": { workflowRuns: [{ id: 10, status: "completed" }] },
       "/api/workflows/recovery": { status: "due", dueCount: 1, candidates: [{ workflowRunId: 9 }] },
+      "/api/backups": {
+        backupDir: "C:\\private\\backups",
+        restoreConfirmationPhrase: "RESTORE FAB LOCAL LEDGER",
+        schedule: {
+          status: "current",
+          due: false,
+          intervalHours: 24,
+          lastSuccessfulAt: "2026-07-25T08:00:00Z",
+          nextDueAt: "2026-07-26T08:00:00Z",
+          latestBackupFilename: "fab-recovery-package_20260725.zip",
+          latestLedgerSha256: "a".repeat(64),
+          sourceEvidenceStatus: "complete",
+          sourceEvidenceDocuments: 18,
+          sourceEvidenceFiles: 18,
+          sourceEvidenceBytes: 4096,
+          sourceEvidenceGaps: 0,
+        },
+        backups: [{
+          backupFilename: "fab-recovery-package_20260725.zip",
+          backupPath: "C:\\private\\backups\\fab-recovery-package_20260725.zip",
+          status: "valid",
+          createdAt: "2026-07-25T08:00:00Z",
+          ledgerBytes: 2048,
+          ledgerSha256: "a".repeat(64),
+          sizeBytes: 6144,
+          format: "fab-recovery-package-v2",
+          sourceEvidenceStatus: "complete",
+          sourceEvidenceDocuments: 18,
+          sourceEvidenceFiles: 18,
+          sourceEvidenceBytes: 4096,
+          sourceEvidenceGaps: 0,
+        }],
+      },
       "/api/notifications": { notifications: [{ id: 4, severity: "medium" }] },
       "/api/reconciliation": { reconciliationMatches: [{ id: 3, status: "needs_review" }] },
       "/api/audit": { auditEvents: [{ id: 2, action: "local_api.source.upsert" }] },
@@ -242,6 +276,18 @@ describe("FAB local API gateway", () => {
       }),
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
+    expect(result.backups).toMatchObject({
+      schedule: {
+        status: "current",
+        sourceEvidenceStatus: "complete",
+        sourceEvidenceDocuments: 18,
+      },
+      backups: [expect.objectContaining({
+        backupFilename: "fab-recovery-package_20260725.zip",
+        status: "valid",
+        sourceEvidenceFiles: 18,
+      })],
+    });
     expect(result.delivery).toMatchObject({
       count: 1,
       summary: { needsAttachmentVerification: 1 },
@@ -339,6 +385,8 @@ describe("FAB local API gateway", () => {
     expect(serialized).not.toContain("omit duplicate OCR");
     expect(serialized).not.toContain("duplicateFingerprint");
     expect(serialized).not.toContain("correctedData");
+    expect(serialized).not.toContain("C:\\private\\backups");
+    expect(serialized).not.toContain("RESTORE FAB LOCAL LEDGER");
   });
 
   it("does not turn unavailable resources into reassuring zeroes", async () => {
@@ -414,6 +462,61 @@ describe("FAB local API gateway", () => {
       path: "/api/workflows/recovery/run-due",
       body: { limit: 2, actor: "operator-12" },
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates only a source-complete backup through the fixed local endpoint", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        status: "created",
+        backupFilename: "fab-recovery-package.zip",
+        backupPath: "C:\\private\\backups\\fab-recovery-package.zip",
+        manifest: {
+          format: "fab-recovery-package-v2",
+          createdAt: "2026-07-25T10:00:00Z",
+          ledgerBytes: 2048,
+          ledgerSha256: "b".repeat(64),
+          configSummary: { backupDir: "C:\\private\\backups" },
+          sourceEvidence: {
+            coverageStatus: "complete",
+            totalDocuments: 18,
+            includedDocuments: 18,
+            includedFiles: 18,
+            includedBytes: 4096,
+            gapCount: 0,
+            entries: [{ originalFilename: "private.pdf" }],
+          },
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createFabBackup("operator-15");
+
+    expect(result).toMatchObject({
+      success: true,
+      status: "created",
+      backupFilename: "fab-recovery-package.zip",
+      manifest: {
+        format: "fab-recovery-package-v2",
+        sourceEvidence: {
+          coverageStatus: "complete",
+          includedDocuments: 18,
+          gapCount: 0,
+        },
+      },
+    });
+    const [input, init] = fetchMock.mock.calls[0];
+    expect(new URL(String(input)).pathname).toBe("/api/backups");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      actor: "operator-15",
+      note: "Created from the FAB operator dashboard.",
+      requireCompleteSourceEvidence: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("C:\\private\\backups");
+    expect(JSON.stringify(result)).not.toContain("private.pdf");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

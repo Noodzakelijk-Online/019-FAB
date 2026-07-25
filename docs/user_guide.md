@@ -285,7 +285,7 @@ Settings for backup and restore.
 *   `backup_paths`: Comma-separated list of files/directories to include in backups. (e.g., `data,config/config.ini`)
 *   `backup_config`: JSON string defining backup type. Example: `{"type": "zip"}`
 
-The local operations dashboard has a ledger-specific backup flow under `[operations] backup_dir`. It snapshots the SQLite ledger with a manifest and checksum, records audit events, creates a pre-restore backup, and requires the exact restore phrase before replacing the active ledger.
+The local operations dashboard has a ledger-specific recovery flow under `[operations] backup_dir`. Version 2 recovery packages contain a SQLite snapshot plus content-addressed copies of every safe source document, with manifest counts and SHA-256 verification for the ledger and each unique source file. `worker_create_scheduled_backups=true` checks the schedule during each worker cycle; `backup_schedule_interval_hours` defaults to 24. Keep `backup_require_complete_source_evidence=true` so missing, unsafe, or checksum-drifted evidence fails closed instead of producing a false-complete package. The React operator dashboard shows redacted package health and can create a strict package without exposing filesystem paths. Restore remains in the local recovery console, creates a pre-restore package, and requires the exact phrase before replacing the active ledger.
 
 ### 4.17. `[error_handling]` Section
 

@@ -25,6 +25,8 @@ class TestOperationsExportWorker(unittest.TestCase):
             "worker_run_once": True,
             "worker_process_approved_postings": True,
             "worker_process_due_retries": True,
+            "worker_create_scheduled_backups": True,
+            "backup_require_complete_source_evidence": False,
             "worker_generate_scheduled_reports": True,
             "report_schedule_frequency": "monthly",
             "report_schedule_period_mode": "current_year_to_date",
@@ -88,6 +90,7 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_worker.connector_intake_cycle", audit_actions)
             self.assertIn("local_autonomy.cycle_completed", audit_actions)
             self.assertIn("local_worker.approved_export_cycle", audit_actions)
+            self.assertIn("local_worker.scheduled_backup_cycle", audit_actions)
             self.assertIn("local_worker.scheduled_report_cycle", audit_actions)
             self.assertIn("local_worker.compliance_cycle", audit_actions)
             self.assertIn("local_worker.notification_cycle", audit_actions)
@@ -211,6 +214,7 @@ class TestOperationsExportWorker(unittest.TestCase):
                 "worker_run_local_autonomy": False,
                 "worker_sync_source_connectors": False,
                 "worker_recover_workflows": False,
+                "worker_create_scheduled_backups": False,
                 "worker_generate_scheduled_reports": False,
                 "worker_refresh_notifications": False,
                 "worker_assess_compliance": False,
@@ -234,6 +238,34 @@ class TestOperationsExportWorker(unittest.TestCase):
                 "saved-after-worker-started",
             )
             self.assertEqual(worker.config["waveapps_business_id"], "business-1")
+
+    def test_scheduled_backup_failure_does_not_suppress_later_worker_stages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config["worker_run_legacy_workflow"] = False
+            worker = FabWorker(config)
+
+            with patch.object(worker, "install_signal_handlers"), patch(
+                "src.worker.scheduler.LocalBackupService.run_due",
+                side_effect=RuntimeError("backup disk unavailable"),
+            ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
+                worker,
+                "_process_scheduled_reports",
+            ) as scheduled_reports, patch.object(
+                worker,
+                "_process_operations_exports",
+            ) as exports:
+                worker.run()
+
+            autonomy.assert_called_once()
+            scheduled_reports.assert_called_once()
+            exports.assert_called_once()
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            failed_stages = [
+                event for event in ledger.list_audit_events(limit=30)
+                if event["action"] == "local_worker.stage_failed"
+            ]
+            self.assertEqual(failed_stages[0]["details"]["stage"], "scheduled_backup")
 
     def test_scheduled_report_failure_does_not_suppress_export_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:

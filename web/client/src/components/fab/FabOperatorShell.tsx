@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   ChevronLeft,
+  DatabaseBackup,
   FileWarning,
   FileCheck2,
   History,
@@ -24,6 +25,7 @@ const navigation = [
   { id: "automation", label: "Automation", labelNl: "Automatisering", icon: FileWarning },
   { id: "audit", label: "Activity", labelNl: "Activiteit", icon: History },
   { id: "recovery", label: "Recovery", labelNl: "Herstel", icon: RotateCcw },
+  { id: "backups", label: "Backups", labelNl: "Back-ups", icon: DatabaseBackup },
   { id: "delivery", label: "Delivery", labelNl: "Levering", icon: SendToBack },
   { id: "connections", label: "Connections", labelNl: "Koppelingen", icon: PlugZap },
 ];

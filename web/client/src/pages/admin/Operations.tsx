@@ -8,6 +8,7 @@ import { FabConnections } from "@/components/fab/FabConnections";
 import { FabControlOverview } from "@/components/fab/FabControlOverview";
 import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
 import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
+import { FabBackupCenter } from "@/components/fab/FabBackupCenter";
 import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
 import { FabGmailSetupDrawer } from "@/components/fab/FabGmailSetupDrawer";
 import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupDrawer";
@@ -70,6 +71,22 @@ export default function AdminOperations() {
       if (pendingCommand) setLastCommand({ id: pendingCommand, status: "failed", startedAt: commandStartedAt, finishedAt: new Date().toISOString() });
       setPendingCommand(null);
       setCommandStartedAt(null);
+    },
+  });
+  const createBackup = trpc.fab.createBackup.useMutation({
+    onSuccess: async (result) => {
+      const evidence = asRecord(asRecord(result.manifest).sourceEvidence);
+      toast.success(copy(
+        `Verified recovery package created for ${count(evidence.includedDocuments)} documents.`,
+        `Geverifieerd herstelpakket gemaakt voor ${count(evidence.includedDocuments)} documenten.`,
+      ));
+      await controlCenter.refetch();
+    },
+    onError: (error) => {
+      toast.error(error.message || copy(
+        "Verified recovery package could not be created.",
+        "Geverifieerd herstelpakket kon niet worden gemaakt.",
+      ));
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
@@ -291,6 +308,14 @@ export default function AdminOperations() {
             workflowResource={data?.resourceStates.workflows}
             search={search}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+          />
+          <FabBackupCenter
+            backups={data?.backups || { backups: [], schedule: {} }}
+            resource={data?.resourceStates.backups}
+            connected={connected}
+            pending={createBackup.isPending}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            onCreate={() => createBackup.mutate()}
           />
           <FabDeliveryQueue
             delivery={data?.delivery || { status: {}, summary: {}, workOrders: [], count: null }}

@@ -6642,7 +6642,15 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def create_backup():
         payload = request.get_json(silent=True) or {}
         try:
-            return jsonify(LocalBackupService(ledger, config).create_backup(note=payload.get("note")))
+            return jsonify(LocalBackupService(ledger, config).create_backup(
+                note=payload.get("note"),
+                require_complete_source_evidence=(
+                    payload.get("requireCompleteSourceEvidence", True) is not False
+                ),
+                actor=str(payload.get("actor") or "fab_local_api")[:200],
+            ))
+        except ValueError as exc:
+            return jsonify({"success": False, "status": "blocked", "error": str(exc)}), 409
         except Exception as exc:
             return jsonify({"success": False, "status": "failed", "error": str(exc)}), 500
 
@@ -6651,6 +6659,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         try:
             session["fab_last_backup_summary"] = LocalBackupService(ledger, config).create_backup(
                 note="Created from FAB dashboard.",
+                require_complete_source_evidence=True,
+                actor="fab_local_dashboard",
             )
         except Exception as exc:
             session["fab_last_backup_summary"] = {

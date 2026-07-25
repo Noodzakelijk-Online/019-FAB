@@ -252,8 +252,9 @@ The current repository already contains many module-level foundations for this v
 ### Enhancement Gaps
 
 - Processing should move toward queued jobs and workers.
-- Backups need to cover database state, original documents, generated artifacts, and configuration.
-- Restore operations need safety checks, audit logging, and user-facing status.
+- Source-complete version 2 recovery packages now cover the operations ledger and every checksum-matching original document, fail closed on evidence gaps, run on a due-aware worker schedule, and expose redacted status plus strict creation in the operator dashboard.
+- Generated report/export artifacts and a sanitized configuration snapshot still need explicit package coverage.
+- Ledger restore has confirmation, integrity checks, pre-restore backup, and audit logging; automated relocation/restoration of source-document bytes into a new storage root still needs a separately approved recovery workflow.
 - Durable step evidence now covers autonomous actions and connector sources. Governed recovery can create a linked attempt for failed read-only connector sources or the exact failed low-risk autonomous step. Automatic scheduling, process-level crash continuation, and dependency-aware resume across multiple steps remain open.
 
 ## Recommended Delivery Sequence

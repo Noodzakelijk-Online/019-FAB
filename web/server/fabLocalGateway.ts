@@ -70,6 +70,10 @@ export type FabControlCenter = {
   connections: JsonRecord[];
   workflows: JsonRecord[];
   recovery: JsonRecord;
+  backups: {
+    backups: JsonRecord[];
+    schedule: JsonRecord;
+  };
   notifications: JsonRecord[];
   reconciliation: JsonRecord[];
   activity: JsonRecord[];
@@ -93,6 +97,7 @@ const READ_PATHS = {
   sources: "/api/sources?limit=50",
   workflows: "/api/workflows?limit=10",
   recovery: "/api/workflows/recovery?limit=10",
+  backups: "/api/backups?limit=5",
   notifications: "/api/notifications?limit=10",
   reconciliation: "/api/reconciliation?limit=10",
   activity: "/api/audit?limit=12",
@@ -312,6 +317,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     ],
     workflows: arrayValue(resources.workflows?.workflowRuns),
     recovery: resources.recovery || {},
+    backups: projectBackups(resources.backups),
     notifications: arrayValue(resources.notifications?.notifications),
     reconciliation: arrayValue(resources.reconciliation?.reconciliationMatches),
     activity: arrayValue(resources.activity?.auditEvents),
@@ -339,6 +345,35 @@ export async function runFabOperatorCommand(
     method: "POST",
     body: JSON.stringify({ ...command.body, ...payload, actor: safeActor }),
   });
+}
+
+export async function createFabBackup(actor: string): Promise<JsonRecord> {
+  const response = await fabLocalRequest("/api/backups", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+      note: "Created from the FAB operator dashboard.",
+      requireCompleteSourceEvidence: true,
+    }),
+  }, { timeoutMs: 120_000 });
+  const manifest = selectFields(response.manifest, [
+    "createdAt",
+    "format",
+    "ledgerBytes",
+    "ledgerSha256",
+  ]);
+  manifest.sourceEvidence = selectFields(asRecord(response.manifest)?.sourceEvidence, [
+    "coverageStatus",
+    "gapCount",
+    "includedBytes",
+    "includedDocuments",
+    "includedFiles",
+    "totalDocuments",
+  ]);
+  return {
+    ...selectFields(response, ["backupFilename", "status", "success"]),
+    manifest,
+  };
 }
 
 export async function uploadFabIntakeFile(input: {
@@ -503,6 +538,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     connections: [],
     workflows: [],
     recovery: {},
+    backups: { backups: [], schedule: {} },
     notifications: [],
     reconciliation: [],
     activity: [],
@@ -547,6 +583,43 @@ function projectDeliveryWorkOrder(value: JsonRecord): JsonRecord {
     wave,
     archivePlan,
     reviews,
+  };
+}
+
+function projectBackups(value: unknown): FabControlCenter["backups"] {
+  const payload = asRecord(value) || {};
+  return {
+    backups: arrayValue(payload.backups).map((backup) => selectFields(backup, [
+      "backupFilename",
+      "createdAt",
+      "format",
+      "ledgerBytes",
+      "ledgerSha256",
+      "sizeBytes",
+      "sourceEvidenceBytes",
+      "sourceEvidenceDocuments",
+      "sourceEvidenceFiles",
+      "sourceEvidenceGaps",
+      "sourceEvidenceStatus",
+      "status",
+    ])),
+    schedule: selectFields(payload.schedule, [
+      "due",
+      "intervalHours",
+      "invalidBackupCount",
+      "lastSuccessfulAt",
+      "latestBackupFilename",
+      "latestLedgerSha256",
+      "nextDueAt",
+      "reason",
+      "requireCompleteSourceEvidence",
+      "sourceEvidenceBytes",
+      "sourceEvidenceDocuments",
+      "sourceEvidenceFiles",
+      "sourceEvidenceGaps",
+      "sourceEvidenceStatus",
+      "status",
+    ]),
   };
 }
 
