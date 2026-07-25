@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 
+from src.operations.local_anomalies import LocalLedgerAnomalyService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_master_ledger import LocalMasterLedgerService
@@ -18,7 +19,9 @@ class LocalExceptionQueueService:
         issues = [
             *self._master_ledger_row_issues(limit=bounded_limit),
             *list(health.get("issues") or []),
-        ][:bounded_limit]
+            *LocalLedgerAnomalyService(self.ledger, self.config).list_issues(limit=bounded_limit),
+        ]
+        issues = _prioritized_issues(issues)[:bounded_limit]
         exceptions = [
             self._exception_from_issue(issue, include_entities=include_entities)
             for issue in issues
@@ -258,6 +261,9 @@ def _next_action_for_issue(issue: Dict[str, Any]) -> str:
         "master_ledger_record_review": "Open the normalized bookkeeping record and resolve its review, failed, or duplicate state.",
         "master_ledger_reconciliation_blocker": "Open reconciliation evidence and resolve the missing receipt, unmatched, or needs-review state.",
         "master_ledger_export_blocker": "Open the blocked export or record and regenerate, reject, or reroute only after fixing the source cause.",
+        "vendor_amount_anomaly": "Compare the amount with source evidence and the vendor history before approving or correcting the record.",
+        "category_amount_anomaly": "Compare the amount with source evidence and similar category records before approving or correcting it.",
+        "future_dated_record": "Verify the source date and correct the record before approval or downstream delivery.",
         "stale_workflow_run": "Check the running process or lock before starting another autonomous cycle.",
         "failed_workflow_run": "Review workflow error details and rerun only the safe local cycle.",
         "master_ledger_blockers": "Open the master-ledger projection and resolve blocked rows before close/export.",
@@ -464,3 +470,11 @@ def _bounded_limit(value: Any) -> int:
     except (TypeError, ValueError):
         parsed = 50
     return max(1, min(parsed, 500))
+
+
+def _prioritized_issues(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    return sorted(
+        issues,
+        key=lambda issue: severity_order.get(str(issue.get("severity") or ""), 3),
+    )
