@@ -115,6 +115,9 @@ class TestConfigLoader(unittest.TestCase):
         self.assertFalse(config["gmail_enabled"])
         self.assertFalse(config["google_drive_enabled"])
         self.assertEqual(config["google_photos_mode"], "picker")
+        self.assertTrue(config["freshdesk_financial_filter_enabled"])
+        self.assertEqual(config["freshdesk_ticket_statuses"], "2,3")
+        self.assertTrue(config["freshdesk_pdf_only"])
 
     def test_duplicate_option_names_do_not_overwrite_earlier_legacy_aliases(self):
         with tempfile.TemporaryDirectory() as temp_dir:

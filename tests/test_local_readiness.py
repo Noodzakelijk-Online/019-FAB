@@ -79,6 +79,18 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertEqual(summary["localAccess"]["ngrokSafety"], "blocked_without_token")
             self.assertIn("remote_api_without_token", {issue["type"] for issue in summary["issues"]})
 
+    def test_freshdesk_readiness_accepts_repository_025_api_url_form(self):
+        summary = LocalReadinessService({
+            "freshdesk_api_key": "freshdesk-secret",
+            "freshdesk_api_url": "https://example.freshdesk.com/api",
+        }).summarize()
+        sources = {item["id"]: item for item in summary["sources"]}
+        credentials = {item["id"]: item for item in summary["credentials"]}
+
+        self.assertTrue(sources["freshdesk"]["ready"])
+        self.assertTrue(credentials["freshdesk_api_url"]["configured"])
+        self.assertFalse(credentials["freshdesk_api_url"]["secret"])
+
     def test_drive_readiness_blocks_sync_during_oauth_client_rotation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "drive.json")

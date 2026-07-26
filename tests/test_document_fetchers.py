@@ -374,15 +374,211 @@ class TestDocumentFetchers(unittest.TestCase):
         }
         conversations_response = MagicMock()
         conversations_response.json.return_value = []
-        attachment_response = MagicMock(content=b"dummy_pdf_content")
+        attachment_response = MagicMock()
+        attachment_response.headers = {}
+        attachment_response.iter_content.return_value = [b"dummy_pdf_content"]
         mock_requests_get.side_effect = [mock_response, conversations_response, attachment_response]
 
         fetcher = FreshdeskFetcher(self.config)
         documents = fetcher.fetch_documents()
         self.assertEqual(len(documents), 1)
         self.assertEqual(documents[0]["original_filename"], "report.pdf")
+        self.assertEqual(documents[0]["metadata"]["source_provenance"], {})
+        self.assertIsNone(fetcher.last_run["sourceProvenance"])
         self.assertTrue(os.path.exists(documents[0]["local_path"]))
         os.remove(documents[0]["local_path"])
+
+    @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
+    def test_freshdesk_api_url_compatibility_is_normalized(self, mock_requests_get):
+        listing_response = MagicMock()
+        listing_response.json.return_value = []
+        mock_requests_get.return_value = listing_response
+
+        fetcher = FreshdeskFetcher({
+            **self.config,
+            "freshdesk_domain": "",
+            "freshdesk_api_url": "https://example.freshdesk.com/api",
+        })
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(documents, [])
+        self.assertEqual(
+            mock_requests_get.call_args.args[0],
+            "https://example.freshdesk.com/api/v2/tickets",
+        )
+
+    @patch("src.document_fetchers.freshdesk_fetcher.requests.put")
+    @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
+    def test_freshdesk_financial_profile_retains_description_and_verified_pdf(
+        self,
+        mock_requests_get,
+        mock_requests_put,
+    ):
+        listing_response = MagicMock()
+        listing_response.json.return_value = {"results": [{"id": 42}]}
+        detail_response = MagicMock()
+        detail_response.json.return_value = {
+            "id": 42,
+            "subject": "Uw factuur voor juni",
+            "description": "<p>Invoice 2026-42 voor onderhoud.</p>",
+            "description_text": "Invoice 2026-42 voor onderhoud.",
+            "status": 2,
+            "created_at": "2026-07-20T09:00:00Z",
+            "updated_at": "2026-07-21T10:00:00Z",
+            "tags": ["bookkeeping"],
+            "attachments": [{
+                "id": 701,
+                "name": "invoice-42.pdf",
+                "content_type": "application/pdf",
+                "size": len(b"%PDF-1.7\ninvoice evidence"),
+                "attachment_url": "https://example.com/invoice-42.pdf",
+                "created_at": "2026-07-20T09:05:00Z",
+            }],
+        }
+        conversations_response = MagicMock()
+        conversations_response.json.return_value = []
+        attachment_response = MagicMock()
+        attachment_response.headers = {}
+        attachment_response.iter_content.return_value = [
+            b"%PDF-1.7\ninvoice evidence"
+        ]
+        mock_requests_get.side_effect = [
+            listing_response,
+            detail_response,
+            conversations_response,
+            attachment_response,
+        ]
+        config = {
+            **self.config,
+            "freshdesk_financial_filter_enabled": True,
+            "freshdesk_financial_keywords": "factuur,invoice",
+            "freshdesk_include_ticket_description": True,
+            "freshdesk_pdf_only": True,
+        }
+
+        fetcher = FreshdeskFetcher(config)
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(len(documents), 2)
+        by_role = {
+            document["metadata"]["evidence_role"]: document
+            for document in documents
+        }
+        description = by_role["ticket_description"]
+        attachment = by_role["ticket_attachment"]
+        self.assertFalse(description["metadata"]["posting_eligible"])
+        self.assertEqual(description["mime_type"], "text/plain")
+        with open(description["local_path"], "r", encoding="utf-8") as handle:
+            retained_text = handle.read()
+        self.assertIn("Invoice 2026-42", retained_text)
+        self.assertEqual(
+            description["metadata"]["source_provenance"]["repository"],
+            "Noodzakelijk-Online/025-Scan-to-folder-automation",
+        )
+        self.assertEqual(
+            attachment["metadata"]["attachment_policy"],
+            "pdf_only_magic_verified",
+        )
+        self.assertEqual(fetcher.last_run["matchedTickets"], 1)
+        self.assertEqual(fetcher.last_run["descriptionDocuments"], 1)
+        self.assertEqual(fetcher.last_run["attachmentDocuments"], 1)
+        self.assertEqual(fetcher.last_run["ticketMutation"], "not_executed")
+        first_call = mock_requests_get.call_args_list[0]
+        self.assertTrue(first_call.args[0].endswith("/search/tickets"))
+        self.assertEqual(
+            first_call.kwargs["params"]["query"],
+            '"status:2 OR status:3"',
+        )
+        self.assertIsNone(mock_requests_get.call_args_list[3].kwargs["auth"])
+        self.assertTrue(mock_requests_get.call_args_list[3].kwargs["stream"])
+        mock_requests_put.assert_not_called()
+        for document in documents:
+            os.remove(document["local_path"])
+
+    @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
+    def test_freshdesk_financial_profile_stops_oversized_stream(
+        self,
+        mock_requests_get,
+    ):
+        listing_response = MagicMock()
+        listing_response.json.return_value = {"results": [{"id": 43}]}
+        detail_response = MagicMock()
+        detail_response.json.return_value = {
+            "id": 43,
+            "subject": "Invoice attachment",
+            "description_text": "",
+            "status": 2,
+            "attachments": [{
+                "id": 702,
+                "name": "invoice-43.pdf",
+                "content_type": "application/pdf",
+                "attachment_url": "https://example.com/invoice-43.pdf",
+            }],
+        }
+        conversations_response = MagicMock()
+        conversations_response.json.return_value = []
+        attachment_response = MagicMock()
+        attachment_response.headers = {}
+        attachment_response.iter_content.return_value = [
+            b"%PDF-1.7\n",
+            b"x" * 2048,
+        ]
+        mock_requests_get.side_effect = [
+            listing_response,
+            detail_response,
+            conversations_response,
+            attachment_response,
+        ]
+
+        fetcher = FreshdeskFetcher({
+            **self.config,
+            "freshdesk_financial_filter_enabled": True,
+            "freshdesk_financial_keywords": "invoice",
+            "freshdesk_include_ticket_description": False,
+            "freshdesk_pdf_only": True,
+            "freshdesk_max_attachment_bytes": 1024,
+        })
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(documents, [])
+        self.assertEqual(fetcher.last_run["rejectedAttachments"]["oversized"], 1)
+        attachment_response.close.assert_called_once()
+
+    @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
+    def test_freshdesk_financial_profile_filters_unmatched_tickets(
+        self,
+        mock_requests_get,
+    ):
+        listing_response = MagicMock()
+        listing_response.json.return_value = {"results": [{"id": 99}]}
+        detail_response = MagicMock()
+        detail_response.json.return_value = {
+            "id": 99,
+            "subject": "General support question",
+            "description_text": "Please help with account access.",
+            "status": 2,
+            "attachments": [{
+                "id": 1,
+                "name": "unrelated.pdf",
+                "content_type": "application/pdf",
+                "attachment_url": "https://example.com/unrelated.pdf",
+            }],
+        }
+        mock_requests_get.side_effect = [listing_response, detail_response]
+
+        fetcher = FreshdeskFetcher({
+            **self.config,
+            "freshdesk_financial_filter_enabled": True,
+            "freshdesk_financial_keywords": "factuur,invoice",
+            "freshdesk_include_ticket_description": True,
+            "freshdesk_pdf_only": True,
+        })
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(documents, [])
+        self.assertEqual(fetcher.last_run["matchedTickets"], 0)
+        self.assertEqual(fetcher.last_run["filteredTickets"], 1)
+        self.assertEqual(mock_requests_get.call_count, 2)
 
     @patch("src.document_fetchers.photos_fetcher.build")
     @patch("src.document_fetchers.photos_fetcher.InstalledAppFlow")

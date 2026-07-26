@@ -103,6 +103,75 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["bookkeeping_record"]["export_status"], "ready")
             self.assertEqual(ledger.list_audit_events()[0]["action"], "local_processing.document_processed")
 
+    def test_freshdesk_ticket_description_is_forced_to_non_posting_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            description_path = os.path.join(temp_dir, "freshdesk-description.txt")
+            with open(description_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "Subject: Invoice 2026-42\n"
+                    "Vendor: Example Supplier\n"
+                    "Date: 2026-07-20\n"
+                    "Total: EUR 125.00\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "freshdesk",
+                "sourceDocumentId": "freshdesk_42_description",
+                "originalFilename": "freshdesk-42-description.txt",
+                "mimeType": "text/plain",
+                "storagePath": description_path,
+                "documentType": "text",
+                "processingStatus": "imported",
+                "metadata": {
+                    "providerMetadata": {
+                        "evidence_role": "ticket_description",
+                        "posting_eligible": False,
+                        "profile_id": "scan_to_folder_v1",
+                        "source_provenance": {
+                            "repository": (
+                                "Noodzakelijk-Online/"
+                                "025-Scan-to-folder-automation"
+                            ),
+                            "auditedCommit": (
+                                "e3078d92c214aa3b17d98a8687f16e73f52f71ba"
+                            ),
+                        },
+                    },
+                },
+            })
+
+            result = LocalDocumentProcessor(
+                ledger,
+                categorizer=StaticCategorizer(),
+                validator=StaticValidator(),
+            ).process_document(document_id)
+
+            document = ledger.get_document(document_id)
+            classification = document["metadata"]["processing"][
+                "documentTypeClassification"
+            ]
+            self.assertEqual(result["status"], "processed")
+            self.assertEqual(document["document_type"], "supporting_document")
+            self.assertEqual(document["category"], "Supporting Evidence")
+            self.assertFalse(classification["postingEligible"])
+            self.assertEqual(
+                classification["classifier"],
+                "provider_evidence_policy_v1",
+            )
+            self.assertEqual(document["review_items"], [])
+            self.assertEqual(
+                document["bookkeeping_record"]["record_type"],
+                "supporting_document",
+            )
+            self.assertEqual(
+                document["bookkeeping_record"]["status"],
+                "supporting_evidence",
+            )
+            self.assertEqual(
+                document["bookkeeping_record"]["export_status"],
+                "not_applicable",
+            )
+
     def test_new_document_uses_trusted_exact_vendor_category_during_processing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             receipt_path = os.path.join(temp_dir, "praxis.txt")

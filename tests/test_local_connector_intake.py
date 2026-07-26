@@ -355,6 +355,55 @@ class TestLocalConnectorIntake(unittest.TestCase):
                 "e3078d92c214aa3b17d98a8687f16e73f52f71ba",
             )
 
+    def test_freshdesk_plan_exposes_consolidated_read_only_financial_profile(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LocalConnectorIntakeService(
+                LocalOperationsLedger(os.path.join(temp_dir, "operations.db")),
+                {
+                    "freshdesk_enabled": True,
+                    "freshdesk_api_key": "configured-secret",
+                    "freshdesk_domain": "example",
+                    "freshdesk_download_dir": temp_dir,
+                    "freshdesk_financial_filter_enabled": True,
+                    "freshdesk_financial_keywords": (
+                        "rekening,ontvangstbewijs,facturering,uw bestelling,invoice"
+                    ),
+                    "freshdesk_ticket_statuses": "2,3",
+                    "freshdesk_include_ticket_description": True,
+                    "freshdesk_pdf_only": True,
+                },
+            )
+
+            freshdesk = next(
+                item
+                for item in service.plan()["sources"]
+                if item["source"] == "freshdesk"
+            )
+            profile = freshdesk["connectorProfile"]
+
+            self.assertTrue(freshdesk["canSync"])
+            self.assertEqual(freshdesk["mode"], "financial_ticket_read_only")
+            self.assertEqual(profile["profileId"], "scan_to_folder_v1")
+            self.assertEqual(profile["ticketStatuses"], ["2", "3"])
+            self.assertEqual(
+                profile["descriptionPolicy"],
+                "non_posting_supporting_evidence",
+            )
+            self.assertEqual(
+                profile["attachmentPolicy"],
+                "pdf_only_magic_verified",
+            )
+            self.assertEqual(profile["ticketMutation"], "not_executed")
+            self.assertEqual(profile["driveCopy"], "not_executed")
+            self.assertEqual(
+                profile["sourceProvenance"]["repository"],
+                "Noodzakelijk-Online/025-Scan-to-folder-automation",
+            )
+            self.assertEqual(
+                profile["sourceProvenance"]["auditedCommit"],
+                "e3078d92c214aa3b17d98a8687f16e73f52f71ba",
+            )
+
     def test_gmail_scanner_plan_requires_a_trusted_sender_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "gmail-credentials.json")

@@ -1489,6 +1489,20 @@ class LocalDocumentProcessor:
                 processed_data.get("ocr_text", ""),
                 extracted_data,
             )
+            provider_evidence_policy = _provider_evidence_policy(document)
+            if provider_evidence_policy.get("postingEligible") is False:
+                document_type_classification = {
+                    "documentType": "supporting_document",
+                    "confidenceScore": 1.0,
+                    "evidence": [
+                        f"provider_policy:{provider_evidence_policy.get('evidenceRole') or 'non_posting'}"
+                    ],
+                    "postingEligible": False,
+                    "reviewRequired": False,
+                    "evidencePriority": 10,
+                    "classifier": "provider_evidence_policy_v1",
+                    "sourcePolicy": provider_evidence_policy,
+                }
             semantic_document_type = str(document_type_classification.get("documentType") or "unknown")
             if semantic_document_type != "unknown":
                 extracted_data["document_type"] = semantic_document_type
@@ -1619,6 +1633,7 @@ class LocalDocumentProcessor:
                     "appliedVendorCategoryRule": processed_data.get("applied_vendor_category_rule"),
                     "appliedTrustedCategorySuggestion": processed_data.get("applied_trusted_category_suggestion"),
                     "documentTypeClassification": document_type_classification,
+                    "providerEvidencePolicy": provider_evidence_policy or None,
                     "creditNoteAmountNormalization": credit_note_amount_normalization,
                 }
             },
@@ -2307,6 +2322,45 @@ def _extracted_field_records(
 
 def _target_system(document: Dict[str, Any], extracted_data: Dict[str, Any]) -> str:
     return resolve_document_target_system(document, extracted_data, default="none")
+
+
+def _provider_evidence_policy(document: Dict[str, Any]) -> Dict[str, Any]:
+    if str(document.get("source") or "").strip().lower() != "freshdesk":
+        return {}
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    provider = (
+        metadata.get("providerMetadata")
+        if isinstance(metadata.get("providerMetadata"), dict)
+        else {}
+    )
+    evidence_role = str(
+        provider.get("evidence_role")
+        or provider.get("evidenceRole")
+        or ""
+    ).strip().lower()
+    posting_eligible = provider.get(
+        "posting_eligible",
+        provider.get("postingEligible"),
+    )
+    explicitly_non_posting = (
+        posting_eligible is False
+        or str(posting_eligible or "").strip().lower() in {"0", "false", "no", "off"}
+    )
+    if evidence_role != "ticket_description" or not explicitly_non_posting:
+        return {}
+    provenance = (
+        provider.get("source_provenance")
+        if isinstance(provider.get("source_provenance"), dict)
+        else {}
+    )
+    return {
+        "postingEligible": False,
+        "evidenceRole": evidence_role,
+        "profileId": provider.get("profile_id"),
+        "repository": provenance.get("repository"),
+        "auditedCommit": provenance.get("auditedCommit"),
+        "externalSubmission": "not_executed",
+    }
 
 
 def _field_confidence(field_name: str, value: Any, category_confidence: float) -> float:

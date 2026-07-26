@@ -166,8 +166,17 @@ Configuration for fetching documents from Freshdesk.
 *   `enabled`: Opt in to connector intake. Defaults to `false`.
 *   `api_key`: Your Freshdesk API key.
 *   `domain`: Your Freshdesk domain (e.g., `yourcompany.freshdesk.com`).
+*   `api_url`: Optional repository-025 compatibility alternative to `domain`; FAB accepts a tenant root or an API path ending in `/api`, `/v2`, or `/api/v2`.
 *   `download_dir`: Directory to save downloaded Freshdesk attachments. (e.g., `downloads/freshdesk`)
-*   `ticket_status`: Comma-separated list of ticket statuses to fetch attachments from (e.g., `2,3` for Open, Pending).
+*   `financial_filter_enabled`: Enables the consolidated repository-025 financial-ticket profile.
+*   `financial_keywords`: Comma-separated subject/description terms used to admit financial tickets.
+*   `ticket_statuses`: Freshdesk status IDs searched by the profile; defaults to open and pending (`2,3`).
+*   `include_ticket_description`: Retains normalized ticket text as non-posting supporting evidence.
+*   `pdf_only`: Requires attachment filename, MIME type, and binary signature to identify a PDF.
+*   `require_https_attachments`: Rejects non-HTTPS attachment URLs for the financial profile.
+
+The Freshdesk connector is read-only. It never closes tickets and does not copy
+files to Drive; matched evidence enters FAB's immutable local ledger directly.
 
 ### 4.5. `[google_photos]` Section
 

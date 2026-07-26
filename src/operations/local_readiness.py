@@ -309,6 +309,7 @@ class LocalReadinessService:
             _credential_file("vision_credentials", "Google Vision credentials", self.config, "google_vision_credentials_file", "google_vision.credentials_file", required=vision_required),
             _credential_value("freshdesk_api_key", "Freshdesk API key", self.config, "freshdesk_api_key", "freshdesk.api_key"),
             _credential_value("freshdesk_domain", "Freshdesk domain", self.config, "freshdesk_domain", "freshdesk.domain", secret=False),
+            _credential_value("freshdesk_api_url", "Freshdesk API URL", self.config, "freshdesk_api_url", "freshdesk.api_url", secret=False),
             _credential_value("wave_business_token", "Waveapps Business token", self.config, "waveapps_business_access_token", "waveapps_business.access_token"),
             _credential_value("wave_business_id", "Waveapps Business ID", self.config, "waveapps_business_id", "waveapps_business.business_id", secret=False),
             _credential_value("wave_personal_token", "Waveapps Personal token", self.config, "waveapps_personal_access_token", "waveapps_personal.access_token"),
@@ -352,12 +353,10 @@ class LocalReadinessService:
                     )
                 ),
             ),
-            _pair_source(
-                "freshdesk",
-                "Freshdesk",
+            _freshdesk_source(
                 credential_map["freshdesk_api_key"],
                 credential_map["freshdesk_domain"],
-                details="Requires API key and domain.",
+                credential_map["freshdesk_api_url"],
             ),
             _source_status(
                 "tesseract_ocr",
@@ -763,6 +762,21 @@ def _pair_source(identifier: str, label: str, first: Dict[str, Any], second: Dic
         configured=first["configured"] or second["configured"],
         ready=first["configured"] and second["configured"],
         details=details,
+    )
+
+
+def _freshdesk_source(
+    api_key: Dict[str, Any],
+    domain: Dict[str, Any],
+    api_url: Dict[str, Any],
+) -> Dict[str, Any]:
+    locator_configured = domain["configured"] or api_url["configured"]
+    return _source_status(
+        "freshdesk",
+        "Freshdesk",
+        configured=api_key["configured"] or locator_configured,
+        ready=api_key["configured"] and locator_configured,
+        details="Requires an API key plus either a domain or API URL.",
     )
 
 

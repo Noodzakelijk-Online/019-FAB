@@ -193,6 +193,7 @@ NON_POSTING_DOCUMENT_TYPES = frozenset({
     "government_correspondence",
     "insurance_policy",
     "order_confirmation",
+    "supporting_document",
 })
 
 

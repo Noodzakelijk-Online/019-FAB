@@ -6,7 +6,13 @@ from typing import Any, Callable, Dict, Iterable, Optional
 from uuid import uuid4
 
 from src.document_fetchers.drive_fetcher import DriveFetcher
-from src.document_fetchers.freshdesk_fetcher import FreshdeskFetcher
+from src.document_fetchers.freshdesk_fetcher import (
+    LEGACY_025_COMMIT,
+    LEGACY_025_FINANCIAL_KEYWORDS,
+    LEGACY_025_PROFILE_ID,
+    LEGACY_025_REPOSITORY,
+    FreshdeskFetcher,
+)
 from src.document_fetchers.gmail_fetcher import (
     CUSTOM_SCANNER_PROFILE_ID,
     HP_EPRINT_PROFILE_ID,
@@ -176,6 +182,7 @@ class LocalConnectorIntakeService:
             step_metadata = {
                 "label": source_plan.get("label"),
                 "mode": source_plan.get("mode"),
+                "connectorProfile": source_plan.get("connectorProfile"),
                 "configured": source_plan.get("configured"),
                 "enabled": source_plan.get("enabled"),
                 "canSync": source_plan.get("canSync"),
@@ -314,6 +321,7 @@ class LocalConnectorIntakeService:
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
                 "scannerProfile": plan.get("scannerProfile"),
+                "connectorProfile": plan.get("connectorProfile"),
                 "nextAction": plan.get("nextAction"),
                 "externalSubmission": "not_executed",
                 **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
@@ -464,6 +472,7 @@ class LocalConnectorIntakeService:
                 "enabled": True,
                 "mode": plan["mode"],
                 "scannerProfile": plan.get("scannerProfile"),
+                "connectorProfile": plan.get("connectorProfile"),
                 "diagnostics": diagnostics,
                 "run": counters,
                 "error": error,
@@ -615,8 +624,19 @@ class LocalConnectorIntakeService:
             "enabled": enabled,
             "canSync": status == "ready",
             "status": status,
-            "mode": "scanner_mailbox_read_only" if source == "gmail" and gmail_scanner_mode else "read_only_connector",
+            "mode": (
+                "scanner_mailbox_read_only"
+                if source == "gmail" and gmail_scanner_mode
+                else "financial_ticket_read_only"
+                if source == "freshdesk" and _configured_bool(
+                    self.config,
+                    "freshdesk_financial_filter_enabled",
+                    default=False,
+                )
+                else "read_only_connector"
+            ),
             "scannerProfile": self._gmail_scanner_profile() if source == "gmail" else None,
+            "connectorProfile": self._freshdesk_profile() if source == "freshdesk" else None,
             "nextAction": (
                 f"Set {source}.target_system to waveapps_business, waveapps_personal, or mijngeldzaken."
                 if not target_system_valid
@@ -694,7 +714,13 @@ class LocalConnectorIntakeService:
                 ).strip()
             )
         if source == "freshdesk":
-            return bool(self.config.get("freshdesk_api_key") and self.config.get("freshdesk_domain"))
+            return bool(
+                self.config.get("freshdesk_api_key")
+                and (
+                    self.config.get("freshdesk_domain")
+                    or self.config.get("freshdesk_api_url")
+                )
+            )
         token_path = _config_path(
             self.config,
             "google_photos_picker_token_file",
@@ -745,13 +771,74 @@ class LocalConnectorIntakeService:
             ),
         }
 
+    def _freshdesk_profile(self) -> Dict[str, Any]:
+        filter_enabled = _configured_bool(
+            self.config,
+            "freshdesk_financial_filter_enabled",
+            default=False,
+        )
+        keywords = _list_config_value(
+            self.config.get("freshdesk_financial_keywords")
+        )
+        if filter_enabled and not keywords:
+            keywords = list(LEGACY_025_FINANCIAL_KEYWORDS)
+        include_description = _configured_bool(
+            self.config,
+            "freshdesk_include_ticket_description",
+            default=filter_enabled,
+        )
+        pdf_only = _configured_bool(
+            self.config,
+            "freshdesk_pdf_only",
+            default=filter_enabled,
+        )
+        return {
+            "enabled": filter_enabled,
+            "profileId": (
+                LEGACY_025_PROFILE_ID if filter_enabled else "generic_read_only"
+            ),
+            "financialKeywords": keywords,
+            "ticketStatuses": (
+                _list_config_value(self.config.get("freshdesk_ticket_statuses"))
+                or ["2", "3"]
+            ),
+            "includeTicketDescription": include_description,
+            "descriptionPolicy": (
+                "non_posting_supporting_evidence"
+                if include_description
+                else "not_collected"
+            ),
+            "attachmentPolicy": (
+                "pdf_only_magic_verified"
+                if pdf_only
+                else "bounded_immutable_attachment"
+            ),
+            "originalRetention": "ticket_unchanged",
+            "ticketMutation": "not_executed",
+            "driveCopy": "not_executed",
+            "deliveryPath": "freshdesk_to_fab_direct",
+            "sourceProvenance": (
+                {
+                    "repository": LEGACY_025_REPOSITORY,
+                    "auditedCommit": LEGACY_025_COMMIT,
+                    "legacyTransport": "freshdesk_to_google_drive",
+                }
+                if filter_enabled
+                else None
+            ),
+        }
+
     def _source_identifier(self, source: str) -> str:
         if source == "gmail":
             return str(self.config.get("gmail_user_id") or "me")
         if source == "google_drive":
             return str(self.config.get("drive_folder_id") or self.config.get("google_drive_folder_id") or "all-files")
         if source == "freshdesk":
-            return str(self.config.get("freshdesk_domain") or "unconfigured")
+            return str(
+                self.config.get("freshdesk_domain")
+                or self.config.get("freshdesk_api_url")
+                or "unconfigured"
+            )
         return "supervised-picker"
 
     def _download_root(self, source: str, document: Dict[str, Any]) -> str:

@@ -66,11 +66,25 @@ describe("FAB local API gateway", () => {
       "/api/settings": {
         sources: [
           { id: "google_drive", label: "Google Drive", status: "ready", configured: true },
+          { id: "freshdesk", label: "Freshdesk", status: "ready", configured: true },
           { id: "waveapps_business", label: "Wave - Noodzakelijk Online", status: "attention", configured: false },
         ],
       },
       "/api/sources/readiness": {
-        sources: [{ source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." }],
+        sources: [
+          { source: "google_drive", enabled: true, canSync: true, nextAction: "Sync the approved folder." },
+          {
+            source: "freshdesk",
+            enabled: true,
+            canSync: true,
+            mode: "financial_ticket_read_only",
+            connectorProfile: {
+              enabled: true,
+              profileId: "scan_to_folder_v1",
+              ticketMutation: "not_executed",
+            },
+          },
+        ],
       },
       "/api/sources": { sources: [{ source_type: "google_drive", status: "connected", updated_at: "2026-07-15T08:00:00Z" }] },
       "/api/workflows": {
@@ -295,6 +309,14 @@ describe("FAB local API gateway", () => {
     expect(result.decisionContext.oldestReviewAgeHours).toBeGreaterThan(0);
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
+      expect.objectContaining({
+        id: "freshdesk",
+        mode: "financial_ticket_read_only",
+        connectorProfile: expect.objectContaining({
+          profileId: "scan_to_folder_v1",
+          ticketMutation: "not_executed",
+        }),
+      }),
       expect.objectContaining({
         id: "waveapps_business",
         status: "needs_mapping",

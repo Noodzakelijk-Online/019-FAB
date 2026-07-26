@@ -80,10 +80,19 @@ export function FabConnections({ connections, search, commandPending, resource, 
           const canSync = connection.canSync === true && ["gmail", "google_drive", "google_photos", "freshdesk"].includes(id);
           const ready = status === "ready";
           const setupTarget = connectionSetupTarget(id, localApiEndpoint);
+          const connectorProfile = connection.connectorProfile && typeof connection.connectorProfile === "object"
+            ? connection.connectorProfile as FabRecord
+            : null;
+          const connectionDetails = id === "freshdesk" && connection.enabled === true && connectorProfile?.enabled === true
+            ? copy(
+                "Read-only financial tickets, verified PDF evidence, and unchanged source tickets.",
+                "Alleen-lezen financiele tickets, geverifieerd PDF-bewijs en ongewijzigde brontickets.",
+              )
+            : text(ready ? connection.details : connection.nextAction || connection.details, "No connector details recorded.");
           return (
             <div className="fab-connection-row" key={id}>
               <div className={`fab-connection-icon tone-${statusTone(status)}`}><Icon aria-hidden="true" /></div>
-              <div className="fab-connection-name"><strong>{text(connection.label, compactHumanize(id))}</strong><span>{text(ready ? connection.details : connection.nextAction || connection.details, "No connector details recorded.")}</span></div>
+              <div className="fab-connection-name"><strong>{text(connection.label, compactHumanize(id))}</strong><span>{connectionDetails}</span></div>
               <div className="fab-connection-last"><span>{copy("Last ledger signal", "Laatste grootboeksignaal")}</span><strong>{timeAgo(connection.lastSyncAt, dateLocale)}</strong></div>
               <span className={`fab-status-chip tone-${statusTone(status)}`}>{localizedStatus(status)}</span>
               {canSync ? (
