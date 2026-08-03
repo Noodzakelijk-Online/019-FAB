@@ -61,7 +61,14 @@ class TestLocalWaveReceiptExecutorService(unittest.TestCase):
         self.assertEqual(status["status"], "not_connected")
         self.assertFalse(status["ready"])
         self.assertFalse(status["credentialFieldsAccepted"])
+        self.assertEqual(status["configuredBusinessId"], "wave-business")
         self.assertEqual(status["requiredCapabilities"], list(REQUIRED_CAPABILITIES))
+        self.assertEqual(status["missingCapabilities"], list(REQUIRED_CAPABILITIES))
+        self.assertEqual(status["haiManifestPath"], "/api/hai/manifest")
+        self.assertEqual(
+            status["pairing"]["attachmentReadback"]["pathTemplate"],
+            "/api/drive-wave/documents/{documentId}/attachment-readback",
+        )
 
     def test_ready_session_requires_business_and_all_capabilities(self):
         missing = self.service.register(self._session(capabilities=["transaction_locate"]))

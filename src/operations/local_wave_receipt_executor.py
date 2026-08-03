@@ -81,18 +81,40 @@ class LocalWaveReceiptExecutorService:
             default=True,
         )
         state, state_error = self._load_state()
+        configured_business_id = self._business_id()
         base = {
             "version": STATE_VERSION,
             "enabled": enabled,
             "mode": "supervised_user_owned_browser",
             "ready": False,
+            "configuredBusinessId": configured_business_id or None,
             "requiredCapabilities": list(REQUIRED_CAPABILITIES),
+            "missingCapabilities": list(REQUIRED_CAPABILITIES),
             "heartbeatTtlSeconds": self._heartbeat_ttl_seconds(),
             "credentialFieldsAccepted": False,
             "credentialPolicy": "browser_session_owned_by_user_never_stored_in_fab",
             "workOrderClaimPath": "/api/wave/receipt-executor/claim",
             "sessionPath": "/api/wave/receipt-executor/session",
             "releasePath": "/api/wave/receipt-executor/release",
+            "haiManifestPath": "/api/hai/manifest",
+            "pairing": {
+                "session": {
+                    "method": "POST",
+                    "path": "/api/wave/receipt-executor/session",
+                },
+                "claim": {
+                    "method": "POST",
+                    "path": "/api/wave/receipt-executor/claim",
+                },
+                "release": {
+                    "method": "POST",
+                    "path": "/api/wave/receipt-executor/release",
+                },
+                "attachmentReadback": {
+                    "method": "POST",
+                    "pathTemplate": "/api/drive-wave/documents/{documentId}/attachment-readback",
+                },
+            },
             "externalSubmission": "policy_gated_browser_execution",
         }
         if not enabled:
@@ -101,7 +123,7 @@ class LocalWaveReceiptExecutorService:
                 "status": "prepared_disabled",
                 "nextAction": "Enable the supervised Wave receipt executor coordinator.",
             }
-        if not self._business_id():
+        if not configured_business_id:
             return {
                 **base,
                 "status": "needs_wave_setup",
@@ -130,7 +152,6 @@ class LocalWaveReceiptExecutorService:
             fresh = age_seconds <= self._heartbeat_ttl_seconds()
         capabilities = sorted(set(_string_list(state.get("capabilities"))))
         missing_capabilities = sorted(set(REQUIRED_CAPABILITIES) - set(capabilities))
-        configured_business_id = self._business_id()
         session_business_id = str(state.get("businessId") or "").strip()
         business_matches = bool(configured_business_id) and session_business_id == configured_business_id
         session_status = str(state.get("status") or "stopped").strip().lower()

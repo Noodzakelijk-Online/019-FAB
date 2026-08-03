@@ -16,6 +16,7 @@ import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
 import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
+import { FabWaveReceiptExecutorDrawer } from "@/components/fab/FabWaveReceiptExecutorDrawer";
 import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
 import { asRecord, count, humanize, text } from "@/components/fab/fabView";
@@ -49,6 +50,7 @@ export default function AdminOperations() {
   const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
   const [driveSetupOpen, setDriveSetupOpen] = useState(false);
   const [waveSetupOpen, setWaveSetupOpen] = useState(false);
+  const [waveReceiptExecutorOpen, setWaveReceiptExecutorOpen] = useState(false);
   const [pendingCommand, setPendingCommand] = useState<FabCommandId | null>(null);
   const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
   const [lastCommand, setLastCommand] = useState<CompletedCommand | null>(null);
@@ -332,7 +334,7 @@ export default function AdminOperations() {
             onOpenWave={() => setWaveSetupOpen(true)}
             onOpenGmail={() => setGmailSetupOpen(true)}
             onOpenDrive={() => setDriveSetupOpen(true)}
-            onOpenReceiptExecutor={() => document.getElementById("delivery")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            onOpenReceiptExecutor={() => setWaveReceiptExecutorOpen(true)}
             onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
           />}
           <FabReviewWorkspace
@@ -380,6 +382,7 @@ export default function AdminOperations() {
               if (connectionId === "gmail") setGmailSetupOpen(true);
               if (connectionId === "google_drive") setDriveSetupOpen(true);
               if (connectionId === "waveapps_business") setWaveSetupOpen(true);
+              if (connectionId === "wave_receipt_executor") setWaveReceiptExecutorOpen(true);
             }}
           />
         </>
@@ -429,6 +432,14 @@ export default function AdminOperations() {
         onClose={() => setWaveSetupOpen(false)}
         onSave={saveWaveConnection}
         onValidate={validateWaveConnection}
+        onRefresh={async () => { await controlCenter.refetch(); }}
+      />
+      <FabWaveReceiptExecutorDrawer
+        open={waveReceiptExecutorOpen}
+        connected={connected}
+        executor={data?.waveReceiptExecutor || {}}
+        localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+        onClose={() => setWaveReceiptExecutorOpen(false)}
         onRefresh={async () => { await controlCenter.refetch(); }}
       />
     </FabOperatorShell>
