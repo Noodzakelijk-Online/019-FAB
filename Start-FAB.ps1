@@ -706,6 +706,7 @@ try {
     $gmailStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/connectors/gmail/authorization"
     $driveStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/connectors/google-drive/authorization"
     $waveStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/wave/setup"
+    $waveReceiptExecutorStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/wave/receipt-executor/status"
     if ([bool]$gmailStatus.reauthorizationRequired) {
         Write-Warning "Gmail needs fresh read-only consent. Open Finish activation in the FAB dashboard and select Reauthorize Gmail."
     }
@@ -720,6 +721,9 @@ try {
     }
     if (-not [bool]$waveStatus.ready) {
         Write-Warning "Wave is not ready. Open Finish activation in the FAB dashboard and select Connect Wave."
+    }
+    elseif (-not [bool]$waveReceiptExecutorStatus.ready) {
+        Write-Warning "Wave receipt delivery is not ready. Open Finish activation in the FAB dashboard and review the Wave receipt session."
     }
 }
 catch {

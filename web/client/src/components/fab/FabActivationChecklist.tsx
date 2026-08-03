@@ -4,6 +4,7 @@ import {
   Cloud,
   FileCheck2,
   Mail,
+  MonitorUp,
   ShieldCheck,
 } from "lucide-react";
 import { useFabLocale } from "./fabLocale";
@@ -13,10 +14,12 @@ type FabActivationChecklistProps = {
   waveSetup: FabRecord;
   gmailAuthorization: FabRecord;
   driveAuthorization: FabRecord;
+  waveReceiptExecutor: FabRecord;
   reviewSummary: FabRecord;
   onOpenWave: () => void;
   onOpenGmail: () => void;
   onOpenDrive: () => void;
+  onOpenReceiptExecutor: () => void;
   onOpenReviews: () => void;
 };
 
@@ -24,14 +27,17 @@ export function FabActivationChecklist({
   waveSetup,
   gmailAuthorization,
   driveAuthorization,
+  waveReceiptExecutor,
   reviewSummary,
   onOpenWave,
   onOpenGmail,
   onOpenDrive,
+  onOpenReceiptExecutor,
   onOpenReviews,
 }: FabActivationChecklistProps) {
   const { copy, status: localizedStatus } = useFabLocale();
   const waveReady = bool(waveSetup.ready);
+  const receiptExecutorReady = bool(waveReceiptExecutor.ready);
   const gmailReauthorizationRequired = bool(gmailAuthorization.reauthorizationRequired);
   const driveReauthorizationRequired = bool(driveAuthorization.reauthorizationRequired);
   const gmailReady = bool(gmailAuthorization.scannerPolicyReady)
@@ -48,7 +54,7 @@ export function FabActivationChecklist({
   const evidenceOnlyDocuments = count(reviewSummary.evidenceOnlyDocuments);
   const reviewsReady = reviewCountKnown && postingBlockedDocuments === 0;
 
-  if (waveReady && gmailReady && driveReady && reviewsReady) return null;
+  if (waveReady && receiptExecutorReady && gmailReady && driveReady && reviewsReady) return null;
 
   return (
     <section className="fab-activation-checklist" aria-labelledby="fab-activation-title">
@@ -74,6 +80,14 @@ export function FabActivationChecklist({
             ? copy("Reauthorize Gmail", "Gmail opnieuw autoriseren")
             : copy("Authorize Gmail", "Gmail autoriseren")}
           onAction={onOpenGmail}
+        />
+        <ActivationStep
+          icon={MonitorUp}
+          complete={receiptExecutorReady}
+          title={copy("Wave receipt session", "Wave-bewijssessie")}
+          status={localizedStatus(text(waveReceiptExecutor.status, "not_connected"))}
+          actionLabel={copy("Review executor", "Executor bekijken")}
+          onAction={onOpenReceiptExecutor}
         />
         <ActivationStep
           icon={Cloud}

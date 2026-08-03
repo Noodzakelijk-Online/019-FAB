@@ -10,6 +10,10 @@ from unittest.mock import patch
 from src.operations.drive_wave_delivery import DriveWaveDeliveryService
 from src.operations.local_api import create_app
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_wave_receipt_executor import (
+    LocalWaveReceiptExecutorService,
+    REQUIRED_CAPABILITIES,
+)
 
 
 SOURCE_FOLDER = "drive-source"
@@ -96,6 +100,10 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "google_drive_wave_archive_folder_id": ARCHIVE_FOLDER,
             "google_drive_token_file": os.path.join(self.temp_dir.name, "drive-token-default.pickle"),
             "waveapps_business_id": BUSINESS_ID,
+            "wave_receipt_executor_state_file": os.path.join(
+                self.temp_dir.name,
+                "wave-receipt-executor.json",
+            ),
         }
         self.record_id = self.ledger.upsert_bookkeeping_record({
             "documentId": self.document_id,
@@ -300,22 +308,34 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
                 },
             },
         })
-        status = DriveWaveDeliveryService(
-            self.ledger,
-            {
-                **self.config,
-                "google_drive_token_file": token_path,
-                "waveapps_business_access_token": "private-wave-token",
-                "waveapps_business_anchor_account_id": "anchor-1",
-                "waveapps_business_category_account_ids": {
-                    "Office Supplies": "expense-1",
-                },
+        config = {
+            **self.config,
+            "google_drive_token_file": token_path,
+            "waveapps_business_access_token": "private-wave-token",
+            "waveapps_business_anchor_account_id": "anchor-1",
+            "waveapps_business_category_account_ids": {
+                "Office Supplies": "expense-1",
             },
-        ).status()
+        }
+        mapped_only = DriveWaveDeliveryService(self.ledger, config).status()
+        LocalWaveReceiptExecutorService(self.ledger, config).register({
+            "executorId": "hai-wave-browser",
+            "sessionId": "delivery-test-session",
+            "businessId": BUSINESS_ID,
+            "status": "ready",
+            "capabilities": list(REQUIRED_CAPABILITIES),
+            "browser": "chromium",
+            "version": "1.0.0",
+        })
+        status = DriveWaveDeliveryService(self.ledger, config).status()
 
+        self.assertEqual(mapped_only["status"], "needs_receipt_executor")
+        self.assertFalse(mapped_only["waveReceiptExecutorReady"])
         self.assertEqual(status["status"], "ready")
         self.assertTrue(status["waveBusinessConfigured"])
         self.assertTrue(status["waveAccessTokenConfigured"])
+        self.assertTrue(status["waveReceiptExecutorReady"])
+        self.assertEqual(status["waveReceiptExecutorStatus"], "ready")
         self.assertEqual(status["waveSetupStatus"], "ready")
         self.assertNotIn("private-wave-token", json.dumps(status))
 

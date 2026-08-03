@@ -309,6 +309,20 @@ The HAI connector publishes discovery at `/api/hai/manifest` and status at
 governed-command allowlist used by the dashboard. HAI cannot approve, export,
 restore, change access controls, or submit downstream bookkeeping changes.
 
+Wave receipt upload uses a separate supervised executor boundary because the
+public Wave transaction API does not provide FAB's required receipt upload and
+binary readback flow. A user-owned browser or HAI executor registers non-secret
+session metadata at `POST /api/wave/receipt-executor/session`, keeps a fresh
+heartbeat there, and claims one eligible work order at a time from
+`POST /api/wave/receipt-executor/claim`. FAB rejects passwords, tokens,
+cookies, credentials, and browser storage state. The executor must advertise
+transaction location, receipt upload/download, transaction review, and
+observed-field capabilities for the exact configured Wave business. Status is
+available at `GET /api/wave/receipt-executor/status`; leases are released at
+`POST /api/wave/receipt-executor/release` or automatically after a bound binary
+readback submission containing the executor and session IDs. Token/account
+mapping alone therefore no longer reports the source-to-Wave pipeline as ready.
+
 Source-to-Wave executor handoff is available at
 `GET /api/drive-wave/work-orders` and is advertised by the HAI manifest as the
 read-only resource `wave_attachment_work_orders`. Authenticated connectors can

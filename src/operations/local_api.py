@@ -65,6 +65,7 @@ from src.operations.local_reporting import LocalFinancialReportingService, Local
 from src.operations.local_review import LocalReviewService
 from src.operations.local_routing import LocalRoutingService
 from src.operations.local_wave_control import LocalWaveControlService
+from src.operations.local_wave_receipt_executor import LocalWaveReceiptExecutorService
 from src.operations.local_wave_setup import LocalWaveSetupService
 from src.operations.local_workflow_recovery import (
     LocalWorkflowRecoveryScheduler,
@@ -4361,6 +4362,49 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def drive_wave_status_api():
         return jsonify(DriveWaveDeliveryService(ledger, config).status())
 
+    @app.get("/api/wave/receipt-executor/status")
+    def wave_receipt_executor_status_api():
+        return jsonify(LocalWaveReceiptExecutorService(ledger, config).status())
+
+    @app.post("/api/wave/receipt-executor/session")
+    def wave_receipt_executor_session_api():
+        payload = request.get_json(silent=True) or {}
+        session_payload = {key: value for key, value in payload.items() if key != "actor"}
+        result = LocalWaveReceiptExecutorService(ledger, config).register(
+            session_payload,
+            actor=str(payload.get("actor") or "local_api_wave_receipt_executor"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.delete("/api/wave/receipt-executor/session")
+    def wave_receipt_executor_disconnect_api():
+        payload = request.get_json(silent=True) or {}
+        result = LocalWaveReceiptExecutorService(ledger, config).disconnect(
+            payload,
+            actor=str(payload.get("actor") or "local_api"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
+    @app.post("/api/wave/receipt-executor/claim")
+    def wave_receipt_executor_claim_api():
+        payload = request.get_json(silent=True) or {}
+        result = LocalWaveReceiptExecutorService(ledger, config).claim_next(
+            DriveWaveDeliveryService(ledger, config),
+            payload,
+            actor=str(payload.get("actor") or "local_api_wave_receipt_executor"),
+        )
+        return jsonify(result), 200 if result.get("success") else 409
+
+    @app.post("/api/wave/receipt-executor/release")
+    def wave_receipt_executor_release_api():
+        payload = request.get_json(silent=True) or {}
+        result = LocalWaveReceiptExecutorService(ledger, config).release(
+            payload.get("documentId"),
+            payload,
+            actor=str(payload.get("actor") or "local_api_wave_receipt_executor"),
+        )
+        return jsonify(result), 200 if result.get("success") else 400
+
     @app.get("/api/drive-wave/candidates")
     def drive_wave_candidates_api():
         return jsonify(
@@ -4421,6 +4465,26 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             evidence=evidence,
             actor=str(request.form.get("actor") or "local_api_wave_browser"),
         )
+        executor_id = str(request.form.get("executorId") or "").strip()
+        session_id = str(request.form.get("sessionId") or "").strip()
+        if executor_id and session_id:
+            result["executorRelease"] = LocalWaveReceiptExecutorService(
+                ledger,
+                config,
+            ).release(
+                document_id,
+                {
+                    "executorId": executor_id,
+                    "sessionId": session_id,
+                    "outcome": "verified" if result.get("success") else "blocked",
+                    "message": (
+                        "Wave receipt binary readback passed FAB verification."
+                        if result.get("success")
+                        else "Wave receipt binary readback was blocked by FAB verification."
+                    ),
+                },
+                actor=str(request.form.get("actor") or "local_api_wave_browser"),
+            )
         return jsonify(result), 200 if result.get("success") else 400
 
     @app.post("/api/drive-wave/documents/<int:document_id>/archive")

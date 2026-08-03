@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from src.document_fetchers.drive_archiver import DriveArchiveClient
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_wave_receipt_executor import LocalWaveReceiptExecutorService
 from src.operations.local_wave_setup import LocalWaveSetupService
 
 
@@ -84,12 +85,18 @@ class DriveWaveDeliveryService:
             if isinstance(wave_setup.get("activation"), dict)
             else {}
         )
+        receipt_executor = LocalWaveReceiptExecutorService(
+            self.ledger,
+            self.config,
+        ).status()
         if not archive_configured:
             status = "needs_configuration"
         elif not token_present or reauthorization_required:
             status = "needs_authorization"
         elif wave_setup.get("ready") is not True:
             status = "needs_wave_setup"
+        elif receipt_executor.get("ready") is not True:
+            status = "needs_receipt_executor"
         else:
             status = "ready"
         gmail_scanner_ready = self._gmail_scanner_configured()
@@ -105,6 +112,11 @@ class DriveWaveDeliveryService:
             "waveSetupStatus": wave_setup.get("status"),
             "waveSetupCurrentStep": wave_activation.get("currentStep"),
             "waveSetupNextAction": wave_activation.get("nextAction"),
+            "waveReceiptExecutorReady": receipt_executor.get("ready") is True,
+            "waveReceiptExecutorStatus": receipt_executor.get("status"),
+            "waveReceiptExecutorNextAction": receipt_executor.get("nextAction"),
+            "waveReceiptExecutorLastSeenAt": receipt_executor.get("lastSeenAt"),
+            "waveReceiptExecutorMissingCapabilities": receipt_executor.get("missingCapabilities") or [],
             "driveTokenPresent": token_present,
             "driveReauthorizationRequired": reauthorization_required,
             "driveCredentialsPresent": credentials_present,
@@ -168,6 +180,13 @@ class DriveWaveDeliveryService:
         connector_status = self.status()
         return {
             "status": connector_status["status"],
+            "receiptExecutor": {
+                "ready": connector_status.get("waveReceiptExecutorReady") is True,
+                "status": connector_status.get("waveReceiptExecutorStatus"),
+                "nextAction": connector_status.get("waveReceiptExecutorNextAction"),
+                "lastSeenAt": connector_status.get("waveReceiptExecutorLastSeenAt"),
+                "missingCapabilities": connector_status.get("waveReceiptExecutorMissingCapabilities") or [],
+            },
             "workOrderVersion": WORK_ORDER_VERSION,
             "count": len(work_orders),
             "summary": summary,
@@ -1505,6 +1524,20 @@ def _wave_upload_reasons(document: Dict[str, Any]) -> list[str]:
 def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]:
     return {
         "version": "wave-transactions-browser-v1",
+        "coordinator": {
+            "status": "/api/wave/receipt-executor/status",
+            "session": "/api/wave/receipt-executor/session",
+            "claim": "/api/wave/receipt-executor/claim",
+            "release": "/api/wave/receipt-executor/release",
+            "requiredCapabilities": [
+                "transaction_locate",
+                "receipt_upload",
+                "receipt_download",
+                "transaction_review",
+                "observed_fields",
+            ],
+            "credentialsAccepted": False,
+        },
         "transactionListUrl": (
             f"https://next.waveapps.com/{business_id}/transactions" if business_id else None
         ),

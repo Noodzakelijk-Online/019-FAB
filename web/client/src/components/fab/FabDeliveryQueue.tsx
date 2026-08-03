@@ -4,6 +4,7 @@ import {
   CloudUpload,
   FileCheck2,
   FileClock,
+  MonitorUp,
   ShieldCheck,
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
@@ -36,6 +37,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
   const { copy, status: localizedStatus } = useFabLocale();
   const visibleOrders = delivery.workOrders.filter((item) => matchesSearch(item, search));
   const connectorStatus = text(delivery.status.status, "unavailable");
+  const receiptExecutorStatus = text(delivery.status.waveReceiptExecutorStatus, "not_connected");
   const relayReady = delivery.status.relayIntakeReady === true;
   const resourceAvailable = resource?.state === "live" || resource?.state === "stale";
   const readyToArchive = resourceAvailable ? count(delivery.summary.readyToArchive) : null;
@@ -75,6 +77,25 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
             <strong>{relayReady ? copy("Relay intake ready; archive authorization required", "Relayinname gereed; archiefautorisatie vereist") : copy("Drive authorization required", "Drive-autorisatie vereist")}</strong>
             <span>{relayReady ? copy("HAI can hand exact Drive bytes into FAB now. Install the Google OAuth desktop credentials and run Authorize-FAB-GoogleDrive.cmd before FAB can move a fully verified source into the archive folder.", "HAI kan nu exacte Drive-bytes aan FAB leveren. Installeer de Google OAuth-desktopgegevens en voer Authorize-FAB-GoogleDrive.cmd uit voordat FAB een volledig geverifieerde bron naar de archiefmap kan verplaatsen.") : copy("Install the Google OAuth desktop credentials, then run Authorize-FAB-GoogleDrive.cmd. Source files remain in the intake folder until Wave attachment proof passes.", "Installeer de Google OAuth-desktopgegevens en voer daarna Authorize-FAB-GoogleDrive.cmd uit. Bronbestanden blijven in de inname-map totdat het Wave-bijlagebewijs slaagt.")}</span>
           </div>
+        </div>
+      )}
+
+      {connectorStatus === "needs_receipt_executor" && (
+        <div className="fab-delivery-gate tone-warn">
+          <MonitorUp aria-hidden="true" />
+          <div>
+            <strong>{copy("Wave API ready; receipt executor required", "Wave-API gereed; bewijsexecutor vereist")}</strong>
+            <span>{text(
+              delivery.status.waveReceiptExecutorNextAction,
+              copy(
+                "Connect a supervised HAI or browser executor. FAB accepts non-secret heartbeats and leases one receipt work order at a time; browser credentials remain outside FAB.",
+                "Koppel een begeleide HAI- of browserexecutor. FAB accepteert alleen niet-geheime heartbeats en verstrekt een bewijsopdracht per keer; browserreferenties blijven buiten FAB.",
+              ),
+            )} {copy("Current state", "Huidige status")}: {humanize(receiptExecutorStatus)}.</span>
+          </div>
+          <a className="fab-icon-button" href={`${localApiEndpoint}/api/wave/receipt-executor/status`} target="_blank" rel="noreferrer" aria-label={copy("Open receipt executor status", "Open bewijsexecutorstatus")} title={copy("Open receipt executor status", "Open bewijsexecutorstatus")}>
+            <ArrowUpRight aria-hidden="true" />
+          </a>
         </div>
       )}
 

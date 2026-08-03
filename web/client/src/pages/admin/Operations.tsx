@@ -327,10 +327,12 @@ export default function AdminOperations() {
             waveSetup={data?.waveSetup || {}}
             gmailAuthorization={data?.gmailAuthorization || {}}
             driveAuthorization={data?.driveAuthorization || {}}
+            waveReceiptExecutor={data?.waveReceiptExecutor || {}}
             reviewSummary={data?.reviews.summary || {}}
             onOpenWave={() => setWaveSetupOpen(true)}
             onOpenGmail={() => setGmailSetupOpen(true)}
             onOpenDrive={() => setDriveSetupOpen(true)}
+            onOpenReceiptExecutor={() => document.getElementById("delivery")?.scrollIntoView({ behavior: "smooth", block: "start" })}
             onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
           />}
           <FabReviewWorkspace

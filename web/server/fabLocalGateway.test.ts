@@ -189,6 +189,13 @@ describe("FAB local API gateway", () => {
         accounts: [{ id: "account-1", name: "Current Account" }],
         mapping: { verified: false },
       },
+      "/api/wave/receipt-executor/status": {
+        status: "not_connected",
+        enabled: true,
+        ready: false,
+        nextAction: "Connect a supervised HAI or browser executor using the local FAB manifest.",
+        missingCapabilities: ["receipt_upload", "receipt_download"],
+      },
       "/api/review": {
         summary: {
           reviewItems: 3,
@@ -325,6 +332,13 @@ describe("FAB local API gateway", () => {
         nextAction: "Map the verified funding account and every FAB category currently in use.",
       }),
       expect.objectContaining({
+        id: "wave_receipt_executor",
+        status: "not_connected",
+        configured: true,
+        ready: false,
+        missingCapabilities: ["receipt_upload", "receipt_download"],
+      }),
+      expect.objectContaining({
         id: "hai",
         status: "ready",
         allowedCommandIds: ["run_safe_cycle", "refresh_notifications"],
@@ -424,6 +438,11 @@ describe("FAB local API gateway", () => {
       status: "needs_mapping",
       accessTokenConfigured: true,
       businessId: "business-1",
+    });
+    expect(result.waveReceiptExecutor).toMatchObject({
+      status: "not_connected",
+      enabled: true,
+      ready: false,
     });
     expect(fetchMock.mock.calls.some(([input]) => {
       const url = new URL(String(input));

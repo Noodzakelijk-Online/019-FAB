@@ -121,10 +121,14 @@ class TestLocalHaiConnector(unittest.TestCase):
             resources = {
                 item["resourceId"] for item in manifest.get_json()["resources"]
             }
-            self.assertEqual(len(resources), 3)
+            self.assertEqual(len(resources), 7)
             self.assertIn("google_drive_binary_relay", resources)
             self.assertIn("wave_attachment_work_orders", resources)
             self.assertIn("wave_attachment_binary_readback", resources)
+            self.assertIn("wave_receipt_executor_status", resources)
+            self.assertIn("wave_receipt_executor_session", resources)
+            self.assertIn("wave_receipt_executor_claim", resources)
+            self.assertIn("wave_receipt_executor_release", resources)
             self.assertEqual(plan.status_code, 200)
             self.assertEqual(plan.get_json()["status"], "ready")
             self.assertEqual(executed.status_code, 200)

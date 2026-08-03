@@ -10,6 +10,7 @@ import {
   Inbox,
   Landmark,
   Mail,
+  MonitorUp,
   RefreshCw,
   ScanText,
   Settings2,
@@ -29,6 +30,7 @@ const connectorIcons: Record<string, typeof Cloud> = {
   tesseract_ocr: ScanText,
   waveapps_business: Building2,
   waveapps_personal: UsersRound,
+  wave_receipt_executor: MonitorUp,
   mijngeldzaken: Landmark,
   banking_api: CircleDollarSign,
   hai: Bot,
@@ -119,6 +121,8 @@ export function FabConnections({ connections, search, commandPending, resource, 
 function connectionSetupTarget(id: string, endpoint: string): string {
   const anchor = ["gmail", "google_drive", "google_photos", "freshdesk"].includes(id)
     ? "sources"
+    : id === "wave_receipt_executor"
+      ? "api/wave/receipt-executor/status"
     : id === "mijngeldzaken"
       ? "mijngeldzaken"
       : id.startsWith("waveapps_")

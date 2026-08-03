@@ -77,6 +77,7 @@ export type FabControlCenter = {
   gmailAuthorization: JsonRecord;
   driveAuthorization: JsonRecord;
   waveSetup: JsonRecord;
+  waveReceiptExecutor: JsonRecord;
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -121,6 +122,7 @@ const READ_PATHS = {
   gmailAuthorization: "/api/connectors/gmail/authorization",
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",
+  waveReceiptExecutor: "/api/wave/receipt-executor/status",
   reviewQueue: "/api/review?status=open&limit=500",
   masterLedger: "/api/master-ledger?limit=500",
   bankTransactions: "/api/bank-transactions?status=unreconciled&limit=500",
@@ -244,6 +246,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const settings = resources.settings || {};
   const sourceReadiness = resources.sourceReadiness || {};
   const waveSetup = resources.waveSetup || {};
+  const waveReceiptExecutor = resources.waveReceiptExecutor || {};
   const registeredSources = arrayValue(resources.sources?.sources);
   const workflowRuns = arrayValue(resources.workflows?.workflowRuns);
   const reviewWorkItems = arrayValue(resources.reviewQueue?.workItems);
@@ -358,10 +361,27 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     gmailAuthorization: resources.gmailAuthorization || {},
     driveAuthorization: resources.driveAuthorization || {},
     waveSetup,
+    waveReceiptExecutor,
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
       ...sourceConnections,
+      {
+        id: "wave_receipt_executor",
+        label: "Wave receipt session",
+        status: stringValue(waveReceiptExecutor.status, "not_connected"),
+        configured: waveReceiptExecutor.enabled === true,
+        ready: waveReceiptExecutor.ready === true,
+        details: waveReceiptExecutor.ready === true
+          ? "A fresh user-owned browser executor can upload and read receipts back into FAB verification."
+          : "Non-secret HAI/browser bridge for Wave receipt upload and exact attachment readback.",
+        nextAction: stringValue(
+          waveReceiptExecutor.nextAction,
+          "Connect a supervised HAI or browser executor using the local FAB manifest.",
+        ),
+        lastSyncAt: waveReceiptExecutor.lastSeenAt || null,
+        missingCapabilities: stringArray(waveReceiptExecutor.missingCapabilities),
+      },
       {
         id: "hai",
         label: "HAI connector",
@@ -604,6 +624,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     gmailAuthorization: {},
     driveAuthorization: {},
     waveSetup: {},
+    waveReceiptExecutor: {},
     exceptions: [],
     exceptionSummary: {},
     connections: [],
