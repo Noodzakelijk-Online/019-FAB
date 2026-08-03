@@ -381,7 +381,9 @@ class TestOperationsExportWorker(unittest.TestCase):
 
             artifact = store.write_text("../private import.csv", "Datum,Bedrag\n2026-07-10,31.25\n")
 
-            self.assertEqual(os.path.dirname(artifact["path"]), os.path.abspath(temp_dir))
+            self.assertTrue(
+                os.path.samefile(os.path.dirname(artifact["path"]), temp_dir)
+            )
             self.assertNotIn("..", artifact["filename"])
             self.assertIn(artifact["sha256"][:12], artifact["filename"])
             self.assertTrue(os.path.isfile(artifact["path"]))
