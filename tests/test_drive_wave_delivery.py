@@ -94,6 +94,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "google_drive_archive_verified_files": True,
             "google_drive_folder_id": SOURCE_FOLDER,
             "google_drive_wave_archive_folder_id": ARCHIVE_FOLDER,
+            "google_drive_token_file": os.path.join(self.temp_dir.name, "drive-token-default.pickle"),
             "waveapps_business_id": BUSINESS_ID,
         }
         self.record_id = self.ledger.upsert_bookkeeping_record({

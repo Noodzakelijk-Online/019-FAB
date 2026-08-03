@@ -32,14 +32,16 @@ export function FabActivationChecklist({
 }: FabActivationChecklistProps) {
   const { copy, status: localizedStatus } = useFabLocale();
   const waveReady = bool(waveSetup.ready);
+  const gmailReauthorizationRequired = bool(gmailAuthorization.reauthorizationRequired);
+  const driveReauthorizationRequired = bool(driveAuthorization.reauthorizationRequired);
   const gmailReady = bool(gmailAuthorization.scannerPolicyReady)
     && bool(gmailAuthorization.credentialsPresent)
     && bool(gmailAuthorization.tokenPresent)
-    && !bool(gmailAuthorization.reauthorizationRequired);
+    && !gmailReauthorizationRequired;
   const driveReady = bool(driveAuthorization.credentialsPresent)
     && bool(driveAuthorization.tokenPresent)
     && bool(driveAuthorization.folderConfigured)
-    && !bool(driveAuthorization.reauthorizationRequired);
+    && !driveReauthorizationRequired;
   const reviewCountSource = reviewSummary.postingBlockedDocuments ?? reviewSummary.documents;
   const reviewCountKnown = reviewCountSource !== null && reviewCountSource !== undefined;
   const postingBlockedDocuments = count(reviewCountSource);
@@ -68,7 +70,9 @@ export function FabActivationChecklist({
           complete={gmailReady}
           title="Gmail scanner"
           status={localizedStatus(text(gmailAuthorization.status, "credentials_required"))}
-          actionLabel={copy("Authorize Gmail", "Gmail autoriseren")}
+          actionLabel={gmailReauthorizationRequired
+            ? copy("Reauthorize Gmail", "Gmail opnieuw autoriseren")
+            : copy("Authorize Gmail", "Gmail autoriseren")}
           onAction={onOpenGmail}
         />
         <ActivationStep
@@ -76,7 +80,9 @@ export function FabActivationChecklist({
           complete={driveReady}
           title="Google Drive"
           status={localizedStatus(text(driveAuthorization.status, "credentials_required"))}
-          actionLabel={copy("Authorize Drive", "Drive autoriseren")}
+          actionLabel={driveReauthorizationRequired
+            ? copy("Reauthorize Drive", "Drive opnieuw autoriseren")
+            : copy("Authorize Drive", "Drive autoriseren")}
           onAction={onOpenDrive}
         />
         <ActivationStep

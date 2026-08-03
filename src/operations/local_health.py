@@ -165,14 +165,21 @@ class LocalOperationsHealth:
         issues: List[Dict[str, Any]] = []
         for source in source_accounts:
             source_status = str(source.get("status") or "unknown").strip().lower()
-            if source_status in {"failed", "error", "partial", "missing", "needs_configuration"}:
-                severity = "high" if source_status in {"failed", "error"} else "medium"
+            if source_status in {
+                "failed", "error", "partial", "missing",
+                "needs_configuration", "needs_authorization",
+            }:
+                severity = "high" if source_status in {"failed", "error", "needs_authorization"} else "medium"
+                status_message = {
+                    "needs_authorization": "requires authorization",
+                    "needs_configuration": "requires configuration",
+                }.get(source_status, f"is {source_status}")
                 issues.append(_issue(
                     severity,
                     "source_connector_unavailable",
                     "source_account",
                     source.get("id"),
-                    f"{source.get('label') or source.get('source_type')} source is {source_status}.",
+                    f"{source.get('label') or source.get('source_type')} source {status_message}.",
                     _age_hours(source.get("last_scan_at") or source.get("updated_at"), now),
                     {
                         "sourceType": source.get("source_type"),

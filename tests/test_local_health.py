@@ -111,6 +111,22 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["metrics"]["staleSourceConnectors"], 1)
             self.assertTrue(any("Open Sources" in action for action in health["nextActions"]))
 
+    def test_health_describes_revoked_connector_as_requiring_authorization(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_source_account({
+                "sourceType": "gmail",
+                "sourceIdentifier": "me",
+                "label": "Gmail",
+                "status": "needs_authorization",
+            })
+
+            health = LocalOperationsHealth(ledger).summarize()
+
+            issue = next(item for item in health["issues"] if item["type"] == "source_connector_unavailable")
+            self.assertEqual(issue["severity"], "high")
+            self.assertEqual(issue["message"], "Gmail source requires authorization.")
+
     def test_health_flags_stale_supervised_picker_session(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

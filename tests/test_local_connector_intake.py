@@ -271,6 +271,34 @@ class TestLocalConnectorIntake(unittest.TestCase):
             self.assertEqual(step["status"], "failed")
             self.assertNotIn("top-secret", step["error_message"])
 
+    def test_revoked_google_token_requires_reauthorization_without_retry_loop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger, service = self._service(
+                temp_dir,
+                [],
+                error=RuntimeError(
+                    "invalid_grant: Token has been expired or revoked."
+                ),
+            )
+            token_path = service.config["gmail_token_file"]
+
+            result = service.sync(["gmail"], actor="test")
+            gmail = next(
+                item for item in service.plan()["sources"]
+                if item["source"] == "gmail"
+            )
+            source = ledger.list_source_accounts(source_type="gmail")[0]
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["status"], "attention_required")
+            self.assertEqual(result["results"][0]["status"], "needs_authorization")
+            self.assertTrue(os.path.isfile(f"{token_path}.reauthorize"))
+            self.assertEqual(gmail["status"], "needs_authorization")
+            self.assertFalse(gmail["canSync"])
+            self.assertIn("OAuth consent flow", gmail["nextAction"])
+            self.assertEqual(source["status"], "needs_authorization")
+            self.assertEqual(source["metadata"]["nextAction"], gmail["nextAction"])
+
     def test_download_outside_configured_root_fails_source_completeness(self):
         with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as outside_dir:
             document_path = os.path.join(outside_dir, "unexpected.pdf")

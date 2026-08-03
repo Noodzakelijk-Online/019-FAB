@@ -124,7 +124,16 @@ class LocalAutonomousService:
         counts["connectorSyncableSources"] = len(connector_sync["syncableSources"])
         counts["waveEntitySyncConfiguredTargets"] = len(wave_entity_sync["configuredTargets"])
         counts["waveEntitySyncTargetsDue"] = len(wave_entity_sync["dueTargets"])
-        blocked_reasons = self._blocked_reasons(readiness, health)
+        guarded_reasons = self._blocked_reasons(readiness, health)
+        health_execution_blocked = "operations_health_blocked" in guarded_reasons
+        # Ledger-health failures must not freeze the read-only and local repair
+        # work that can clear them. Security/readiness failures remain hard
+        # stops, while unhealthy state continues to gate external execution.
+        blocked_reasons = [
+            reason
+            for reason in guarded_reasons
+            if reason != "operations_health_blocked"
+        ]
         blocked = bool(blocked_reasons)
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
 
@@ -386,10 +395,19 @@ class LocalAutonomousService:
                 "safe_auto",
                 bool(self.config.get("fab_autonomy_execute_approved_exports"))
                 and counts["approvedExportAttempts"] > 0
+                and not health_execution_blocked
                 and not blocked,
                 "Enable `fab_autonomy_execute_approved_exports` and configure safe handlers/credentials."
                 if not self.config.get("fab_autonomy_execute_approved_exports")
-                else ("No approved export attempts are waiting." if counts["approvedExportAttempts"] == 0 else None),
+                else (
+                    "No approved export attempts are waiting."
+                    if counts["approvedExportAttempts"] == 0
+                    else (
+                        "Resolve blocked operations health before executing approved external exports."
+                        if health_execution_blocked
+                        else None
+                    )
+                ),
                 {
                     "approvedExportAttempts": counts["approvedExportAttempts"],
                     "targetBreakdown": counts["approvedExportTargets"],
@@ -444,6 +462,7 @@ class LocalAutonomousService:
             "canRunAutonomously": status == "ready",
             "externalSubmission": "not_executed",
             "blockedReasons": blocked_reasons,
+            "guardedReasons": guarded_reasons,
             "counts": counts,
             "readiness": _compact_readiness(readiness),
             "health": _compact_health(health),
@@ -1127,13 +1146,21 @@ class LocalAutonomousService:
             trigger_source=AUTONOMOUS_TRIGGER,
             workflow_metadata={"parentWorkflow": AUTONOMOUS_TRIGGER},
         )
-        if not result.get("success"):
-            status = str(result.get("status") or "failed")
-            raise RuntimeError(f"Connector source collection ended as {status}")
+        connector_status = str(result.get("status") or "failed")
+        connector_completed = bool(result.get("success")) and connector_status in {
+            "completed",
+            "no_sources_enabled",
+        }
         return {
             "id": "sync_connector_sources",
-            "status": "completed",
-            "summary": result.get("summary") or {},
+            # Provider failures are already isolated, audited, and recoverable
+            # inside LocalConnectorIntakeService. Preserve that evidence while
+            # allowing independent local intake and ledger repair to continue.
+            "status": "completed" if connector_completed else "attention_required",
+            "summary": {
+                **(result.get("summary") or {}),
+                "connectorStatus": connector_status,
+            },
             "sources": sources,
             "connectorWorkflowRunId": result.get("workflowRunId"),
             "externalSubmission": "not_executed",

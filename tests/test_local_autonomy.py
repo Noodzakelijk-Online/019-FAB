@@ -104,6 +104,74 @@ class TestLocalAutonomousService(unittest.TestCase):
                 f"/bookkeeping-records/{record_id}",
             )
 
+    def test_blocked_ledger_health_allows_local_repair_but_gates_external_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "needs_review",
+                "exportStatus": "blocked_by_review",
+                "targetSystem": "waveapps_business",
+                "vendorName": "Unknown Vendor",
+                "category": "Manual Review",
+                "amount": 10,
+                "currency": "EUR",
+                "reviewRequired": True,
+            })
+            ledger.upsert_source_account({
+                "sourceType": "gmail",
+                "sourceIdentifier": "me",
+                "label": "Gmail",
+                "status": "failed",
+            })
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "health-gated-export",
+                "originalFilename": "approved-receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-08-03",
+                "totalAmount": 10,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            prepared = LocalExportAttemptService(ledger).prepare_from_routing_attempt(
+                route["routingAttemptId"]
+            )
+            LocalExportAttemptService(ledger).approve_attempt(
+                prepared["exportAttemptId"],
+                actor="tester",
+                confirmation=EXPORT_APPROVAL_PHRASE,
+            )
+            service = LocalAutonomousService(
+                ledger,
+                {"fab_autonomy_execute_approved_exports": True},
+                intake_paths=[intake_dir],
+                intake_extensions=["pdf"],
+            )
+
+            plan = service.plan(
+                include_connector_sync=False,
+                include_wave_plan=False,
+                include_wave_sync=False,
+            )
+            actions = {action["id"]: action for action in plan["actions"]}
+
+            self.assertEqual(plan["health"]["status"], "blocked")
+            self.assertEqual(plan["status"], "ready")
+            self.assertTrue(plan["canRunAutonomously"])
+            self.assertNotIn("operations_health_blocked", plan["blockedReasons"])
+            self.assertIn("operations_health_blocked", plan["guardedReasons"])
+            self.assertTrue(actions["rescan_intake"]["canRun"])
+            self.assertFalse(actions["execute_approved_exports"]["canRun"])
+            self.assertIn(
+                "operations health",
+                actions["execute_approved_exports"]["blockedReason"].lower(),
+            )
+
     def test_dashboard_autonomy_panel_surfaces_top_operating_exceptions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -648,6 +716,73 @@ class TestLocalAutonomousService(unittest.TestCase):
                 if action["id"] == "process_imported"
             )
             self.assertEqual(processing["summary"]["requested"], 1)
+
+    def test_connector_failure_does_not_suppress_independent_local_work(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            scan_path = os.path.join(intake_dir, "local-receipt.txt")
+            with open(scan_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "Vendor: Test Vendor\nDate: 2026-08-03\n"
+                    "Total: EUR 42.50\nOffice supplies\n"
+                )
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalAutonomousService(
+                ledger,
+                {
+                    "categorization_rules": {
+                        "Office Supplies": {
+                            "keywords": ["office supplies"],
+                            "vendors": ["test vendor"],
+                        }
+                    },
+                },
+                intake_paths=[intake_dir],
+                intake_extensions=["txt"],
+            )
+
+            with patch("src.operations.local_autonomy.LocalConnectorIntakeService") as connector_type:
+                connector = connector_type.return_value
+                connector.plan.return_value = {
+                    "enabledSources": ["gmail"],
+                    "syncableSources": ["gmail"],
+                    "sources": [{
+                        "source": "gmail",
+                        "status": "ready",
+                        "enabled": True,
+                        "canSync": True,
+                        "targetSystem": "waveapps_business",
+                    }],
+                }
+                connector.sync.return_value = {
+                    "success": False,
+                    "status": "failed",
+                    "workflowRunId": 42,
+                    "summary": {"registered": 0, "failedSources": 1},
+                }
+
+                result = service.run_cycle(
+                    include_wave_plan=False,
+                    include_wave_sync=False,
+                )
+
+            executed = {action["id"]: action for action in result["executedActions"]}
+            steps = {
+                step["step_key"]: step
+                for step in ledger.list_workflow_steps(
+                    workflow_run_id=result["workflowRunId"],
+                    limit=100,
+                )
+            }
+
+            self.assertTrue(result["success"])
+            self.assertEqual(executed["sync_connector_sources"]["status"], "attention_required")
+            self.assertEqual(executed["sync_connector_sources"]["summary"]["failedSources"], 1)
+            self.assertEqual(steps["sync_connector_sources"]["status"], "blocked")
+            self.assertEqual(executed["rescan_intake"]["summary"]["registered"], 1)
+            self.assertEqual(executed["process_imported"]["summary"]["requested"], 1)
+            self.assertIn("prepare_master_ledger_projection", executed)
 
     def test_autonomy_surfaces_and_prepares_mijngeldzaken_downstream_routes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -451,11 +451,26 @@ class LocalConnectorIntakeService:
 
         diagnostics = getattr(fetcher, "last_run", {})
         fetch_error = getattr(fetcher, "last_error", None) or getattr(fetcher, "auth_error", None)
+        reauthorization_required = (
+            source in {"gmail", "google_drive"}
+            and _oauth_reauthorization_required(fetch_error)
+        )
+        if reauthorization_required:
+            self._mark_reauthorization_required(source)
         errors = [item for item in [_safe_error(fetch_error, self.config)] if item]
         errors.extend(item for item in registration_errors if item)
         successful_evidence = counters["registered"] + counters["alreadyRegistered"]
-        status = "partial" if errors and successful_evidence else "failed" if errors else "ready"
+        status = (
+            "needs_authorization"
+            if reauthorization_required
+            else "partial"
+            if errors and successful_evidence
+            else "failed"
+            if errors
+            else "ready"
+        )
         error = "; ".join(errors)[:500] if errors else None
+        next_action = _next_action(source, status) if reauthorization_required else None
         self.ledger.upsert_source_account({
             "sourceType": source,
             "sourceIdentifier": plan["sourceIdentifier"],
@@ -476,6 +491,7 @@ class LocalConnectorIntakeService:
                 "diagnostics": diagnostics,
                 "run": counters,
                 "error": error,
+                "nextAction": next_action,
                 "lastSuccessfulSyncAt": _now() if status == "ready" else previous_metadata.get("lastSuccessfulSyncAt"),
                 "externalSubmission": "not_executed",
                 **({"targetSystem": plan["targetSystem"]} if plan.get("targetSystem") else {}),
@@ -502,6 +518,7 @@ class LocalConnectorIntakeService:
             "documents": registered_documents,
             "diagnostics": diagnostics,
             "error": error,
+            "nextAction": next_action,
             "externalSubmission": "not_executed",
         }
 
@@ -514,11 +531,19 @@ class LocalConnectorIntakeService:
         previous_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         message = _safe_error(error, self.config)
+        reauthorization_required = (
+            plan["source"] in {"gmail", "google_drive"}
+            and _oauth_reauthorization_required(error)
+        )
+        if reauthorization_required:
+            self._mark_reauthorization_required(plan["source"])
+        status = "needs_authorization" if reauthorization_required else "failed"
+        next_action = _next_action(plan["source"], status) if reauthorization_required else None
         self.ledger.upsert_source_account({
             "sourceType": plan["source"],
             "sourceIdentifier": plan["sourceIdentifier"],
             "label": plan["label"],
-            "status": "failed",
+            "status": status,
             "lastScanAt": scan_started_at,
             "metadata": {
                 **(previous_metadata or {}),
@@ -526,6 +551,7 @@ class LocalConnectorIntakeService:
                 "enabled": plan["enabled"],
                 "mode": plan["mode"],
                 "error": message,
+                "nextAction": next_action,
                 "externalSubmission": "not_executed",
             },
         })
@@ -535,7 +561,7 @@ class LocalConnectorIntakeService:
             "entityId": str(source_account_id),
             "details": {
                 "source": plan["source"],
-                "status": "failed",
+                "status": status,
                 "error": message,
                 "externalSubmission": "not_executed",
             },
@@ -543,7 +569,7 @@ class LocalConnectorIntakeService:
         return {
             "source": plan["source"],
             "sourceAccountId": source_account_id,
-            "status": "failed",
+            "status": status,
             "seen": 0,
             "registered": 0,
             "duplicates": 0,
@@ -551,8 +577,32 @@ class LocalConnectorIntakeService:
             "alreadyRegistered": 0,
             "skipped": 0,
             "error": message,
+            "nextAction": next_action,
             "externalSubmission": "not_executed",
         }
+
+    def _mark_reauthorization_required(self, source: str) -> None:
+        token_keys = {
+            "gmail": ("gmail_token_file", "gmail_token_path"),
+            "google_drive": ("google_drive_token_file", "drive_token_path"),
+        }.get(source, ())
+        token_path = _config_path(self.config, *token_keys)
+        if not token_path:
+            return
+        marker_path = f"{token_path}.reauthorize"
+        os.makedirs(os.path.dirname(marker_path) or ".", exist_ok=True)
+        temporary_path = f"{marker_path}.{uuid4().hex}.tmp"
+        try:
+            with open(temporary_path, "x", encoding="utf-8") as handle:
+                handle.write(f"requiredAt={_now()}\nreason=oauth_token_revoked_or_expired\n")
+            try:
+                os.chmod(temporary_path, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary_path, marker_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def _source_plan(self, source: str) -> Dict[str, Any]:
         configured = self._configured(source)
@@ -1011,6 +1061,13 @@ def _next_action(source: str, status: str) -> Optional[str]:
             "read-only desktop OAuth consent flow."
         )
     return f"Configure the read-only credentials and token required for {source}."
+
+
+def _oauth_reauthorization_required(error: Any) -> bool:
+    if not error:
+        return False
+    message = f"{type(error).__name__}: {error}".lower()
+    return "invalid_grant" in message or "token has been expired or revoked" in message
 
 
 def _safe_error(error: Any, config: Dict[str, Any]) -> Optional[str]:
