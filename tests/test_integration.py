@@ -59,6 +59,7 @@ download_dir = __PHOTOS_DOWNLOAD_DIR__
 
 [processor]
 ocr_processor = tesseract
+enable_enhanced_preprocessing = false
 
 [categorizer]
 ml_model_path = __ML_MODEL_PATH__
