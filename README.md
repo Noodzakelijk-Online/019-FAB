@@ -236,13 +236,18 @@ rediscovering the matching API, dashboard listener and singleton worker. The
 dashboard process tree is adopted only after its runtime identity, checkout and
 local API endpoint match, so repeated starts do not create duplicate
 bookkeeping loops or move the dashboard to another port. `Stop-FAB.cmd`
-performs the same discovery when runtime metadata is stale or missing.
+performs the same discovery when runtime metadata is stale or missing. The
+launcher records a secret-safe source fingerprint and restarts its own API,
+worker, and dashboard when code or local configuration has changed. Ledger,
+credential, token, and other runtime data are excluded from that fingerprint.
 
-For Google Drive intake and verified move-only archival, place a Google OAuth
-desktop client JSON at `credentials/drive_credentials.json`, then double-click
-`Authorize-FAB-GoogleDrive.cmd`. The supervised flow opens Google in your
-browser, writes `tokens/drive_token.pickle`, verifies access to the configured
-intake folder, and never prints or stores the token in the ledger.
+Complete Gmail and Google Drive consent from **Finish activation** in the
+operator dashboard. An installed desktop OAuth client can be reused for fresh
+consent; upload another JSON only for an intentional client rotation. The
+supervised flows open Google in your default browser, store tokens only under
+`tokens/`, verify the configured mailbox or intake folder, and never print or
+store the tokens in the ledger. `Authorize-FAB-GoogleDrive.cmd` remains
+available as a command-line alternative.
 
 Configure Wave from the **Connections** section of the operator dashboard.
 Open **Wave - Noodzakelijk Online**, store the user-owned API token and business

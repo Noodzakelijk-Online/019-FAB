@@ -494,6 +494,24 @@ if (Test-Path -LiteralPath $runtimePath) {
     }
 }
 
+$sourceFingerprint = & $python.Source -m src.runtime_fingerprint
+if ($LASTEXITCODE -ne 0 -or -not $sourceFingerprint) {
+    throw "FAB could not fingerprint the current runtime sources."
+}
+$sourceFingerprint = ([string]$sourceFingerprint).Trim()
+if ($savedRuntime) {
+    $savedFingerprintProperty = $savedRuntime.PSObject.Properties["sourceFingerprint"]
+    $savedFingerprint = if ($savedFingerprintProperty) { [string]$savedFingerprintProperty.Value } else { "" }
+    if ($savedFingerprint -ne $sourceFingerprint) {
+        Write-Host "FAB sources changed; restarting the local services..."
+        & (Join-Path $root "Stop-FAB.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            throw "FAB could not stop the stale local services."
+        }
+        $savedRuntime = $null
+    }
+}
+
 $apiPid = $null
 $workerPid = $null
 $webPid = $null
@@ -677,21 +695,35 @@ if (-not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker"
 }
 
 try {
-    $driveStatusRequest = @{
-        Uri = "$apiBaseUrl/api/drive-wave/status"
+    $activationStatusRequest = @{
         UseBasicParsing = $true
         TimeoutSec = 5
     }
     if ($apiToken) {
-        $driveStatusRequest.Headers = @{ Authorization = "Bearer $apiToken" }
+        $activationStatusRequest.Headers = @{ Authorization = "Bearer $apiToken" }
     }
-    $driveStatus = Invoke-RestMethod @driveStatusRequest
-    if ($driveStatus.status -eq "needs_authorization") {
-        Write-Warning "Google Drive is configured but not authorized. Run Authorize-FAB-GoogleDrive.cmd after installing the OAuth desktop credentials file."
+
+    $gmailStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/connectors/gmail/authorization"
+    $driveStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/connectors/google-drive/authorization"
+    $waveStatus = Invoke-RestMethod @activationStatusRequest -Uri "$apiBaseUrl/api/wave/setup"
+    if ([bool]$gmailStatus.reauthorizationRequired) {
+        Write-Warning "Gmail needs fresh read-only consent. Open Finish activation in the FAB dashboard and select Reauthorize Gmail."
+    }
+    elseif (-not [bool]$gmailStatus.tokenPresent) {
+        Write-Warning "Gmail is not authorized. Open Finish activation in the FAB dashboard and select Authorize Gmail."
+    }
+    if ([bool]$driveStatus.reauthorizationRequired) {
+        Write-Warning "Google Drive needs fresh consent. Open Finish activation in the FAB dashboard and select Reauthorize Drive."
+    }
+    elseif (-not [bool]$driveStatus.tokenPresent) {
+        Write-Warning "Google Drive is not authorized. Open Finish activation in the FAB dashboard and select Authorize Drive."
+    }
+    if (-not [bool]$waveStatus.ready) {
+        Write-Warning "Wave is not ready. Open Finish activation in the FAB dashboard and select Connect Wave."
     }
 }
 catch {
-    Write-Warning "FAB could not read Drive authorization status during startup."
+    Write-Warning "FAB could not read provider activation status during startup."
 }
 
 [ordered]@{
@@ -707,6 +739,7 @@ catch {
     apiBaseUrl = $apiBaseUrl
     dashboardUrl = $dashboardUrl
     webIdentityUrl = $webIdentityUrl
+    sourceFingerprint = $sourceFingerprint
 } | ConvertTo-Json | Set-Content -LiteralPath $runtimePath -Encoding utf8
 
 Write-Host ""
