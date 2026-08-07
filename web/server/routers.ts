@@ -485,7 +485,8 @@ export const appRouter = router({
         accessToken: z.string().trim().min(10).max(16_384).optional(),
         businessId: z.string().trim().min(1).max(255).optional(),
         anchorAccountId: z.string().trim().min(1).max(255).optional(),
-        defaultCategoryAccountId: z.string().trim().min(1).max(255).optional(),
+        // An empty value explicitly clears the optional fallback account.
+        defaultCategoryAccountId: z.string().trim().max(255).optional(),
         categoryAccountIds: z.record(z.string().trim().min(1).max(255), z.string().trim().min(1).max(255)).optional(),
         clearAccessToken: z.boolean().optional(),
       }).strict())
