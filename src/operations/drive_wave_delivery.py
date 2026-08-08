@@ -12,7 +12,10 @@ from urllib.parse import urlsplit
 
 from src.document_fetchers.drive_archiver import DriveArchiveClient
 from src.operations.local_ledger import LocalOperationsLedger
-from src.operations.local_wave_receipt_executor import LocalWaveReceiptExecutorService
+from src.operations.local_wave_receipt_executor import (
+    LocalWaveReceiptExecutorService,
+    wave_business_uuid,
+)
 from src.operations.local_wave_setup import LocalWaveSetupService
 
 
@@ -1522,6 +1525,7 @@ def _wave_upload_reasons(document: Dict[str, Any]) -> list[str]:
 
 
 def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]:
+    business_uuid = wave_business_uuid(business_id)
     return {
         "version": "wave-transactions-browser-v1",
         "coordinator": {
@@ -1539,7 +1543,8 @@ def _wave_browser_contract(business_id: str, document_id: int) -> Dict[str, Any]
             "credentialsAccepted": False,
         },
         "transactionListUrl": (
-            f"https://next.waveapps.com/{business_id}/transactions" if business_id else None
+            f"https://next.waveapps.com/{business_uuid}/transactions"
+            if business_uuid else None
         ),
         "surface": "Accounting > Transactions",
         "observedControls": {

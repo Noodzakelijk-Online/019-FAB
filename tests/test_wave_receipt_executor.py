@@ -70,6 +70,18 @@ class TestLocalWaveReceiptExecutorService(unittest.TestCase):
             "/api/drive-wave/documents/{documentId}/attachment-readback",
         )
 
+    def test_status_exposes_dashboard_uuid_from_wave_graphql_id(self):
+        self.service.config["waveapps_business_id"] = (
+            "QnVzaW5lc3M6YzdmMTVjZjktY2U0Yi00ZWViLThlM2MtOWM0Nzc0OGE0YmQ5"
+        )
+
+        status = self.service.status()
+
+        self.assertEqual(
+            status["configuredBusinessUuid"],
+            "c7f15cf9-ce4b-4eeb-8e3c-9c47748a4bd9",
+        )
+
     def test_ready_session_requires_business_and_all_capabilities(self):
         missing = self.service.register(self._session(capabilities=["transaction_locate"]))
 

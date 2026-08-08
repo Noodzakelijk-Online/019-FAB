@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
 import re
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol
 
@@ -88,6 +91,7 @@ class LocalWaveReceiptExecutorService:
             "mode": "supervised_user_owned_browser",
             "ready": False,
             "configuredBusinessId": configured_business_id or None,
+            "configuredBusinessUuid": wave_business_uuid(configured_business_id),
             "requiredCapabilities": list(REQUIRED_CAPABILITIES),
             "missingCapabilities": list(REQUIRED_CAPABILITIES),
             "heartbeatTtlSeconds": self._heartbeat_ttl_seconds(),
@@ -691,6 +695,27 @@ def _safe_identifier(value: Any, field: str) -> str:
     if not SAFE_IDENTIFIER.fullmatch(normalized):
         raise ValueError(f"{field} must contain 1-128 safe identifier characters.")
     return normalized
+
+
+def wave_business_uuid(value: Any) -> Optional[str]:
+    normalized = str(value or "").strip()
+    candidates = [normalized]
+    if normalized:
+        try:
+            padded = normalized + "=" * (-len(normalized) % 4)
+            decoded = base64.b64decode(padded, validate=True).decode("ascii")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            decoded = ""
+        if decoded.startswith("Business:"):
+            candidates.insert(0, decoded.partition(":")[2])
+    for candidate in candidates:
+        try:
+            parsed = uuid.UUID(candidate)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if str(parsed) == candidate.lower():
+            return str(parsed)
+    return None
 
 
 def _safe_optional_identifier(value: Any, field: str) -> Optional[str]:

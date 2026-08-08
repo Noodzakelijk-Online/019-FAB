@@ -470,6 +470,19 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             121.0,
         )
 
+    def test_work_order_transaction_url_uses_wave_dashboard_uuid(self):
+        self.config["waveapps_business_id"] = (
+            "QnVzaW5lc3M6YzdmMTVjZjktY2U0Yi00ZWViLThlM2MtOWM0Nzc0OGE0YmQ5"
+        )
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        order = service.list_work_orders(limit=10)["workOrders"][0]
+
+        self.assertEqual(
+            order["browserExecution"]["transactionListUrl"],
+            "https://next.waveapps.com/c7f15cf9-ce4b-4eeb-8e3c-9c47748a4bd9/transactions",
+        )
+
     def test_trusted_gmail_scanner_source_gets_evidence_bound_wave_work_order(self):
         document_id, source_path, source_bytes, source_hash, config = (
             self._register_gmail_scanner_document()

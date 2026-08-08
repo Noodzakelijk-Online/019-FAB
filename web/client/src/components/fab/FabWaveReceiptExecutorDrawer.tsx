@@ -40,6 +40,7 @@ export function FabWaveReceiptExecutorDrawer({
   const status = text(executor.status, "not_connected");
   const ready = bool(executor.ready);
   const configuredBusinessId = text(executor.configuredBusinessId || executor.businessId, "");
+  const configuredBusinessUuid = text(executor.configuredBusinessUuid, "");
   const executorId = text(executor.executorId, "");
   const sessionId = text(executor.sessionId, "");
   const requiredCapabilities = strings(executor.requiredCapabilities);
@@ -52,13 +53,14 @@ export function FabWaveReceiptExecutorDrawer({
   const manifestPath = text(executor.haiManifestPath, "/api/hai/manifest");
   const manifestUrl = endpointUrl(localApiEndpoint, manifestPath);
   const statusUrl = endpointUrl(localApiEndpoint, "/api/wave/receipt-executor/status");
-  const waveUrl = configuredBusinessId
-    ? `https://next.waveapps.com/${encodeURIComponent(configuredBusinessId)}/dashboard/`
+  const waveUrl = configuredBusinessUuid
+    ? `https://next.waveapps.com/${encodeURIComponent(configuredBusinessUuid)}/dashboard/`
     : "https://my.waveapps.com/login/";
   const pairingBrief = useMemo(() => JSON.stringify({
     version: text(executor.version, "fab-wave-receipt-executor-session-v1"),
     fabApiBaseUrl: localApiEndpoint,
     configuredBusinessId: configuredBusinessId || null,
+    configuredBusinessUuid: configuredBusinessUuid || null,
     credentialPolicy: text(executor.credentialPolicy, "browser_session_owned_by_user_never_stored_in_fab"),
     requiredCapabilities,
     haiManifestUrl: manifestUrl,
@@ -72,7 +74,7 @@ export function FabWaveReceiptExecutorDrawer({
         pathTemplate: "/api/drive-wave/documents/{documentId}/attachment-readback",
       },
     },
-  }), [configuredBusinessId, executor.credentialPolicy, executor.pairing, executor.version, localApiEndpoint, manifestUrl, requiredCapabilities, statusUrl]);
+  }), [configuredBusinessId, configuredBusinessUuid, executor.credentialPolicy, executor.pairing, executor.version, localApiEndpoint, manifestUrl, requiredCapabilities, statusUrl]);
 
   useEffect(() => {
     if (!open) return;
