@@ -2009,6 +2009,7 @@ class TestLocalOperationsApi(unittest.TestCase):
                 "source": "scanner",
                 "sourceDocumentId": "scan-export-form",
                 "originalFilename": "receipt.txt",
+                "documentType": "vendor_invoice",
                 "processingStatus": "reviewed",
                 "vendorName": "Office Shop",
                 "category": "Office Supplies",
@@ -2027,6 +2028,9 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Last export preparation run", html)
             self.assertIn("approval_required", html)
             self.assertIn("APPROVE FAB EXPORT DRAFT", html)
+            self.assertIn('class="export-table"', html)
+            self.assertIn(f'href="/documents/{ledger.list_documents(limit=1)[0]["id"]}"', html)
+            self.assertIn("Open bill", html)
 
     def test_api_runs_and_resolves_local_reconciliation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

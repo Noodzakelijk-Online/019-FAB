@@ -203,7 +203,7 @@ DASHBOARD_TEMPLATE = """
       background: #fbfcfd;
     }
     .section-head p { margin: 4px 0 0; color: var(--muted); }
-    .table-wrap { overflow-x: auto; }
+    .table-wrap { max-width: 100%; overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 880px; }
     th, td {
       padding: 12px 14px;
@@ -221,7 +221,7 @@ DASHBOARD_TEMPLATE = """
     }
     tbody tr:hover { background: #f9fbfc; }
     .muted { color: var(--muted); }
-    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
+    .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; overflow-wrap: anywhere; }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -284,6 +284,31 @@ DASHBOARD_TEMPLATE = """
       display: inline-flex;
       margin: 0;
     }
+    .button-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+      border: 1px solid var(--accent-dark);
+      padding: 4px 8px;
+      background: #fff;
+      color: var(--accent-dark);
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 1.2;
+    }
+    .button-link:hover { background: var(--panel-soft); text-decoration: none; }
+    .export-table { min-width: 0; table-layout: fixed; }
+    .export-table td { min-width: 0; overflow-wrap: anywhere; }
+    .export-actions > .button-link { margin-bottom: 8px; }
+    .export-actions form.table-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      width: 100%;
+      margin: 0 0 7px;
+    }
+    .export-actions form.table-actions input { min-width: 0; }
     input[type="text"], textarea, select {
       width: 100%;
       min-height: 36px;
@@ -370,10 +395,55 @@ DASHBOARD_TEMPLATE = """
       form.review-actions { grid-template-columns: 1fr; }
       .inline-actions { justify-content: flex-start; }
     }
+    @media (max-width: 1200px) {
+      #exports .table-wrap { overflow: visible; padding: 12px; }
+      .export-table, .export-table tbody { display: block; min-width: 0; }
+      .export-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .export-table tbody { display: grid; gap: 12px; }
+      .export-table tr {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        border: 1px solid var(--line);
+        background: #fff;
+      }
+      .export-table td {
+        display: grid;
+        grid-template-columns: minmax(88px, 0.45fr) minmax(0, 1fr);
+        gap: 10px;
+        padding: 10px 12px;
+      }
+      .export-table td::before {
+        content: attr(data-label);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+      .export-table .export-message,
+      .export-table .export-actions { grid-column: 1 / -1; }
+      .export-table .export-actions { display: block; background: #fbfcfd; }
+      .export-table .export-actions::before { display: block; margin-bottom: 8px; }
+      .export-actions form.table-actions { max-width: 520px; }
+    }
     @media (max-width: 520px) {
       .metrics { grid-template-columns: 1fr; }
       h1 { font-size: 25px; }
       .section-head { display: block; }
+      .export-table tr { grid-template-columns: 1fr; }
+      .export-table td,
+      .export-table .export-message,
+      .export-table .export-actions { grid-column: 1; }
+      .export-actions form.table-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1860,7 +1930,18 @@ DASHBOARD_TEMPLATE = """
       {% endif %}
       {% if export_attempts %}
       <div class="table-wrap">
-        <table>
+        <table class="export-table">
+          <colgroup>
+            <col style="width: 4%">
+            <col style="width: 9%">
+            <col style="width: 10%">
+            <col style="width: 15%">
+            <col style="width: 10%">
+            <col style="width: 10%">
+            <col style="width: 8%">
+            <col style="width: 14%">
+            <col style="width: 20%">
+          </colgroup>
           <thead>
             <tr>
               <th>ID</th>
@@ -1877,21 +1958,21 @@ DASHBOARD_TEMPLATE = """
           <tbody>
           {% for export in export_attempts %}
             <tr>
-              <td class="mono">#{{ export.id }}</td>
-              <td class="mono">
+              <td class="mono" data-label="ID">#{{ export.id }}</td>
+              <td class="mono" data-label="Source">
                 {% if export.document_id %}
-                doc #{{ export.document_id }}
+                <a href="{{ url_for('document_detail_page', document_id=export.document_id) }}">doc #{{ export.document_id }}</a>
                 {% elif export.bookkeeping_record_id %}
-                record #{{ export.bookkeeping_record_id }}
+                <a href="{{ url_for('bookkeeping_record_detail_page', record_id=export.bookkeeping_record_id) }}">record #{{ export.bookkeeping_record_id }}</a>
                 {% else %}
                 -
                 {% endif %}
               </td>
-              <td>
+              <td data-label="Target">
                 {{ export.target_system }}
                 <div class="muted">{{ export.surface or "-" }}</div>
               </td>
-              <td>
+              <td data-label="Action">
                 {{ export.action_id or "-" }}
                 <div class="muted mono">{{ export.operation_id or "-" }}</div>
                 {% if export.external_id %}
@@ -1904,9 +1985,9 @@ DASHBOARD_TEMPLATE = """
                 <div><a href="{{ url_for('export_attempt_artifact', export_attempt_id=export.id, format='csv' if export.metadata.masterLedgerDraft.draftType == 'transaction_import' else 'json') }}">Artifact</a></div>
                 {% endif %}
               </td>
-              <td><span class="badge {{ export.status }}">{{ export.status }}</span></td>
-              <td><span class="badge {{ export.external_submission }}">{{ export.external_submission }}</span></td>
-              <td>
+              <td data-label="Status"><span class="badge {{ export.status }}">{{ export.status }}</span></td>
+              <td data-label="External"><span class="badge {{ export.external_submission }}">{{ export.external_submission }}</span></td>
+              <td data-label="Approval">
                 {% if export.approval_required %}
                 Required
                 {% elif export.approved_at %}
@@ -1915,8 +1996,13 @@ DASHBOARD_TEMPLATE = """
                 -
                 {% endif %}
               </td>
-              <td>{{ export.message or "-" }}</td>
-              <td>
+              <td class="export-message" data-label="Message">{{ export.message or "-" }}</td>
+              <td class="export-actions" data-label="Actions">
+                {% if export.document_id %}
+                <a class="button-link" href="{{ url_for('document_detail_page', document_id=export.document_id) }}">{{ "Open bill" if export.action_id == "bill_create" else "Open document" }}</a>
+                {% elif export.bookkeeping_record_id %}
+                <a class="button-link" href="{{ url_for('bookkeeping_record_detail_page', record_id=export.bookkeeping_record_id) }}">Open record</a>
+                {% endif %}
                 {% if export.metadata and export.metadata.masterLedgerDraft and export.status != "supervision_required" and export.external_submission not in ["queued", "submitted", "executed"] %}
                 <form class="table-actions" method="post" action="{{ url_for('regenerate_export_attempt_form', export_attempt_id=export.id) }}">
                   <button class="compact secondary" type="submit">Regenerate draft</button>
