@@ -110,12 +110,29 @@ Audit date: 2026-08-09
   Drafts are schema-bounded, exact-review/source-identity-bound, seven-day
   expiring, cleared after successful approval, explicitly discardable, and
   never written to the authoritative ledger before the operator submits.
+- Wired local bank-statement file import through the authenticated React
+  dashboard, typed server router, bounded gateway, Flask API, normalizer,
+  SQLite ledger, audit trail, and automatic local reconciliation command.
+  CSV, JSON, CAMT/XML, and MT940 files are limited to 4 MB; binary content,
+  mismatched extensions, malformed XML/JSON/base64, and CSV files without a
+  recognizable transaction date plus amount/debit/credit header fail closed.
+- Corrected Dutch bank-export normalization for `Datum`, `Boekingsdatum`,
+  `Valutadatum`, `Valuta`, and counterparty-name headers. Invalid dates or
+  missing amounts can no longer create ledger rows or false completed imports.
+- Made generated bank identities occurrence-aware. Two legitimate identical
+  rows in one statement are both retained, while replaying the same statement
+  recognizes both identities and creates no additional rows.
+- Corrected the dashboard's unreconciled-value read: it no longer sends the
+  invalid `status=unreconciled` filter and excludes only finalized
+  reconciliation states from the local amount projection.
 
 ## Remaining risks
 
 - Live Google and Wave acceptance depends on owner authorization and current provider state.
 - MijnGeldzaken remains a supervised master-ledger export, not an authenticated write connector.
 - Direct PSD2 bank feeds and SVB submissions are not implemented.
+- Bank-file import is production-wired, but direct PSD2 account connectivity
+  remains unavailable; statement files must be exported by the account owner.
 - Compose configuration, both images, authenticated service health, dashboard access, a complete 29-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
 - Recovery is implemented and locally verified without touching the live ledger. A production-sized restore rehearsal, recovery-time objective measurement, and accountant-approved evidence sampling remain required before unattended upgrades rely on it.
 - Formal penetration testing, DPIA approval, accountant validation, and production disaster-recovery exercises remain external work.

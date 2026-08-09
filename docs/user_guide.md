@@ -158,6 +158,8 @@ Normalized bookkeeping records apply fail-closed financial consistency controls.
 
 The operator activation checklist distinguishes posting-blocking decisions from evidence-only reviews. Bank statements, sensitive government documents, and other confidently non-posting material remain visible and retained for review, but they no longer inflate the number of documents blocking Wave delivery. The complete review workspace still shows both groups; no review item is silently resolved.
 
+Use **Bank statement** in the operator dashboard Overview, or the setup button on the **Banking API** connection row, to import an account export directly into FAB's local ledger. Enter a stable account identifier, preferably the IBAN or the same account label used for every export, then choose one CSV, JSON, CAMT/XML, or MT940 file up to 4 MB. FAB validates the format and financial columns, keeps legitimate repeated rows, treats exact re-imports as duplicates, and starts local reconciliation only when new rows were added. The result shows new, already-present, and skipped rows plus the explicit external-submission state. This workflow does not connect to a bank, upload the original statement to Wave, or submit anything externally.
+
 ### 4.3. `[google_drive]` Section
 
 Configuration for fetching documents from Google Drive.

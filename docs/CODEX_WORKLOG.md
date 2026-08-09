@@ -251,6 +251,34 @@
 - Verified implementation commit `c5e42aa` from a separate clean clone: source compilation, Compose parsing, clean status, and 123 focused tests passed.
 - Scanned the staged implementation snapshot for runtime paths and high-confidence credential patterns; none were present.
 
+## 2026-08-09 - Safe operator bank-statement import
+
+- Wired a complete local bank-import vertical slice from the React operator
+  drawer through the role-gated tRPC router, bounded server gateway, Flask API,
+  normalization service, SQLite ledger, audit event, and existing local
+  reconciliation command.
+- Added 4 MB CSV, JSON, CAMT/XML, and MT940 file policy with filename/format
+  agreement, base64 bounds, text/binary checks, strict CSV financial headers,
+  and malformed XML/JSON rejection.
+- Added Dutch bank-column normalization and CP1252 support for Windows exports.
+  Invalid dates and missing amounts are skipped and cannot create false
+  completed imports.
+- Preserved legitimate identical rows through occurrence-aware generated
+  transaction identities while keeping exact statement replay idempotent.
+- Corrected the control-center unreconciled-value query and projection so
+  finalized bank rows are excluded without using a nonexistent status value.
+- Added Overview and Connections entry points, recent-import evidence,
+  import/duplicate/skipped results, explicit external-submission state,
+  focus trapping, Escape/focus restoration, and responsive drawer styling.
+- Local verification passed 806 backend tests with four optional-runtime skips,
+  179 web tests, TypeScript checking, production build budgets, peer checks,
+  dependency audit, source compilation, production Windows restart, and live
+  desktop/narrow browser acceptance with an empty console.
+- Implementation commit `2356177` is on `origin/main`; GitHub Actions run
+  `31335374005` passed the frontend, Linux backend, and all four Windows jobs.
+- No real bank statement was selected in browser QA, no provider record was
+  changed, no Drive source was archived, and no external submission occurred.
+
 ## Explicitly not performed
 
 - No live provider record was created, modified, or deleted during the code audit.
