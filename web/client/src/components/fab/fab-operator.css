@@ -144,6 +144,10 @@ html.fab-operator-active body {
 .fab-primary-button:hover { background: var(--fab-teal); border-color: var(--fab-teal); box-shadow: 0 7px 18px rgba(16,63,58,.2); }
 .fab-secondary-button { border: 1px solid var(--fab-line-strong); background: var(--fab-panel); color: var(--fab-ink); }
 .fab-secondary-button:hover { background: #f5f8f7; border-color: #9fb2ad; color: var(--fab-evergreen); }
+.fab-danger-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 14px; border: 1px solid #9f3029; border-radius: 6px; background: var(--fab-red); color: #fff; font-size: 11px; font-weight: 740; white-space: nowrap; }
+.fab-danger-button:hover { background: #8d2a24; }
+.fab-danger-button.compact { min-height: 32px; padding: 0 10px; }
+.fab-danger-button svg { width: 14px; height: 14px; }
 .fab-primary-button:active,
 .fab-secondary-button:active { transform: translateY(1px); }
 .fab-secondary-button.compact { min-height: 32px; padding: 0 10px; }
@@ -519,6 +523,18 @@ html.fab-operator-active body {
 .fab-panel-state span { font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 
 .fab-automation-section { min-width: 0; }
+.fab-emergency-control { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 12px 14px; border-bottom: 1px solid var(--fab-line); background: #f7faf9; }
+.fab-emergency-control > svg { width: 20px; height: 20px; color: var(--fab-green); }
+.fab-emergency-control > div { display: grid; min-width: 0; gap: 2px; }
+.fab-emergency-control strong { color: var(--fab-ink); font-size: 13px; }
+.fab-emergency-control span,
+.fab-emergency-control small { color: var(--fab-muted); font-size: 11px; line-height: 1.4; }
+.fab-emergency-control.is-active { border-color: #d7a3a0; background: var(--fab-red-soft); }
+.fab-emergency-control.is-active > svg,
+.fab-emergency-control.is-active strong { color: var(--fab-red); }
+.fab-emergency-resume { display: grid !important; grid-template-columns: minmax(180px, 1fr) auto; align-items: end; gap: 6px !important; }
+.fab-emergency-resume label { grid-column: 1 / -1; color: var(--fab-red); font-size: 10px; font-weight: 700; }
+.fab-emergency-resume input { min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid #d7a3a0; border-radius: 5px; background: #fff; color: var(--fab-ink); font: 11px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .fab-run-summary { padding: 14px; border-bottom: 1px solid var(--fab-line); }
 .fab-run-state { display: flex; align-items: center; gap: 12px; padding: 13px; border: 1px solid currentColor; border-radius: 6px; }
 .fab-run-state > div { display: grid; min-width: 0; }
@@ -551,7 +567,8 @@ html.fab-operator-active body {
 .fab-priority-grid .fab-pipeline-note { flex-wrap: wrap; }
 .fab-priority-grid .fab-pipeline-note button { width: 100%; margin: 4px 0 0; }
 
-.fab-backup-heading .fab-primary-button svg { width: 17px; height: 17px; }
+.fab-backup-heading .fab-primary-button svg,
+.fab-backup-heading .fab-secondary-button svg { width: 17px; height: 17px; }
 .fab-backup-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--fab-line); background: #f7faf9; }
 .fab-backup-summary > div { position: relative; display: grid; min-width: 0; min-height: 116px; align-content: start; gap: 3px; padding: 16px 16px 14px 50px; border-right: 1px solid var(--fab-line); }
 .fab-backup-summary > div:last-child { border-right: 0; }
@@ -1034,6 +1051,11 @@ html.fab-operator-active body {
   .fab-capability-heading,
   .fab-pipeline-note { align-items: flex-start; flex-direction: column; }
   .fab-pipeline-note button { width: 100%; margin-left: 0; }
+  .fab-emergency-control { grid-template-columns: 22px minmax(0, 1fr); align-items: start; }
+  .fab-emergency-control > button,
+  .fab-emergency-resume { grid-column: 1 / -1; width: 100%; }
+  .fab-emergency-resume { grid-template-columns: 1fr; }
+  .fab-emergency-resume button { width: 100%; }
   .fab-run-facts { grid-template-columns: 1fr; }
   .fab-run-facts div { border-right: 0; }
   .fab-run-facts div:nth-last-child(-n+2) { border-bottom: 1px solid var(--fab-line); }

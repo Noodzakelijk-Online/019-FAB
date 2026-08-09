@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -21,6 +22,34 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_local_ledger_uses_wal_and_allows_reads_during_worker_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            writer = sqlite3.connect(ledger_path, timeout=1.0)
+            try:
+                self.assertEqual(
+                    writer.execute("PRAGMA journal_mode").fetchone()[0].lower(),
+                    "wal",
+                )
+                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    """
+                    INSERT INTO runtime_controls (
+                        control_name, active, reason, updated_by, metadata_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("concurrency-test", 1, "test", "test", "{}", "2026-08-09", "2026-08-09"),
+                )
+
+                metrics = ledger.dashboard_metrics()
+
+                self.assertEqual(metrics["documents"], 0)
+            finally:
+                writer.rollback()
+                writer.close()
+
     def test_review_api_rejects_invalid_financial_correction(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -322,6 +351,10 @@ class TestLocalOperationsApi(unittest.TestCase):
             health = client.get("/api/health")
             self.assertEqual(health.status_code, 200)
             self.assertEqual(health.get_json()["service"], "fab-ledger-api")
+            live = client.get("/api/live")
+            self.assertEqual(live.status_code, 200)
+            self.assertEqual(live.get_json()["status"], "ok")
+            self.assertNotIn("operations", live.get_json())
             self.assertEqual(
                 health.get_json()["instanceId"],
                 local_instance_id(Path(__file__).resolve().parents[1]),
@@ -2286,6 +2319,17 @@ class TestLocalOperationsApi(unittest.TestCase):
             backups = client.get("/api/backups").get_json()
             self.assertGreaterEqual(len(backups["backups"]), 2)
             self.assertIn(backups["schedule"]["status"], {"current", "due"})
+            self.assertEqual(backups["verificationMode"], "deep")
+            manifest_only = client.get("/api/backups?verify=false").get_json()
+            self.assertEqual(manifest_only["verificationMode"], "manifest_only")
+            self.assertEqual(
+                manifest_only["schedule"]["integrityVerification"],
+                "manifest_only",
+            )
+            self.assertTrue(all(
+                backup["status"] == "manifest_valid"
+                for backup in manifest_only["backups"]
+            ))
 
     def test_dashboard_backup_form_shows_backup_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:

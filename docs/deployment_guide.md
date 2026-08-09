@@ -15,10 +15,7 @@ Local deployment is suitable for development, testing, and running the solution 
     *   **Ubuntu/Debian**: `sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-nld`
     *   **macOS (Homebrew)**: `brew install tesseract && brew install tesseract-lang`
     *   **Windows**: Download installer from [Tesseract-OCR GitHub](https://tesseract-ocr.github.io/tessdoc/Downloads.html).
-*   **Playwright Browsers**: For `mijngeldzaken.nl` automation, Playwright requires browser binaries. After installing Python dependencies, run:
-    ```bash
-    playwright install --with-deps chromium
-    ```
+*   **Playwright Browsers**: MijnGeldzaken remains supervised. Where that workflow is enabled, install Chromium after the Python dependencies with `python -m playwright install chromium`.
 
 ### 1.2. Deployment Steps
 
@@ -142,115 +139,32 @@ Local deployment is suitable for development, testing, and running the solution 
 
 ## 2. Docker Deployment
 
-Docker provides a consistent and isolated environment for running the application, simplifying dependency management.
+The supported container deployment is the repository's three-service Compose stack: authenticated API, worker, and production dashboard. It uses named data/output volumes, mounts intake read-only, runs both images as non-root users, and publishes only to host loopback.
 
-### 2.1. Prerequisites
+1. Generate separate long random values for `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` in your secret manager or shell environment. Do not put them in Compose, `.env`, logs, URLs, or Git.
+2. If ports `5001` or `3000` are already occupied, set `FAB_API_HOST_PORT` and `FAB_WEB_HOST_PORT` to free loopback ports.
+3. Build and start the stack:
 
-*   **Docker** installed on your deployment machine.
+```powershell
+function New-FabSecret {
+    $bytes = New-Object byte[] 48
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
+    [Convert]::ToBase64String($bytes)
+}
+$env:FAB_LOCAL_API_TOKEN = New-FabSecret
+$env:FAB_WEB_JWT_SECRET = New-FabSecret
+$env:FAB_WEB_HOST_PORT = '3001' # optional
+docker compose up -d --build api worker web
+```
 
-### 2.2. Deployment Steps
+4. Open `http://127.0.0.1:<FAB_WEB_HOST_PORT>/admin/operations`. Check `docker compose ps` and `docker compose logs --tail 100 api worker web` if a service is unhealthy.
+5. Stop FAB with `docker compose stop`. Named volumes are retained. Do not use `down --volumes` against financial data unless a separately verified recovery package exists.
 
-1.  **Obtain the Project Files:**
+The web service's Docker gateway trust is intentionally narrow: it applies only in explicit local-operator mode, to private bridge gateway addresses ending in `.1`, and with a loopback hostname. Put an authenticated reverse proxy in front and disable local-operator mode for a remotely reachable deployment.
 
-    Ensure you have the entire project directory, including the `Dockerfile`.
+## 3. Cloud Deployment Boundary
 
-2.  **Build the Docker Image:**
-
-    Navigate to the project root directory (where `Dockerfile` is located) and build the image:
-    ```bash
-    docker build -t automated-bookkeeping:latest .
-    ```
-    This might take some time as it installs Tesseract and Playwright browsers.
-
-3.  **Run the Docker Container:**
-
-    ```bash
-    docker run -d --name bookkeeping-app \\
-        -v /path/on/host/for/data:/app/data \\
-        -v /path/on/host/for/config:/app/config \\
-        -e APP_GMAIL_CLIENT_ID="your_client_id" \\
-        -e APP_GMAIL_CLIENT_SECRET="your_client_secret" \\
-        # Add all other necessary APP_ environment variables
-        automated-bookkeeping:latest
-    ```
-    *   `-d`: Runs the container in detached mode (in the background).
-    *   `--name bookkeeping-app`: Assigns a name to your container for easy management.
-    *   `-v /path/on/host/for/data:/app/data`: Mounts a host directory to `/app/data` inside the container. Use this to persist logs, downloaded documents, and other dynamic data.
-    *   `-v /path/on/host/for/config:/app/config`: Mounts your `config` directory (containing `config.ini`) from the host to the container. This allows you to manage configuration externally.
-    *   `-e APP_...`: Pass sensitive credentials and other configurations as environment variables. This is the recommended way for Docker deployments.
-
-4.  **Check Container Logs:**
-
-    ```bash
-    docker logs bookkeeping-app
-    ```
-
-## 3. Google Cloud Functions Deployment
-
-Google Cloud Functions (GCF) is a serverless execution environment for building and connecting cloud services. It's ideal for event-driven processing.
-
-### 3.1. Prerequisites
-
-*   **Google Cloud Project**: A Google Cloud Platform project with billing enabled.
-*   **Google Cloud SDK (`gcloud`)**: Installed and configured on your local machine.
-*   **Service Account**: A service account with necessary permissions (e.g., Cloud Functions Developer, Cloud Storage Admin, Gmail API, Drive API, Photos Library API, etc.). Download its JSON key file.
-*   **Cloud Storage Bucket**: An input bucket to trigger document processing (if using GCS trigger).
-
-### 3.2. Deployment Steps
-
-1.  **Prepare Deployment Package:**
-
-    Use the `package.py` script to create a cloud-optimized zip archive. Navigate to the project root and run:
-    ```bash
-    python package.py
-    ```
-    This will create a `automated_bookkeeping_cloud_YYYYMMDD_HHMMSS.zip` file in the `dist/` directory.
-
-2.  **Upload Configuration and Credentials (Securely):**
-
-    *   **`config.ini`**: For Cloud Functions, it's best to pass all configurations via environment variables during deployment or use Google Secret Manager. Avoid including `config.ini` directly in the deployment package if it contains sensitive data.
-    *   **Credentials**: Store your Google API credentials (for Gmail, Drive, Photos, Vision API) securely, preferably in Google Secret Manager, and access them via environment variables or directly in your function code. For this example, we assume `GOOGLE_APPLICATION_CREDENTIALS` points to a service account key.
-
-3.  **Deploy `process_document_cloud_function` (GCS Triggered):**
-
-    This function is triggered when a new document is uploaded to a specified Google Cloud Storage bucket.
-    ```bash
-    gcloud functions deploy process_document_cloud_function \\
-        --runtime python39 \\
-        --trigger-bucket YOUR_INPUT_BUCKET_NAME \\
-        --entry-point process_document_cloud_function \\
-        --source dist/automated_bookkeeping_cloud_YYYYMMDD_HHMMSS.zip \\
-        --memory 512MB \\
-        --timeout 540s \\
-        --set-env-vars GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/service_account_key.json,APP_GMAIL_CLIENT_ID=...,APP_GMAIL_CLIENT_SECRET=... \\
-        --service-account your-service-account@your-project-id.iam.gserviceaccount.com
-    ```
-    *   Replace `YOUR_INPUT_BUCKET_NAME` with the name of your GCS bucket.
-    *   Replace `YYYYMMDD_HHMMSS` with the actual timestamp in your zip file name.
-    *   Adjust `--memory` and `--timeout` as needed based on your document processing complexity.
-    *   `--set-env-vars`: Provide all necessary configuration parameters as environment variables. Separate multiple variables with commas.
-    *   `--service-account`: Specify the service account that the function will run as. This service account needs permissions to access GCS, Gmail API, Drive API, etc.
-
-4.  **Deploy `trigger_workflow_http` (HTTP Triggered):**
-
-    This function can be invoked via an HTTP request to start the entire automated bookkeeping workflow.
-    ```bash
-    gcloud functions deploy trigger_workflow_http \\
-        --runtime python39 \\
-        --trigger-http \\
-        --entry-point trigger_workflow_http \\
-        --source dist/automated_bookkeeping_cloud_YYYYMMDD_HHMMSS.zip \\
-        --memory 1024MB \\
-        --timeout 540s \\
-        --allow-unauthenticated \\
-        --set-env-vars GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/service_account_key.json,APP_GMAIL_CLIENT_ID=...,APP_GMAIL_CLIENT_SECRET=... \\
-        --service-account your-service-account@your-project-id.iam.gserviceaccount.com
-    ```
-    *   `--allow-unauthenticated`: Allows unauthenticated invocations. For production, consider removing this and implementing proper authentication (e.g., using Google Cloud IAM).
-    *   Note the increased memory for the full workflow.
-
-### 3.3. Monitoring and Logging
-
-Google Cloud Functions automatically integrates with Google Cloud Logging. You can view function logs in the Google Cloud Console under "Logging > Logs Explorer".
+No unauthenticated Google Cloud Function deployment is supported. For cloud use, deploy the same Compose services or equivalent images behind private networking, TLS, an authenticated reverse proxy, a managed secret store, encrypted persistent volumes, monitored backups, and provider egress controls. A cloud deployment is not accepted until restore, provider sandbox, authorization-expiry, and attachment-readback tests pass in that exact environment.
 
 

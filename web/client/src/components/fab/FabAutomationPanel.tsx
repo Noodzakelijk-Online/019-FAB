@@ -9,7 +9,10 @@ import {
   ListChecks,
   Play,
   ScanText,
+  ShieldAlert,
+  Square,
 } from "lucide-react";
+import { useState } from "react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
 import {
@@ -42,7 +45,7 @@ type FabAutomationPanelProps = {
   workflowResource?: FabResourceState;
   pendingCommand: FabCommandId | null;
   connected: boolean;
-  onCommand: (commandId: FabCommandId) => void;
+  onCommand: (commandId: FabCommandId, payload?: FabRecord) => void;
 };
 
 export function FabAutomationPanel({
@@ -64,6 +67,10 @@ export function FabAutomationPanel({
   const failed = recordsOrStrings(steps.failed);
   const actions = records(autonomy.actions);
   const capabilityStatus = text(autonomy.status, "unavailable");
+  const emergencyStop = asRecord(autonomy.emergencyStop);
+  const emergencyStopActive = bool(emergencyStop.active);
+  const [resumeConfirmation, setResumeConfirmation] = useState("");
+  const resumePhrase = "RESUME FAB AUTONOMY";
 
   return (
     <section id="automation" className="fab-section fab-automation-section">
@@ -73,6 +80,44 @@ export function FabAutomationPanel({
           <FabDataStatus resource={workflowResource} />
           <span className={`fab-status-chip tone-${statusTone(runStatus)}`}>{copy("Latest run", "Laatste run")}: {status(runStatus)}</span>
         </div>
+      </div>
+
+      <div className={`fab-emergency-control ${emergencyStopActive ? "is-active" : ""}`} role={emergencyStopActive ? "alert" : "status"}>
+        <ShieldAlert aria-hidden="true" />
+        <div>
+          <strong>{emergencyStopActive ? copy("Automation stopped", "Automatisering gestopt") : copy("Emergency stop ready", "Noodstop gereed")}</strong>
+          <span>{emergencyStopActive
+            ? text(emergencyStop.reason, copy("No new autonomous step may start.", "Er mag geen nieuwe autonome stap starten."))
+            : copy("Stops new workflow steps immediately; an active step may finish safely.", "Stopt nieuwe workflowstappen direct; een actieve stap mag veilig afronden.")}</span>
+          {emergencyStopActive && <small>{copy("Updated by", "Bijgewerkt door")} {text(emergencyStop.updatedBy, copy("operator", "operator"))} - {exactDateTime(emergencyStop.updatedAt, dateLocale)}</small>}
+        </div>
+        {emergencyStopActive ? (
+          <div className="fab-emergency-resume">
+            <label htmlFor="fab-autonomy-resume">{copy("Resume phrase", "Hervattingszin")}</label>
+            <input
+              id="fab-autonomy-resume"
+              value={resumeConfirmation}
+              onChange={(event) => setResumeConfirmation(event.target.value)}
+              placeholder={resumePhrase}
+              autoComplete="off"
+            />
+            <button
+              className="fab-secondary-button compact"
+              onClick={() => onCommand("clear_emergency_stop", { confirmation: resumeConfirmation, reason: "Operator reviewed the stop and resumed autonomous processing." })}
+              disabled={!connected || Boolean(pendingCommand) || resumeConfirmation !== resumePhrase}
+            >
+              {copy("Resume automation", "Automatisering hervatten")}
+            </button>
+          </div>
+        ) : (
+          <button
+            className="fab-danger-button compact"
+            onClick={() => onCommand("engage_emergency_stop", { reason: "Operator stopped autonomous processing from the FAB dashboard." })}
+            disabled={!connected || Boolean(pendingCommand)}
+          >
+            <Square aria-hidden="true" />{copy("Stop automation", "Automatisering stoppen")}
+          </button>
+        )}
       </div>
 
       {workflowResource?.state !== "live" && workflowResource?.state !== "stale" ? (
@@ -123,7 +168,7 @@ export function FabAutomationPanel({
           <div className="fab-pipeline-note">
             <AlertCircle aria-hidden="true" />
             <span><strong>{copy("Readiness is not run progress.", "Gereedheid is geen runvoortgang.")}</strong> {copy("These gates describe what may run now; the latest-run evidence above describes what actually happened.", "Deze poorten tonen wat nu mag draaien; het bewijs van de laatste run hierboven toont wat werkelijk is gebeurd.")}</span>
-            <button className="fab-secondary-button compact" onClick={() => onCommand("run_safe_cycle")} disabled={!connected || Boolean(pendingCommand) || !bool(autonomy.canRunAutonomously)}><Play aria-hidden="true" />{pendingCommand === "run_safe_cycle" ? copy("Running...", "Bezig...") : copy("Run eligible work", "Uitvoerbaar werk starten")}</button>
+            <button className="fab-secondary-button compact" onClick={() => onCommand("run_safe_cycle")} disabled={!connected || Boolean(pendingCommand) || emergencyStopActive || !bool(autonomy.canRunAutonomously)}><Play aria-hidden="true" />{pendingCommand === "run_safe_cycle" ? copy("Running...", "Bezig...") : copy("Run eligible work", "Uitvoerbaar werk starten")}</button>
           </div>
         </>
       )}

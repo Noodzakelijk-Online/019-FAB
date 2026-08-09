@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   ArrowUpRight,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ClipboardCheck,
   CopyCheck,
   FileSearch,
@@ -38,6 +40,8 @@ import {
   type FabRecord,
   type FabResourceState,
 } from "./fabView";
+
+const REVIEW_PAGE_SIZE = 12;
 
 export type FabReviewResolution = {
   reviewItemId: number;
@@ -82,6 +86,7 @@ export function FabReviewWorkspace({
   const { copy } = useFabLocale();
   const [selectedId, setSelectedId] = useState("");
   const [reviewFilter, setReviewFilter] = useState<FabReviewTriageFilter>("all");
+  const [page, setPage] = useState(1);
   const triageCounts = useMemo(() => reviewTriageCounts(workItems), [workItems]);
   const vendorBatches = useMemo(() => vendorReviewBatches(workItems), [workItems]);
   const visibleItems = useMemo(
@@ -96,6 +101,12 @@ export function FabReviewWorkspace({
     () => new Map(vendorBatches.map((batch) => [text(batch.representative.id), batch])),
     [vendorBatches],
   );
+  const pageCount = Math.max(1, Math.ceil(visibleItems.length / REVIEW_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedItems = visibleItems.slice(
+    (currentPage - 1) * REVIEW_PAGE_SIZE,
+    currentPage * REVIEW_PAGE_SIZE,
+  );
   const selected = workItems.find((item) => text(item.id, "") === selectedId) || null;
   const state = panelState(resource, workItems.length);
 
@@ -104,6 +115,10 @@ export function FabReviewWorkspace({
       setSelectedId("");
     }
   }, [selectedId, workItems]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [reviewFilter, search]);
 
   return (
     <section id="review-workspace" className="fab-section fab-review-workspace">
@@ -155,7 +170,7 @@ export function FabReviewWorkspace({
               </tr>
             </thead>
             <tbody>
-              {visibleItems.map((item) => {
+              {pagedItems.map((item) => {
                 const document = asRecord(item.document);
                 const reasons = Array.isArray(item.reasons) ? item.reasons.filter((reason): reason is string => typeof reason === "string") : [];
                 const duplicates = records(item.duplicateCandidates);
@@ -209,6 +224,19 @@ export function FabReviewWorkspace({
         <div className="fab-empty-state compact"><FileSearch aria-hidden="true" /><strong>{copy("No matching reviews", "Geen overeenkomende controles")}</strong><span>{copy("Adjust the review mode or active search.", "Pas de controlemodus of zoekopdracht aan.")}</span></div>
       ) : (
         <FabPanelStateMessage resource={resource} title={copy("Review queue", "Controlewachtrij")} />
+      )}
+
+      {visibleItems.length > REVIEW_PAGE_SIZE && (
+        <div className="fab-pagination" aria-label={copy("Review pagination", "Paginering controles")}>
+          <span>
+            {copy("Showing", "Getoond")} {(currentPage - 1) * REVIEW_PAGE_SIZE + 1}-{Math.min(currentPage * REVIEW_PAGE_SIZE, visibleItems.length)} {copy("of", "van")} {visibleItems.length}
+          </span>
+          <div>
+            <button type="button" className="fab-icon-button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1} aria-label={copy("Previous review page", "Vorige controlepagina")} title={copy("Previous page", "Vorige pagina")}><ChevronLeft aria-hidden="true" /></button>
+            <strong>{currentPage} / {pageCount}</strong>
+            <button type="button" className="fab-icon-button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} aria-label={copy("Next review page", "Volgende controlepagina")} title={copy("Next page", "Volgende pagina")}><ChevronRight aria-hidden="true" /></button>
+          </div>
+        </div>
       )}
 
       <FabReviewDrawer

@@ -1,12 +1,15 @@
 import {
   Archive,
   ArrowUpRight,
+  ChevronLeft,
+  ChevronRight,
   CloudUpload,
   FileCheck2,
   FileClock,
   MonitorUp,
   ShieldCheck,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
 import {
@@ -20,6 +23,8 @@ import {
   type FabRecord,
   type FabResourceState,
 } from "./fabView";
+
+const DELIVERY_PAGE_SIZE = 10;
 
 type FabDeliveryQueueProps = {
   delivery: {
@@ -36,6 +41,13 @@ type FabDeliveryQueueProps = {
 export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint }: FabDeliveryQueueProps) {
   const { copy, status: localizedStatus } = useFabLocale();
   const visibleOrders = delivery.workOrders.filter((item) => matchesSearch(item, search));
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(visibleOrders.length / DELIVERY_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedOrders = visibleOrders.slice(
+    (currentPage - 1) * DELIVERY_PAGE_SIZE,
+    currentPage * DELIVERY_PAGE_SIZE,
+  );
   const connectorStatus = text(delivery.status.status, "unavailable");
   const receiptExecutorStatus = text(delivery.status.waveReceiptExecutorStatus, "not_connected");
   const relayReady = delivery.status.relayIntakeReady === true;
@@ -46,6 +58,10 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
   const needsVerification = resourceAvailable ? count(delivery.summary.needsAttachmentVerification) + count(delivery.summary.needsFreshReadback) : null;
   const blocked = resourceAvailable ? count(delivery.summary.sourceUnavailable) + count(delivery.summary.sourceIncompatible) + count(delivery.summary.needsProcessing) + count(delivery.summary.blockedByReview) + count(delivery.summary.needsWaveTransaction) : null;
   const state = panelState(resource, delivery.workOrders.length);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   return (
     <section id="delivery" className="fab-section fab-delivery-section">
@@ -112,7 +128,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
               </tr>
             </thead>
             <tbody>
-              {visibleOrders.map((order) => {
+              {pagedOrders.map((order) => {
                 const source = asRecord(order.source);
                 const wave = asRecord(order.wave);
                 const archivePlan = asRecord(order.archivePlan);
@@ -168,6 +184,19 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {visibleOrders.length > DELIVERY_PAGE_SIZE && (
+        <div className="fab-pagination" aria-label={copy("Delivery pagination", "Paginering leveringen")}>
+          <span>
+            {copy("Showing", "Getoond")} {(currentPage - 1) * DELIVERY_PAGE_SIZE + 1}-{Math.min(currentPage * DELIVERY_PAGE_SIZE, visibleOrders.length)} {copy("of", "van")} {visibleOrders.length}
+          </span>
+          <div>
+            <button type="button" className="fab-icon-button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1} aria-label={copy("Previous delivery page", "Vorige leveringspagina")} title={copy("Previous page", "Vorige pagina")}><ChevronLeft aria-hidden="true" /></button>
+            <strong>{currentPage} / {pageCount}</strong>
+            <button type="button" className="fab-icon-button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} aria-label={copy("Next delivery page", "Volgende leveringspagina")} title={copy("Next page", "Volgende pagina")}><ChevronRight aria-hidden="true" /></button>
+          </div>
         </div>
       )}
 

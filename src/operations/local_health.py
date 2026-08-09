@@ -117,9 +117,15 @@ class LocalOperationsHealth:
             default=24.0,
         )
 
-    def summarize(self) -> Dict[str, Any]:
+    def summarize(
+        self,
+        *,
+        metrics: Optional[Dict[str, Any]] = None,
+        master_ledger: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
-        metrics = self.ledger.dashboard_metrics()
+        if metrics is None:
+            metrics = self.ledger.dashboard_metrics()
         source_accounts = self.ledger.list_source_accounts(limit=500)
         review_items = self.ledger.list_review_items(status=OPEN_REVIEW_STATUSES, limit=500)
         stuck_documents = self.ledger.list_documents(status=STUCK_DOCUMENT_STATUSES, limit=500)
@@ -158,7 +164,8 @@ class LocalOperationsHealth:
             status=("open", "acknowledged"),
             limit=500,
         ) if latest_compliance_assessment else []
-        master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
+        if master_ledger is None:
+            master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
         master_ledger_summary = master_ledger.get("summary") or {}
         rate_limits = get_all_rates()
 

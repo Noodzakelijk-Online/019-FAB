@@ -71,8 +71,13 @@ export function registerFabSourcePreviewRoutes(
       return;
     }
 
-    const localOperatorMode = options.localOperatorMode ?? ENV.fabOperatorLocalMode;
-    const localOperator = localOperatorMode && isLoopbackRequest(req);
+  const localOperatorMode = options.localOperatorMode ?? ENV.fabOperatorLocalMode;
+  const localOperator = localOperatorMode
+    && isLoopbackRequest(
+      req,
+      ENV.fabOperatorTrustedProxyAddresses,
+      ENV.fabOperatorTrustDockerGateway,
+    );
     let adminOperator = false;
     if (!localOperator) {
       try {

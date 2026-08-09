@@ -320,7 +320,7 @@ function Find-RunningFabApi {
             Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
             Sort-Object LocalPort -Unique
         foreach ($listener in $listeners) {
-            $url = "http://127.0.0.1:$($listener.LocalPort)/api/health"
+            $url = "http://127.0.0.1:$($listener.LocalPort)/api/live"
             if (Test-FabEndpoint -Url $url -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot) {
                 return [PSCustomObject]@{
                     ProcessId = [int]$process.ProcessId
@@ -383,7 +383,7 @@ $python = Get-Command python -ErrorAction Stop
 $node = Get-Command node -ErrorAction Stop
 $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
 
-& $python.Source -c "import flask, PIL, pytesseract, pdf2image, langdetect, googleapiclient, sklearn, joblib" 2>$null
+& $python.Source -c "import importlib.util,sys; modules=('flask','waitress','PIL','pytesseract','pdf2image','langdetect','googleapiclient','sklearn','joblib'); sys.exit(0 if all(importlib.util.find_spec(module) for module in modules) else 1)" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Installing FAB local runtime dependencies..."
     & $python.Source -m pip install -r (Join-Path $root "requirements-local.txt")
@@ -549,7 +549,7 @@ elseif (Test-Path -LiteralPath $workerRuntimePath) {
 
 if (-not $apiPid) {
     $apiPort = Find-AvailableFabPort -StartPort $defaultApiPort
-    $apiUrl = "http://127.0.0.1:$apiPort/api/health"
+    $apiUrl = "http://127.0.0.1:$apiPort/api/live"
     $previousApiPort = $env:FAB_LOCAL_API_PORT
     try {
         $env:FAB_LOCAL_API_PORT = [string]$apiPort
@@ -681,8 +681,8 @@ else {
     $webIdentityUrl = "$($dashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
 }
 
-Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root
-Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -ExpectedInstanceRoot $root -TimeoutSeconds 60
+Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root -TimeoutSeconds 120
+Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -ExpectedInstanceRoot $root -TimeoutSeconds 120
 $webListenerPid = Get-FabListenerProcessId -Url $webIdentityUrl
 if (-not $webListenerPid) {
     throw "FAB dashboard is responding but its loopback listener process could not be identified."

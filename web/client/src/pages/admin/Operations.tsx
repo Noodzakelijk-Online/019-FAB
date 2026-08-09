@@ -31,6 +31,8 @@ type CommandPayload = {
   fromDate?: string;
   toDate?: string;
   targetSystem?: string;
+  reason?: string;
+  confirmation?: string;
 };
 
 type CompletedCommand = {
@@ -113,6 +115,20 @@ export default function AdminOperations() {
       toast.error(error.message || copy(
         "Verified recovery package could not be created.",
         "Geverifieerd herstelpakket kon niet worden gemaakt.",
+      ));
+    },
+  });
+  const createSupportBundle = trpc.fab.createSupportBundle.useMutation({
+    onSuccess: (result) => {
+      toast.success(copy(
+        `Sanitized support bundle created: ${text(result.bundleFilename)}`,
+        `Opgeschoond supportpakket gemaakt: ${text(result.bundleFilename)}`,
+      ));
+    },
+    onError: (error) => {
+      toast.error(error.message || copy(
+        "Support bundle could not be created.",
+        "Supportpakket kon niet worden gemaakt.",
       ));
     },
   });
@@ -358,12 +374,14 @@ export default function AdminOperations() {
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
           />
           <FabBackupCenter
-            backups={data?.backups || { backups: [], schedule: {} }}
+            backups={data?.backups || { backups: [], schedule: {}, verificationMode: null }}
             resource={data?.resourceStates.backups}
             connected={connected}
             pending={createBackup.isPending}
+            supportPending={createSupportBundle.isPending}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCreate={() => createBackup.mutate()}
+            onCreateSupportBundle={() => createSupportBundle.mutate()}
           />
           <FabDeliveryQueue
             delivery={data?.delivery || { status: {}, summary: {}, workOrders: [], count: null }}

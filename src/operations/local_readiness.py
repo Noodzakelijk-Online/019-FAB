@@ -170,6 +170,7 @@ class LocalReadinessService:
                 "details": "Local operations ledger backend.",
             },
             _python_dependency("flask", "Flask", "Local dashboard/API"),
+            _python_dependency("waitress", "Waitress", "Production local API server"),
             _python_dependency("pytesseract", "pytesseract", "Python wrapper for Tesseract OCR"),
             {
                 "id": "tesseract",

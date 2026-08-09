@@ -9,6 +9,10 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
         "src.operations.local_autonomy",
         "LocalAutonomousService",
     ),
+    "LocalAutonomyControlService": (
+        "src.operations.local_autonomy_control",
+        "LocalAutonomyControlService",
+    ),
     "LocalBackupService": (
         "src.operations.local_backup",
         "LocalBackupService",
@@ -64,6 +68,10 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "LocalRoutingService": (
         "src.operations.local_routing",
         "LocalRoutingService",
+    ),
+    "LocalSupportBundleService": (
+        "src.operations.local_support_bundle",
+        "LocalSupportBundleService",
     ),
     "LocalWaveControlService": (
         "src.operations.local_wave_control",

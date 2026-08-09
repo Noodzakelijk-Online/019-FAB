@@ -39,9 +39,11 @@ class LocalOperationsLedger:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=30.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 30000")
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -55,6 +57,11 @@ class LocalOperationsLedger:
 
     def _init_schema(self) -> None:
         with self._connection() as connection:
+            # WAL keeps dashboard reads available while the autonomous worker
+            # commits a short bookkeeping transaction in another process.
+            journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            if str(journal_mode).lower() != "wal":
+                raise RuntimeError("FAB local ledger requires SQLite WAL mode")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -593,6 +600,16 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_runtime_leases_expiry
                     ON runtime_leases(expires_at);
 
+                CREATE TABLE IF NOT EXISTS runtime_controls (
+                    control_name TEXT PRIMARY KEY,
+                    active INTEGER NOT NULL DEFAULT 0,
+                    reason TEXT,
+                    updated_by TEXT NOT NULL,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_local_wave_sync_target
                     ON wave_sync_runs(target_system);
                 CREATE INDEX IF NOT EXISTS idx_local_wave_sync_status
@@ -998,6 +1015,87 @@ class LocalOperationsLedger:
         if not row:
             return None
         return self._public_runtime_lease(self._row_to_dict(row), now)
+
+    def set_runtime_control(
+        self,
+        control_name: str,
+        active: bool,
+        *,
+        actor: str,
+        reason: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_name = str(control_name or "").strip()
+        normalized_actor = str(actor or "").strip()[:200]
+        normalized_reason = str(reason or "").strip()[:1000]
+        if not normalized_name or not normalized_actor or not normalized_reason:
+            raise ValueError("control_name, actor, and reason are required")
+
+        now = self._now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_controls (
+                    control_name, active, reason, updated_by, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(control_name) DO UPDATE SET
+                    active = excluded.active,
+                    reason = excluded.reason,
+                    updated_by = excluded.updated_by,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_name,
+                    1 if active else 0,
+                    normalized_reason,
+                    normalized_actor,
+                    self._json(self._redact_sensitive(metadata or {})),
+                    now,
+                    now,
+                ),
+            )
+
+        control = self.get_runtime_control(normalized_name)
+        self.record_audit_event({
+            "action": "runtime_control.engaged" if active else "runtime_control.cleared",
+            "entityType": "runtime_control",
+            "entityId": normalized_name,
+            "details": {
+                "actor": normalized_actor,
+                "reason": normalized_reason,
+                "active": bool(active),
+                "externalSubmission": "not_executed",
+            },
+        })
+        return control
+
+    def get_runtime_control(self, control_name: str) -> Dict[str, Any]:
+        normalized_name = str(control_name or "").strip()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_controls WHERE control_name = ? LIMIT 1",
+                (normalized_name,),
+            ).fetchone()
+        if not row:
+            return {
+                "controlName": normalized_name,
+                "active": False,
+                "reason": None,
+                "updatedBy": None,
+                "updatedAt": None,
+                "metadata": {},
+            }
+        control = self._row_to_dict(row)
+        return {
+            "controlName": control.get("control_name"),
+            "active": bool(control.get("active")),
+            "reason": control.get("reason"),
+            "updatedBy": control.get("updated_by"),
+            "updatedAt": control.get("updated_at"),
+            "metadata": control.get("metadata") or {},
+        }
 
     def upsert_source_account(self, payload: Dict[str, Any]) -> int:
         source_type = str(payload.get("sourceType") or payload.get("source_type") or "unknown").strip()

@@ -208,7 +208,7 @@ function Test-FabEndpoint {
         $request = @{
             Uri = $Url
             UseBasicParsing = $true
-            TimeoutSec = 2
+            TimeoutSec = 5
         }
         if ($ApiToken) {
             $request.Headers = @{ Authorization = "Bearer $ApiToken" }
@@ -260,9 +260,14 @@ function Find-RunningFabApiProcessIds {
             Where-Object { $_.LocalAddress -in @("127.0.0.1", "::1") } |
             Sort-Object LocalPort -Unique
         foreach ($listener in $listeners) {
-            $url = "http://127.0.0.1:$($listener.LocalPort)/api/health"
-            if (Test-FabEndpoint -Url $url -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot -AllowLegacyInstance) {
-                $matches.Add([int]$process.ProcessId)
+            $baseUrl = "http://127.0.0.1:$($listener.LocalPort)"
+            foreach ($path in @("/api/live", "/api/health")) {
+                if (Test-FabEndpoint -Url "$baseUrl$path" -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot -AllowLegacyInstance) {
+                    $matches.Add([int]$process.ProcessId)
+                    break
+                }
+            }
+            if ($matches.Contains([int]$process.ProcessId)) {
                 break
             }
         }

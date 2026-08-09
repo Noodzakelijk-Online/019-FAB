@@ -3,6 +3,7 @@ import {
   Clock3,
   DatabaseBackup,
   FileCheck2,
+  LifeBuoy,
   Loader2,
   ShieldCheck,
 } from "lucide-react";
@@ -24,12 +25,15 @@ type FabBackupCenterProps = {
   backups: {
     backups: FabRecord[];
     schedule: FabRecord;
+    verificationMode: string | null;
   };
   resource?: FabResourceState;
   connected: boolean;
   pending: boolean;
+  supportPending: boolean;
   localApiEndpoint: string;
   onCreate: () => void;
+  onCreateSupportBundle: () => void;
 };
 
 export function FabBackupCenter({
@@ -37,8 +41,10 @@ export function FabBackupCenter({
   resource,
   connected,
   pending,
+  supportPending,
   localApiEndpoint,
   onCreate,
+  onCreateSupportBundle,
 }: FabBackupCenterProps) {
   const { copy, dateLocale } = useFabLocale();
   const items = records(backups.backups);
@@ -51,13 +57,14 @@ export function FabBackupCenter({
   const evidenceDocuments = count(schedule.sourceEvidenceDocuments);
   const evidenceFiles = count(schedule.sourceEvidenceFiles);
   const evidenceGaps = count(schedule.sourceEvidenceGaps);
+  const verificationMode = text(backups.verificationMode, "unavailable");
 
   return (
     <section className="fab-section fab-backup-center" id="backups">
       <div className="fab-section-heading fab-backup-heading">
         <div>
           <span>{copy("Recovery evidence", "Herstelbewijs")}</span>
-          <h2>{copy("Verified recovery packages", "Geverifieerde herstelpakketten")}</h2>
+          <h2>{copy("Recovery packages", "Herstelpakketten")}</h2>
         </div>
         <div className="fab-section-statuses">
           <FabDataStatus resource={resource} state={state} />
@@ -67,6 +74,18 @@ export function FabBackupCenter({
               {humanize(scheduleStatus)}
             </span>
           )}
+          <button
+            className="fab-secondary-button"
+            type="button"
+            disabled={!connected || supportPending}
+            onClick={onCreateSupportBundle}
+            title={copy("Create a sanitized diagnostic ZIP", "Maak een opgeschoonde diagnostische ZIP")}
+          >
+            {supportPending ? <Loader2 className="is-spinning" aria-hidden="true" /> : <LifeBuoy aria-hidden="true" />}
+            {supportPending
+              ? copy("Creating support bundle", "Supportpakket maken")
+              : copy("Create support bundle", "Supportpakket maken")}
+          </button>
           <button
             className="fab-primary-button"
             type="button"
@@ -107,7 +126,7 @@ export function FabBackupCenter({
               <DatabaseBackup aria-hidden="true" />
               <span>{copy("Protected source bytes", "Beveiligde bronbytes")}</span>
               <strong>{formatBytes(count(schedule.sourceEvidenceBytes))}</strong>
-              <small>{copy("Ledger and raw source documents are checksum verified.", "Grootboek en bronbestanden zijn met checksums geverifieerd.")}</small>
+              <small>{copy("Ledger and source checksums are recorded in each package.", "Grootboek- en bronchecksums zijn in elk pakket vastgelegd.")}</small>
             </div>
             <div>
               <Clock3 aria-hidden="true" />
@@ -116,6 +135,19 @@ export function FabBackupCenter({
               <small>{count(schedule.intervalHours)} {copy("hour interval", "uur interval")}</small>
             </div>
           </div>
+
+          {verificationMode === "manifest_only" && (
+            <div className="fab-backup-alert tone-info" role="status">
+              <ShieldCheck aria-hidden="true" />
+              <div>
+                <strong>{copy("Dashboard manifest check complete", "Dashboardmanifest gecontroleerd")}</strong>
+                <span>{copy(
+                  "This fast view validates archive structure and recorded metadata. FAB performs full byte-level checksum and database integrity verification when a package is created, explicitly inspected, restored, or evaluated by the recovery schedule.",
+                  "Deze snelle weergave controleert de archiefstructuur en vastgelegde metadata. FAB voert volledige checksum- en database-integriteitscontrole uit bij het maken, expliciet inspecteren, herstellen of plannen van een pakket.",
+                )}</span>
+              </div>
+            </div>
+          )}
 
           {(due || evidenceStatus !== "complete") && (
             <div className="fab-backup-alert tone-warn" role="status">
@@ -188,8 +220,8 @@ export function FabBackupCenter({
           {copy("Open advanced recovery", "Geavanceerd herstel openen")} <ArrowUpRight aria-hidden="true" />
         </a>
         <span>{copy(
-          "Creation is read-only for source files. Restore remains confirmation-gated in the local recovery console.",
-          "Aanmaken leest bronbestanden alleen. Herstel blijft beveiligd met bevestiging in de lokale herstelconsole.",
+          "Recovery creation reads source files only. Support bundles exclude documents, OCR, amounts, paths, and credentials. Restore remains confirmation-gated.",
+          "Herstelpakketten lezen bronbestanden alleen. Supportpakketten sluiten documenten, OCR, bedragen, paden en inloggegevens uit. Herstel blijft beveiligd met bevestiging.",
         )}</span>
       </div>
     </section>

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_autonomy_control import AUTONOMY_RESUME_CONFIRMATION
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, LocalExportAttemptService
 from src.operations.local_ledger import LocalOperationsLedger
@@ -15,6 +16,46 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalAutonomousService(unittest.TestCase):
+    def test_operator_emergency_stop_blocks_cycles_until_confirmed_resume(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+
+            engaged = client.post("/api/autonomy/emergency-stop", json={
+                "actor": "operator-test",
+                "reason": "Investigate an unexpected provider response.",
+            })
+            plan = client.get("/api/autonomy/plan").get_json()
+            blocked_run = client.post("/api/autonomy/run", json={"limit": 1})
+            rejected_resume = client.delete("/api/autonomy/emergency-stop", json={
+                "actor": "operator-test",
+                "reason": "Inspection complete.",
+                "confirmation": "resume",
+            })
+            resumed = client.delete("/api/autonomy/emergency-stop", json={
+                "actor": "operator-test",
+                "reason": "Inspection complete; current plan reviewed.",
+                "confirmation": AUTONOMY_RESUME_CONFIRMATION,
+            })
+
+            self.assertEqual(engaged.status_code, 200)
+            self.assertEqual(engaged.get_json()["status"], "stopped")
+            self.assertEqual(plan["status"], "blocked")
+            self.assertTrue(plan["emergencyStop"]["active"])
+            self.assertIn("operator_emergency_stop", plan["blockedReasons"])
+            self.assertEqual(blocked_run.status_code, 400)
+            self.assertEqual(blocked_run.get_json()["status"], "blocked")
+            self.assertEqual(rejected_resume.status_code, 400)
+            self.assertEqual(rejected_resume.get_json()["status"], "confirmation_required")
+            self.assertEqual(resumed.status_code, 200)
+            self.assertFalse(resumed.get_json()["control"]["active"])
+
+            ledger = LocalOperationsLedger(ledger_path)
+            actions = [event["action"] for event in ledger.list_audit_events(limit=20)]
+            self.assertIn("runtime_control.engaged", actions)
+            self.assertIn("runtime_control.cleared", actions)
+
     def test_autonomy_plan_exposes_safe_actions_and_review_gates(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

@@ -13,6 +13,8 @@ export type FabResourceState = {
 
 export const FAB_OPERATOR_COMMAND_IDS = [
   "run_safe_cycle",
+  "engage_emergency_stop",
+  "clear_emergency_stop",
   "rescan_intake",
   "process_imported",
   "reprocess_incomplete",
@@ -86,6 +88,7 @@ export type FabControlCenter = {
   backups: {
     backups: JsonRecord[];
     schedule: JsonRecord;
+    verificationMode: string | null;
   };
   notifications: JsonRecord[];
   reconciliation: JsonRecord[];
@@ -100,7 +103,9 @@ export type FabControlCenter = {
 
 const DEFAULT_FAB_LOCAL_API_URL = "http://127.0.0.1:5001";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const MAX_CONCURRENT_READS = 4;
 const READ_PATHS = {
+  liveness: "/api/live",
   health: "/api/health",
   metrics: "/api/dashboard",
   autonomy: "/api/autonomy/plan?limit=25",
@@ -110,7 +115,7 @@ const READ_PATHS = {
   sources: "/api/sources?limit=50",
   workflows: "/api/workflows?limit=10",
   recovery: "/api/workflows/recovery?limit=10",
-  backups: "/api/backups?limit=5",
+  backups: "/api/backups?limit=5&verify=false",
   notifications: "/api/notifications?limit=10",
   reconciliation: "/api/reconciliation?limit=10",
   activity: "/api/audit?limit=12",
@@ -118,22 +123,31 @@ const READ_PATHS = {
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
   driveWaveStatus: "/api/drive-wave/status",
-  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=500",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200",
   gmailAuthorization: "/api/connectors/gmail/authorization",
   driveAuthorization: "/api/connectors/google-drive/authorization",
   waveSetup: "/api/wave/setup",
   waveReceiptExecutor: "/api/wave/receipt-executor/status",
-  reviewQueue: "/api/review?status=open&limit=500",
-  masterLedger: "/api/master-ledger?limit=500",
-  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=500",
+  reviewQueue: "/api/review?status=open&limit=200",
+  masterLedger: "/api/master-ledger?limit=250",
+  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=250",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
 
+const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
+  health: 12_000,
+  autonomy: 15_000,
+  backups: 12_000,
+  driveWaveWorkOrders: 12_000,
+};
+
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
 
-const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord }> = {
+const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord; method?: "POST" | "DELETE" }> = {
   run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true, includeConnectorSync: true } },
+  engage_emergency_stop: { path: "/api/autonomy/emergency-stop", body: { reason: "Operator stopped autonomous processing from the FAB dashboard." } },
+  clear_emergency_stop: { path: "/api/autonomy/emergency-stop", method: "DELETE", body: {} },
   rescan_intake: { path: "/api/intake/rescan", body: {} },
   process_imported: { path: "/api/documents/process-imported", body: { limit: 25 } },
   reprocess_incomplete: { path: "/api/documents/reprocess-incomplete", body: { limit: 25 } },
@@ -146,7 +160,10 @@ const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonReco
   assess_compliance: { path: "/api/compliance/assessments", body: {} },
 };
 
-export function getFabLocalApiBaseUrl(rawUrl = ENV.fabLocalApiUrl): URL {
+export function getFabLocalApiBaseUrl(
+  rawUrl = ENV.fabLocalApiUrl,
+  insecureHosts: readonly string[] = ENV.fabLocalApiInsecureHosts,
+): URL {
   const parsed = new URL((rawUrl || DEFAULT_FAB_LOCAL_API_URL).trim().replace(/\/+$/, ""));
   if (!new Set(["http:", "https:"]).has(parsed.protocol)) {
     throw new Error("FAB_LOCAL_API_URL must use http or https");
@@ -154,7 +171,12 @@ export function getFabLocalApiBaseUrl(rawUrl = ENV.fabLocalApiUrl): URL {
   if (parsed.username || parsed.password) {
     throw new Error("FAB_LOCAL_API_URL must not contain credentials");
   }
-  if (parsed.protocol !== "https:" && !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    parsed.protocol !== "https:"
+    && !LOOPBACK_HOSTS.has(hostname)
+    && !insecureHosts.includes(hostname)
+  ) {
     throw new Error("Non-loopback FAB_LOCAL_API_URL values must use https");
   }
   return parsed;
@@ -195,6 +217,30 @@ export async function fabLocalRequest(
   }
 }
 
+async function settleFabReads(
+  entries: Array<[FabResourceKey, string]>,
+): Promise<Array<PromiseSettledResult<JsonRecord>>> {
+  const results = new Array<PromiseSettledResult<JsonRecord>>(entries.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(MAX_CONCURRENT_READS, entries.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < entries.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      try {
+        const [resource, path] = entries[index];
+        results[index] = {
+          status: "fulfilled",
+          value: await fabLocalRequest(path, {}, { timeoutMs: READ_TIMEOUT_MS[resource] }),
+        };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }));
+  return results;
+}
+
 export async function getFabControlCenter(): Promise<FabControlCenter> {
   const checkedAt = new Date().toISOString();
   const startedAt = Date.now();
@@ -210,7 +256,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   }
 
   const entries = Object.entries(READ_PATHS) as Array<[FabResourceKey, string]>;
-  const settled = await Promise.allSettled(entries.map(([, path]) => fabLocalRequest(path)));
+  const settled = await settleFabReads(entries);
   const resources: Partial<Record<FabResourceKey, JsonRecord>> = {};
   const resourceStates = {} as Record<FabResourceKey, FabResourceState>;
   const partialErrors: FabControlCenter["partialErrors"] = [];
@@ -238,7 +284,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
     });
   });
 
-  const connected = resourceStates.health.state === "live";
+  const connected = resourceStates.liveness.state === "live";
 
   const metrics = resources.metrics || {};
   const reviewSummary = asRecord(resources.reviewQueue?.summary) || {};
@@ -299,7 +345,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
       authConfigured: Boolean(ENV.fabLocalApiToken),
       checkedAt,
       latencyMs: connected ? Date.now() - startedAt : null,
-      error: connected ? null : resourceStates.health.error || "FAB local API is unavailable",
+      error: connected ? null : resourceStates.liveness.error || "FAB local API is unavailable",
     },
     metrics: {
       documents: nullableNumber(metrics.documents),
@@ -421,7 +467,7 @@ export async function runFabOperatorCommand(
   const command = COMMAND_PATHS[commandId];
   const safeActor = actor.trim().slice(0, 200) || "fab_dashboard";
   return fabLocalRequest(command.path, {
-    method: "POST",
+    method: command.method || "POST",
     body: JSON.stringify({ ...command.body, ...payload, actor: safeActor }),
   });
 }
@@ -453,6 +499,25 @@ export async function createFabBackup(actor: string): Promise<JsonRecord> {
     ...selectFields(response, ["backupFilename", "status", "success"]),
     manifest,
   };
+}
+
+export async function createFabSupportBundle(actor: string): Promise<JsonRecord> {
+  const response = await fabLocalRequest("/api/support-bundles", {
+    method: "POST",
+    body: JSON.stringify({
+      actor: actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+      note: "Created from the FAB operator dashboard.",
+    }),
+  }, { timeoutMs: 120_000 });
+  return selectFields(response, [
+    "bundleFilename",
+    "externalSubmission",
+    "privacy",
+    "sha256",
+    "sizeBytes",
+    "status",
+    "success",
+  ]);
 }
 
 export async function uploadFabIntakeFile(input: {
@@ -630,7 +695,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     connections: [],
     workflows: [],
     recovery: {},
-    backups: { backups: [], schedule: {} },
+    backups: { backups: [], schedule: {}, verificationMode: null },
     notifications: [],
     reconciliation: [],
     activity: [],
@@ -681,6 +746,7 @@ function projectDeliveryWorkOrder(value: JsonRecord): JsonRecord {
 function projectBackups(value: unknown): FabControlCenter["backups"] {
   const payload = asRecord(value) || {};
   return {
+    verificationMode: stringValue(payload.verificationMode) || null,
     backups: arrayValue(payload.backups).map((backup) => selectFields(backup, [
       "backupFilename",
       "createdAt",
@@ -699,6 +765,7 @@ function projectBackups(value: unknown): FabControlCenter["backups"] {
       "due",
       "intervalHours",
       "invalidBackupCount",
+      "integrityVerification",
       "lastSuccessfulAt",
       "latestBackupFilename",
       "latestLedgerSha256",

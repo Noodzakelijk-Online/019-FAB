@@ -13,7 +13,7 @@ The following Python libraries are used in the project. They are listed in `requ
 - `pytesseract`: Python wrapper for Tesseract OCR.
 - `opencv-python`: OpenCV library for advanced image processing (e.g., deskewing, noise reduction).
 - `python-freshdesk`: For interacting with the Freshdesk API.
-- `playwright`: For browser automation (mijngeldzaken.nl).
+- A separately controlled browser session is required only for supervised provider workflows; the always-on FAB runtime does not install or invoke Playwright.
 - `pandas`: For data manipulation, especially for CSV generation and historical data analysis.
 - `numpy`: For numerical operations, often used with pandas and image processing.
 - `scikit-learn`: For machine learning models in categorization and learning modules.

@@ -380,7 +380,7 @@ Documents that cannot be automatically processed or categorized with high confid
 *   **Configuration Errors**: Double-check your `config.ini` file for typos, incorrect paths, or missing credentials. Ensure sensitive information is correctly set via environment variables if you choose that method.
 *   **Dependency Issues**: If you encounter `ModuleNotFoundError` or similar, ensure all dependencies are installed (`pip install -r requirements.txt`) and your virtual environment is activated.
 *   **Google API Authentication**: Create or refresh Gmail/Drive token files during a supervised setup run with `interactive_auth=true`, verify readiness, then restore `interactive_auth=false` for workers. Never delete a valid token as a first troubleshooting step; inspect the recorded connector error and credential/token paths. Google Photos authorization uses `python -m src.run_photos_picker_auth`; its JSON token must include the Picker read-only scope, and selection remains a dashboard-initiated user action.
-*   **Playwright Issues**: If mijngeldzaken.nl automation fails, ensure Playwright browsers are installed (`playwright install --with-deps chromium`) and that your internet connection is stable.
+*   **Supervised provider access**: FAB prepares reviewable artifacts. Complete any provider-owned browser step in a user-controlled session; FAB does not store provider passwords or silently drive that session.
 
 ## 8. Support
 

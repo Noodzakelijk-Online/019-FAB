@@ -59,6 +59,32 @@ class TestLocalHaiConnector(unittest.TestCase):
                 "refresh_notifications",
             )
 
+    def test_hai_can_engage_but_cannot_clear_operator_emergency_stop(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_hai_connector_enabled": True,
+                "fab_hai_allowed_commands": "engage_emergency_stop",
+            })
+            client = app.test_client()
+
+            result = client.post("/api/hai/commands/execute", json={
+                "requestId": "stop-request-1",
+                "commandId": "engage_emergency_stop",
+                "actor": "hai-controller",
+                "payload": {"reason": "Operator attention requested by HAI."},
+            })
+            manifest = client.get("/api/hai/manifest").get_json()
+
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.get_json()["result"]["status"], "stopped")
+            self.assertTrue(
+                LocalOperationsLedger(ledger_path)
+                .get_runtime_control("autonomy_emergency_stop")["active"]
+            )
+            self.assertIn("clear_emergency_stop", manifest["excludedCapabilities"])
+
     def test_manifest_reports_bearer_transport_when_api_token_is_configured(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -110,7 +136,7 @@ class TestLocalHaiConnector(unittest.TestCase):
             })
 
             self.assertEqual(manifest.status_code, 200)
-            self.assertEqual(len(manifest.get_json()["commands"]), 13)
+            self.assertEqual(len(manifest.get_json()["commands"]), 14)
             self.assertIn(
                 "reprocess_review_queue",
                 {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isLoopbackFabOperatorRequest } from "./_core/trpc";
 import type { TrpcContext } from "./_core/context";
 import { shouldBypassRelaxedRateLimit } from "./lib/rateLimiter";
+import { isLoopbackRequest } from "./lib/loopback";
 
 function context(hostname: string, remoteAddress: string): TrpcContext {
   return {
@@ -23,6 +24,25 @@ describe("FAB loopback operator access", () => {
   it("rejects remote addresses and non-loopback host headers", () => {
     expect(isLoopbackFabOperatorRequest(context("127.0.0.1", "10.10.0.8"))).toBe(false);
     expect(isLoopbackFabOperatorRequest(context("fab.example.com", "::1"))).toBe(false);
+  });
+
+  it("accepts only an explicitly trusted container gateway with a loopback host", () => {
+    const trustedGateway = context("127.0.0.1", "172.30.201.1").req;
+    const neighboringContainer = context("127.0.0.1", "172.30.201.2").req;
+    const nonLoopbackHost = context("fab.example.com", "172.30.201.1").req;
+
+    expect(isLoopbackRequest(trustedGateway, ["172.30.201.1"])).toBe(true);
+    expect(isLoopbackRequest(neighboringContainer, ["172.30.201.1"])).toBe(false);
+    expect(isLoopbackRequest(nonLoopbackHost, ["172.30.201.1"])).toBe(false);
+  });
+
+  it("accepts only private .1 bridge gateways when Docker gateway trust is enabled", () => {
+    expect(isLoopbackRequest(context("127.0.0.1", "172.24.0.1").req, [], true)).toBe(true);
+    expect(isLoopbackRequest(context("localhost", "::ffff:192.168.96.1").req, [], true)).toBe(true);
+    expect(isLoopbackRequest(context("localhost", "10.4.0.2").req, [], true)).toBe(false);
+    expect(isLoopbackRequest(context("localhost", "8.8.8.1").req, [], true)).toBe(false);
+    expect(isLoopbackRequest(context("fab.example.com", "172.24.0.1").req, [], true)).toBe(false);
+    expect(isLoopbackRequest(context("localhost", "172.24.0.1").req)).toBe(false);
   });
 
   it("exempts only enabled loopback operators from the relaxed API limit", () => {

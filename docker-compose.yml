@@ -1,0 +1,80 @@
+name: fab
+
+x-fab-python: &fab-python
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment: &fab-environment
+    FAB_LOCAL_API_HOST: 0.0.0.0
+    FAB_LOCAL_API_PORT: 5001
+    FAB_LOCAL_API_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}
+    FAB_LOCAL_LEDGER_PATH: /app/data/fab_operations.sqlite3
+    FAB_LOCAL_INTAKE_PATHS: /app/downloads/sort-out
+    FAB_LOCAL_BACKUP_DIR: /app/data/backups
+    FAB_SUPPORT_BUNDLE_DIR: /app/output/support
+  volumes:
+    - fab-data:/app/data
+    - fab-output:/app/output
+    - ./downloads/sort-out:/app/downloads/sort-out:ro
+
+services:
+  api:
+    <<: *fab-python
+    command: ["python", "-m", "src.operations.local_api"]
+    ports:
+      - "127.0.0.1:${FAB_API_HOST_PORT:-5001}:5001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:5001/api/live',headers={'Authorization':'Bearer '+os.environ['FAB_LOCAL_API_TOKEN']}); urllib.request.urlopen(r,timeout=3).read()"
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    networks:
+      - fab-local
+
+  worker:
+    <<: *fab-python
+    command: ["python", "-m", "src.run_worker"]
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    networks:
+      - fab-local
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      FAB_WEB_HOST: 0.0.0.0
+      FAB_OPERATOR_LOCAL_MODE: "true"
+      FAB_OPERATOR_TRUST_DOCKER_GATEWAY: "true"
+      FAB_LOCAL_API_URL: http://api:5001
+      FAB_LOCAL_API_INSECURE_HOSTS: api
+      FAB_LOCAL_API_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}
+      JWT_SECRET: ${FAB_WEB_JWT_SECRET:?Set FAB_WEB_JWT_SECRET before starting FAB}
+    ports:
+      - "127.0.0.1:${FAB_WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - fab-local
+
+networks:
+  fab-local:
+    driver: bridge
+
+volumes:
+  fab-data:
+  fab-output:

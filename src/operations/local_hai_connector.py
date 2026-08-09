@@ -12,6 +12,7 @@ DEFAULT_HAI_COMMAND_IDS = (
     "reprocess_review_queue",
     "sync_sources",
     "run_safe_cycle",
+    "engage_emergency_stop",
     "run_due_recovery",
     "run_reconciliation",
     "refresh_notifications",
@@ -118,6 +119,19 @@ HAI_COMMANDS = (
                 "dryRun": {"type": "boolean", "default": False},
             },
         },
+    ),
+    HaiCommand(
+        "engage_emergency_stop",
+        "Stop autonomous processing",
+        "Persist an audited fail-closed stop; the current step may finish, but no next step may start.",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "reason": {"type": "string", "maxLength": 500},
+            },
+        },
+        mode="operator_safety_control",
     ),
     HaiCommand(
         "run_due_recovery",
@@ -302,6 +316,7 @@ class LocalHaiConnector:
                 "submit_to_mijngeldzaken",
                 "restore_backups",
                 "change_access_control",
+                "clear_emergency_stop",
                 "delete_drive_sources",
                 "delete_or_mutate_gmail_sources",
             ],
@@ -522,6 +537,7 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
         "reprocess_review_queue": {"limit"},
         "sync_sources": {"sources"},
         "run_safe_cycle": {"limit", "dryRun"},
+        "engage_emergency_stop": {"reason"},
         "run_due_recovery": {"limit"},
         "run_reconciliation": {"limit"},
         "refresh_notifications": set(),
@@ -596,4 +612,10 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
             if len(value) > 100:
                 raise ValueError(f"{field} must be at most 100 characters.")
             normalized[field] = value
+    if "reason" in payload:
+        reason = str(payload["reason"] or "").strip()
+        if len(reason) > 500:
+            raise ValueError("reason must be at most 500 characters.")
+        if reason:
+            normalized["reason"] = reason
     return normalized

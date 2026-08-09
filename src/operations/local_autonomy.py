@@ -9,6 +9,7 @@ from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
 from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
+from src.operations.local_autonomy_control import AUTONOMY_EMERGENCY_STOP
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_close_readiness import LocalCloseReadinessService
@@ -61,6 +62,10 @@ AUTONOMY_EXECUTION_ORDER = (
 )
 
 
+class AutonomyEmergencyStop(RuntimeError):
+    """Raised between workflow steps when the operator stop is active."""
+
+
 class LocalAutonomousService:
     """Policy-gated local autonomy loop for FAB operations.
 
@@ -93,16 +98,43 @@ class LocalAutonomousService:
         include_wave_plan: bool = True,
         include_wave_sync: bool = True,
         include_connector_sync: bool = True,
+        *,
+        readiness_summary: Optional[Dict[str, Any]] = None,
+        health_summary: Optional[Dict[str, Any]] = None,
+        exceptions_summary: Optional[Dict[str, Any]] = None,
+        close_readiness_summary: Optional[Dict[str, Any]] = None,
+        metrics_summary: Optional[Dict[str, Any]] = None,
+        master_ledger_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
-        readiness = self._readiness_summary()
-        health = LocalOperationsHealth(self.ledger, self.config).summarize()
-        exceptions = LocalExceptionQueueService(self.ledger, self.config).list_exceptions(
-            limit=limit,
-            include_entities=False,
-        )
-        close_readiness = LocalCloseReadinessService(self.ledger, self.config).assess()
-        counts = self._counts(limit)
+        emergency_stop = self.ledger.get_runtime_control(AUTONOMY_EMERGENCY_STOP)
+        readiness = readiness_summary if readiness_summary is not None else self._readiness_summary()
+        metrics = metrics_summary if metrics_summary is not None else self.ledger.dashboard_metrics()
+        master_ledger = master_ledger_summary
+        if master_ledger is None:
+            master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
+        health = health_summary
+        if health is None:
+            health = LocalOperationsHealth(self.ledger, self.config).summarize(
+                metrics=metrics,
+                master_ledger=master_ledger,
+            )
+        exceptions = exceptions_summary
+        if exceptions is None:
+            exceptions = LocalExceptionQueueService(self.ledger, self.config).list_exceptions(
+                limit=limit,
+                include_entities=False,
+                health=health,
+                master_ledger=master_ledger,
+            )
+        close_readiness = close_readiness_summary
+        if close_readiness is None:
+            close_readiness = LocalCloseReadinessService(self.ledger, self.config).assess(
+                metrics=metrics,
+                health=health,
+                master_ledger=master_ledger,
+            )
+        counts = self._counts(limit, metrics=metrics)
         exception_summary = exceptions.get("summary") or {}
         counts["operatingExceptions"] = int(exception_summary.get("total") or 0)
         counts["highSeverityExceptions"] = int((exception_summary.get("bySeverity") or {}).get("high") or 0)
@@ -110,7 +142,6 @@ class LocalAutonomousService:
         counts["lowSeverityExceptions"] = int((exception_summary.get("bySeverity") or {}).get("low") or 0)
         counts["closeBlockingGates"] = int(close_readiness.get("blockingCount") or 0)
         counts["closeAttentionGates"] = int(close_readiness.get("attentionCount") or 0)
-        master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
         counts["masterLedgerRows"] = int(master_ledger.get("summary", {}).get("totalRows") or 0)
         counts["masterLedgerBlockedRows"] = int(master_ledger.get("summary", {}).get("blockedRows") or 0)
         counts["masterLedgerReadyForDraft"] = int(master_ledger.get("summary", {}).get("readyForDraft") or 0)
@@ -125,6 +156,8 @@ class LocalAutonomousService:
         counts["waveEntitySyncConfiguredTargets"] = len(wave_entity_sync["configuredTargets"])
         counts["waveEntitySyncTargetsDue"] = len(wave_entity_sync["dueTargets"])
         guarded_reasons = self._blocked_reasons(readiness, health)
+        if emergency_stop.get("active"):
+            guarded_reasons.append("operator_emergency_stop")
         health_execution_blocked = "operations_health_blocked" in guarded_reasons
         # Ledger-health failures must not freeze the read-only and local repair
         # work that can clear them. Security/readiness failures remain hard
@@ -468,6 +501,7 @@ class LocalAutonomousService:
             "health": _compact_health(health),
             "exceptions": _compact_exceptions(exceptions),
             "closeReadiness": _compact_close_readiness(close_readiness),
+            "emergencyStop": emergency_stop,
             "runtimeLease": self.ledger.get_runtime_lease(AUTONOMY_LEASE_NAME),
             "actions": actions,
             "runnableActionIds": [action["id"] for action in runnable_actions],
@@ -705,6 +739,26 @@ class LocalAutonomousService:
                     "reason": "not_selected_for_recovery",
                 }
             step_id = step_ids[action_id]
+            emergency_stop = self.ledger.get_runtime_control(AUTONOMY_EMERGENCY_STOP)
+            if emergency_stop.get("active"):
+                result = {
+                    "id": action_id,
+                    "status": "stopped",
+                    "reason": "operator_emergency_stop",
+                    "externalSubmission": "not_executed",
+                }
+                self.ledger.update_workflow_step(step_id, {
+                    "status": "not_run",
+                    "finishedAt": _utc_timestamp(),
+                    "durationMs": 0,
+                    "metadata": {
+                        **step_metadata[action_id],
+                        "result": result,
+                        "emergencyStop": emergency_stop,
+                    },
+                })
+                skipped.append(result)
+                raise AutonomyEmergencyStop("Operator emergency stop engaged")
             if not should_run:
                 result = self._skip(plan, action_id)
                 self.ledger.update_workflow_step(step_id, {
@@ -861,6 +915,21 @@ class LocalAutonomousService:
                 self._can_run(plan, "prepare_period_close_pack"),
                 self._run_period_close_pack,
             )
+        except AutonomyEmergencyStop:
+            status = "stopped"
+            for action_id, step_id in step_ids.items():
+                step = self.ledger.get_workflow_step(step_id)
+                if not step or step.get("status") != "pending":
+                    continue
+                self.ledger.update_workflow_step(step_id, {
+                    "status": "not_run",
+                    "finishedAt": _utc_timestamp(),
+                    "durationMs": 0,
+                    "metadata": {
+                        **step_metadata[action_id],
+                        "reason": "operator_emergency_stop",
+                    },
+                })
         except Exception as exc:
             status = "failed"
             error_message = _safe_error_message(exc, self.config)
@@ -921,7 +990,13 @@ class LocalAutonomousService:
             },
         })
         self.ledger.record_audit_event({
-            "action": "local_autonomy.cycle_completed" if status == "completed" else "local_autonomy.cycle_finished_with_error",
+            "action": (
+                "local_autonomy.cycle_completed"
+                if status == "completed"
+                else "local_autonomy.cycle_stopped"
+                if status == "stopped"
+                else "local_autonomy.cycle_finished_with_error"
+            ),
             "entityType": "workflow_run",
             "entityId": str(workflow_run_id),
             "details": {
@@ -959,8 +1034,14 @@ class LocalAutonomousService:
             "issues": [],
         }
 
-    def _counts(self, limit: int) -> Dict[str, Any]:
-        metrics = self.ledger.dashboard_metrics()
+    def _counts(
+        self,
+        limit: int,
+        *,
+        metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if metrics is None:
+            metrics = self.ledger.dashboard_metrics()
         trusted_category_suggestions = trusted_category_suggestion_candidates(
             self.ledger,
             self.config,

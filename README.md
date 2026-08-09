@@ -359,31 +359,7 @@ python package.py
 
 ## Deployment
 
-### Google Cloud Functions
-1.  **Ensure `gcloud` CLI is configured and authenticated.**
-2.  **Deploy the `process_document_cloud_function` (triggered by GCS events):**
-    ```bash
-    gcloud functions deploy process_document_cloud_function \\
-        --runtime python39 \\
-        --trigger-bucket YOUR_INPUT_BUCKET_NAME \\
-        --entry-point process_document_cloud_function \\
-        --source . \\
-        --memory 256MB \\
-        --timeout 300s \\
-        --set-env-vars GOOGLE_APPLICATION_CREDENTIALS=/path/to/your/service_account_key.json
-    ```
-3.  **Deploy the `trigger_workflow_http` (HTTP trigger for full workflow):**
-    ```bash
-    gcloud functions deploy trigger_workflow_http \\
-        --runtime python39 \\
-        --trigger-http \\
-        --entry-point trigger_workflow_http \\
-        --source . \\
-        --memory 512MB \\
-        --timeout 540s \\
-        --allow-unauthenticated # Or configure appropriate authentication
-    ```
-    (Adjust memory and timeout as needed. Ensure `requirements.txt` and `config.ini` are in the deployment package.)
+Use `Start-FAB.ps1` for the supported Windows runtime or the repository's three-service Docker Compose stack for container deployment. FAB must remain on loopback or behind private networking, TLS, an authenticated reverse proxy, and a managed secret store. Unauthenticated Cloud Function deployment is not supported for financial data. See `docs/deployment_guide.md` and `docs/local_windows_ngrok_setup.md` for the verified procedures and acceptance boundaries.
 
 ## Contributing
 
@@ -402,6 +378,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Contact
 
-For questions or support, please contact [Your Name/Email/GitHub Profile].
+For operational support, use the sanitized support bundle from the FAB dashboard and the repository's configured support channel.
 
 

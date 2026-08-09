@@ -1,0 +1,40 @@
+# API Usage Audit
+
+## Local API
+
+The Flask API is the source of operational truth. Major endpoint groups are:
+
+| Group | Representative endpoints | Mutation policy |
+| --- | --- | --- |
+| Liveness/health/readiness | `/api/live`, `/api/health`, `/api/settings`, `/api/doctor` | `/api/live` is constant-time; deeper reports are read-only and secret-redacted. |
+| Intake/documents | `/api/intake/upload`, `/api/intake/rescan`, `/api/documents/*` | Local evidence writes only. |
+| Reviews/categories | `/api/review`, `/api/review/<id>/resolve`, `/api/categories/*` | Operator decisions are audited. |
+| Autonomy/workflows | `/api/autonomy/plan`, `/api/autonomy/run`, `/api/workflows/*` | Lease, safety, recovery, and emergency-stop gated. |
+| Emergency control | `/api/autonomy/emergency-stop` | Any operator/HAI may stop; only operator DELETE with exact phrase may resume. |
+| Routing/exports | `/api/routing/*`, `/api/exports/*` | Preparation, approval, execution, and verification remain distinct states. |
+| Wave | `/api/wave/*`, `/api/drive-wave/*` | Capability and business mapping gated; attachment verification required before archival. |
+| Reconciliation/reporting | `/api/reconciliation/*`, `/api/report-runs/*`, `/api/compliance/*` | Local computation; provisional findings are labeled. |
+| Recovery/support | `/api/backups`, `/api/support-bundles` | Restore is confirmation-gated; support output is sanitized. |
+| HAI | `/api/hai/status`, `/api/hai/manifest`, `/api/hai/commands/execute` | Fixed command allowlist, normalized payloads, no external approval or emergency-stop clear. |
+
+## Web gateway
+
+The Express/tRPC gateway calls fixed local paths from `web/server/fabLocalGateway.ts`. The browser supplies a typed command ID, never an arbitrary URL. The gateway:
+
+- validates endpoint scheme/origin;
+- adds the local API bearer token server-side;
+- applies timeouts and a bounded projection before returning data;
+- caches only read resources for degraded/stale display;
+- does not convert an API error into success;
+- uses role-gated `fabOperatorProcedure` for financial operations.
+
+## Provider APIs
+
+- Google connectors use owner OAuth and scoped read operations against configured sources.
+- Wave GraphQL coverage is capability-based. Receipt attachment work can require a supervised executor when the API cannot provide the necessary action/readback.
+- MijnGeldzaken is an artifact export with supervised completion tracking.
+- Direct PSD2 and SVB mutation APIs are absent and are not advertised as live.
+
+## Known contract debt
+
+Some legacy Flask endpoints return route-specific error bodies rather than one universal error envelope. Clients currently rely on HTTP status plus `error`/`status`; normalization remains tracked technical debt.

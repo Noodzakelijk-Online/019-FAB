@@ -1,74 +1,55 @@
 # FAB Local Windows 11 and ngrok Setup
 
-FAB is local-first. ngrok mode is only for temporary testing, support, callbacks, or demonstrations.
+FAB is local-first. The supported Windows runtime is the authenticated API, autonomous worker, and production operator dashboard started together by the repository launcher.
 
-## Local Windows 11 Mode
+## Local Windows 11 mode
 
-1. Install Python 3.10 or newer.
-2. Clone the repository.
-3. Create and activate a virtual environment:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-4. Install dependencies:
+1. Install Python 3.10 or newer, Node.js, pnpm, Tesseract OCR with Dutch and English language data, and Poppler PDF tools.
+2. Create `config/config.ini` from `config/config_template.ini`.
+3. Set a random `operations.api_token` of at least 32 characters. Do not paste it into URLs, browser storage, logs, or Git.
+4. Start FAB:
 
 ```powershell
-pip install -r requirements.txt
-playwright install chromium
+.\Start-FAB.ps1 -NoBrowser
 ```
 
-5. Install Tesseract OCR for Windows and make sure `tesseract.exe` is available on PATH, or configure `tesseract_cmd` in `config/config.ini`.
-
-6. Create local config:
+5. Run the sanitized readiness check:
 
 ```powershell
-copy config\config_template.ini config\config.ini
+python -m src.run_fab_doctor
 ```
 
-7. Edit `config/config.ini` and set a long random dashboard token.
+The launcher prints the selected URLs. Defaults are:
 
-8. Start the dashboard:
+- Operator dashboard: `http://127.0.0.1:3000/admin/operations`
+- Local API: `http://127.0.0.1:5001`
+- Authenticated constant-time liveness: `GET /api/live`
+- Authenticated deep health: `GET /api/health`
+
+API clients use `Authorization: Bearer <token>`. The API runs under Waitress with bounded threads; the worker and dashboard are separate managed processes. `Stop-FAB.ps1` stops only the FAB instance recorded for this checkout.
+
+## Temporary ngrok verification
+
+Start FAB locally, configure ngrok for the Windows user, then run:
 
 ```powershell
-python src\run_dashboard.py
+.\Test-FAB-Ngrok.ps1
 ```
 
-9. Health check:
+The verifier creates an isolated temporary agent, exposes only the local API port, proves an unauthenticated request receives `401`, proves an authenticated `/api/live` request succeeds, and then removes its temporary files and endpoint.
 
-```text
-http://127.0.0.1:5001/health
-```
-
-Protected endpoints require the configured dashboard token in the request header named `X-FAB-Token`.
-
-## ngrok Mode
-
-1. Start FAB locally first.
-2. Start ngrok:
+If the ngrok account requires a second reserved endpoint, supply it explicitly:
 
 ```powershell
-ngrok http 5001
+.\Test-FAB-Ngrok.ps1 -Url https://your-reserved-endpoint.example
 ```
 
-3. Copy the ngrok URL into `public_base_url` in `config/config.ini` if callbacks need a public base URL.
+`ERR_NGROK_334` means the account already has an endpoint online. Do not stop or pool an unrelated endpoint; reserve a separate FAB endpoint and rerun with `-Url`.
 
-## Security Rules for ngrok
+## Exposure rules
 
-- Do not expose FAB without a configured dashboard token.
-- Do not place private credentials in URLs.
-- Stop ngrok when it is no longer needed.
-- Treat ngrok as temporary access, not permanent production hosting.
-
-## Current Dashboard Endpoints
-
-- `GET /health` — unprotected health check.
-- `GET /` — summary overview.
-- `GET /documents` — recent documents.
-- `GET /documents/<document_id>` — document detail.
-- `GET /manual-review` — review items.
-- `POST /manual-review/<item_id>/resolve` — resolve review item.
-- `GET /audit-log` — recent audit log.
-- `GET /posting-attempts` — posting attempts and dry runs.
+- Never expose FAB without a strong API token.
+- Keep the API and dashboard listeners on loopback unless an explicitly reviewed reverse proxy is used.
+- Do not put credentials, document identifiers, or tokens in a public URL.
+- Treat ngrok as temporary supervised access, not as production hosting or provider acceptance.
+- Stop the temporary tunnel when verification finishes.

@@ -265,7 +265,7 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 ### 2.28. `src/data_entry/mijngeldzaken_handler.py` (`MijngeldzakenHandler`)
 
 *   **Purpose**: Automates data entry into mijngeldzaken.nl using browser automation (Playwright).
-*   **Dependencies**: `playwright`.
+*   **Dependencies**: No embedded browser runtime. Provider browser work is supervised outside the autonomous worker.
 *   **Configuration**: `mijngeldzaken_export_dir`, `mijngeldzaken_default_account`, `mijngeldzaken_csv_delimiter`, `mijngeldzaken_csv_template`, `mijngeldzaken_category_mapping`.
 *   **Safety**: FAB does not use stored MijnGeldzaken usernames, passwords, or DigiD credentials. Approved entries become checksum-bound CSV artifacts and pause in `supervision_required` until the operator completes the import in a user-owned session and records the result in FAB.
 

@@ -30,7 +30,11 @@ const requireUser = t.middleware(async opts => {
 export const protectedProcedure = t.procedure.use(requireUser);
 
 export function isLoopbackFabOperatorRequest(ctx: TrpcContext): boolean {
-  return isLoopbackRequest(ctx.req);
+  return isLoopbackRequest(
+    ctx.req,
+    ENV.fabOperatorTrustedProxyAddresses,
+    ENV.fabOperatorTrustDockerGateway,
+  );
 }
 
 export const fabOperatorProcedure = t.procedure.use(

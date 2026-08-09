@@ -21,13 +21,23 @@ class LocalCloseReadinessService:
         workflow_id: str = "daily_reconciliation_run",
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        *,
+        metrics: Optional[Dict[str, Any]] = None,
+        health: Optional[Dict[str, Any]] = None,
+        master_ledger: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         workflow_id = str(workflow_id or "daily_reconciliation_run")
         from_date = from_date or date.today().isoformat()
         to_date = to_date or from_date
-        metrics = self.ledger.dashboard_metrics()
-        health = LocalOperationsHealth(self.ledger, self.config).summarize()
-        master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
+        if metrics is None:
+            metrics = self.ledger.dashboard_metrics()
+        if master_ledger is None:
+            master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
+        if health is None:
+            health = LocalOperationsHealth(self.ledger, self.config).summarize(
+                metrics=metrics,
+                master_ledger=master_ledger,
+            )
         report_controls = LocalWaveControlService(self.config).evaluate_report_controls(
             self.ledger,
             workflow_id=workflow_id,

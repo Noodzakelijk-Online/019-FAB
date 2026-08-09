@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFabBackup,
+  createFabSupportBundle,
   fabLocalRequest,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
@@ -27,6 +28,9 @@ describe("FAB local API gateway", () => {
     expect(() => getFabLocalApiBaseUrl("http://accounting.example.test"))
       .toThrow("must use https");
     expect(getFabLocalApiBaseUrl("http://127.0.0.1:5001").hostname).toBe("127.0.0.1");
+    expect(getFabLocalApiBaseUrl("http://api:5001", ["api"]).hostname).toBe("api");
+    expect(() => getFabLocalApiBaseUrl("http://worker:5001", ["api"]))
+      .toThrow("must use https");
   });
 
   it("keeps the local API token server-side", async () => {
@@ -48,8 +52,34 @@ describe("FAB local API gateway", () => {
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
 
+  it("creates a sanitized support bundle through the local API", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        actor: "operator-16",
+        note: "Created from the FAB operator dashboard.",
+      });
+      return new Response(JSON.stringify({
+        success: true,
+        status: "created",
+        bundleFilename: "fab-support-20260808.zip",
+        bundlePath: "C:\\private\\fab-support-20260808.zip",
+        sha256: "b".repeat(64),
+        privacy: { containsCredentials: false },
+      }), { status: 201, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createFabSupportBundle("operator-16");
+
+    expect(result.bundleFilename).toBe("fab-support-20260808.zip");
+    expect(result.bundlePath).toBeUndefined();
+    expect(result.privacy).toEqual({ containsCredentials: false });
+  });
+
   it("aggregates authoritative ledger state into the control center", async () => {
     const fixtures: Record<string, unknown> = {
+      "/api/live": { status: "ok", authRequired: true },
       "/api/health": { status: "attention", operations: { status: "attention" } },
       "/api/dashboard": {
         documents: 18,
@@ -99,6 +129,7 @@ describe("FAB local API gateway", () => {
       "/api/backups": {
         backupDir: "C:\\private\\backups",
         restoreConfirmationPhrase: "RESTORE FAB LOCAL LEDGER",
+        verificationMode: "manifest_only",
         schedule: {
           status: "current",
           due: false,
@@ -112,6 +143,7 @@ describe("FAB local API gateway", () => {
           sourceEvidenceFiles: 18,
           sourceEvidenceBytes: 4096,
           sourceEvidenceGaps: 0,
+          integrityVerification: "manifest_only",
         },
         backups: [{
           backupFilename: "fab-recovery-package_20260725.zip",
@@ -347,8 +379,10 @@ describe("FAB local API gateway", () => {
     ]));
     expect(result.recovery).toMatchObject({ dueCount: 1 });
     expect(result.backups).toMatchObject({
+      verificationMode: "manifest_only",
       schedule: {
         status: "current",
+        integrityVerification: "manifest_only",
         sourceEvidenceStatus: "complete",
         sourceEvidenceDocuments: 18,
       },
@@ -446,7 +480,7 @@ describe("FAB local API gateway", () => {
     });
     expect(fetchMock.mock.calls.some(([input]) => {
       const url = new URL(String(input));
-      return url.pathname === "/api/review" && url.searchParams.get("limit") === "500";
+      return url.pathname === "/api/review" && url.searchParams.get("limit") === "200";
     })).toBe(true);
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("private-token");
@@ -494,6 +528,28 @@ describe("FAB local API gateway", () => {
     });
     expect(result.resourceStates.metrics).toMatchObject({ state: "error", updatedAt: null });
     expect(result.resourceStates.exceptions.state).toBe("error");
+  });
+
+  it("bounds control-center reads so the local ledger is not flooded", async () => {
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    const fetchMock = vi.fn(async () => {
+      activeRequests += 1;
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeRequests -= 1;
+      return new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getFabControlCenter();
+
+    expect(result.connection.connected).toBe(true);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(20);
+    expect(maximumActiveRequests).toBeLessThanOrEqual(4);
   });
 
   it("retains last valid resource data as visibly stale after a partial failure", async () => {

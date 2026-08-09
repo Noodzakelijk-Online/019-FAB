@@ -1,4 +1,5 @@
 Flask
+waitress
 Pillow
 pytesseract
 pdf2image

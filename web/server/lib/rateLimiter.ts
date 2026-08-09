@@ -17,7 +17,12 @@ export function shouldBypassRelaxedRateLimit(
   req: Pick<Request, "hostname" | "socket">,
   localOperatorMode: boolean = ENV.fabOperatorLocalMode,
 ): boolean {
-  return localOperatorMode && isLoopbackRequest(req);
+  return localOperatorMode
+    && isLoopbackRequest(
+      req,
+      ENV.fabOperatorTrustedProxyAddresses,
+      ENV.fabOperatorTrustDockerGateway,
+    );
 }
 
 /**

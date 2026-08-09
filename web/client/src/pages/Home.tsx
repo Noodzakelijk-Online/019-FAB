@@ -790,10 +790,10 @@ export default function Home() {
             variants={stagger}
           >
             {[
-              { value: "1M+", labelKey: "stats.users", subKey: "stats.usersSub" },
-              { value: "€3.6B", labelKey: "stats.budget", subKey: "stats.budgetSub" },
-              { value: "<10", labelKey: "stats.minutes", subKey: "stats.minutesSub" },
-              { value: "80%", labelKey: "stats.saved", subKey: "stats.savedSub" },
+              { value: "Local", labelKey: "stats.users", subKey: "stats.usersSub" },
+              { value: "7 yr", labelKey: "stats.budget", subKey: "stats.budgetSub" },
+              { value: "Review", labelKey: "stats.minutes", subKey: "stats.minutesSub" },
+              { value: "SHA-256", labelKey: "stats.saved", subKey: "stats.savedSub" },
             ].map((stat, i) => (
               <motion.div key={i} variants={fadeUp} className="text-center lg:text-left">
                 <div className="text-4xl lg:text-5xl font-serif mb-2">
@@ -810,7 +810,7 @@ export default function Home() {
       </section>
 
       {/* ═══════════════════════════════════════════════════════════════
-          TESTIMONIALS — Social Proof
+          OPERATING PRINCIPLES
       ═══════════════════════════════════════════════════════════════ */}
       <section className="py-20 lg:py-28 bg-sand/30">
         <div className="container">
@@ -849,10 +849,10 @@ export default function Home() {
             variants={stagger}
           >
             {[
-              { quoteKey: "testimonials.t1.quote", nameKey: "testimonials.t1.name", roleKey: "testimonials.t1.role", initials: "SM" },
-              { quoteKey: "testimonials.t2.quote", nameKey: "testimonials.t2.name", roleKey: "testimonials.t2.role", initials: "TK" },
-              { quoteKey: "testimonials.t3.quote", nameKey: "testimonials.t3.name", roleKey: "testimonials.t3.role", initials: "LD" },
-              { quoteKey: "testimonials.t4.quote", nameKey: "testimonials.t4.name", roleKey: "testimonials.t4.role", initials: "MB" },
+              { quoteKey: "testimonials.t1.quote", nameKey: "testimonials.t1.name", roleKey: "testimonials.t1.role", initials: "AG" },
+              { quoteKey: "testimonials.t2.quote", nameKey: "testimonials.t2.name", roleKey: "testimonials.t2.role", initials: "EC" },
+              { quoteKey: "testimonials.t3.quote", nameKey: "testimonials.t3.name", roleKey: "testimonials.t3.role", initials: "HR" },
+              { quoteKey: "testimonials.t4.quote", nameKey: "testimonials.t4.name", roleKey: "testimonials.t4.role", initials: "FS" },
             ].map((item, i) => (
               <motion.div
                 key={i}

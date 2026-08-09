@@ -89,6 +89,7 @@ import {
 import {
   FAB_OPERATOR_COMMAND_IDS,
   createFabBackup,
+  createFabSupportBundle,
   getFabControlCenter,
   resolveFabReviewItem,
   runFabOperatorCommand,
@@ -444,6 +445,10 @@ export const appRouter = router({
       .mutation(async ({ ctx }) => createFabBackup(
         ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
       )),
+    createSupportBundle: fabOperatorProcedure
+      .mutation(async ({ ctx }) => createFabSupportBundle(
+        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      )),
     uploadIntake: fabOperatorProcedure
       .input(z.object({
         filename: z.string().trim().min(1).max(255),
@@ -529,6 +534,8 @@ export const appRouter = router({
           fromDate: z.iso.date().optional(),
           toDate: z.iso.date().optional(),
           targetSystem: z.string().trim().max(100).optional(),
+          reason: z.string().trim().min(1).max(500).optional(),
+          confirmation: z.string().trim().max(100).optional(),
         }).strict().optional(),
       }))
       .mutation(async ({ input, ctx }) => runFabOperatorCommand(

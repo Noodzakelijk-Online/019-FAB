@@ -214,6 +214,7 @@ export default function Contact() {
               variants={stagger}
             >
               <motion.div
+                id="contact-form"
                 variants={fadeUp}
                 className="bg-white rounded-2xl shadow-sm border border-sand-dark/15 p-8 lg:p-10"
               >
@@ -547,13 +548,14 @@ export default function Contact() {
                       <p className="text-sm text-charcoal-light mb-2">
                         {t("contact.info.phoneVal")}
                       </p>
-                      <button
+                      <a
+                        href="#contact-form"
                         className="text-teal hover:text-teal-light text-sm font-medium transition-colors inline-flex items-center gap-1"
-                        onClick={() => toast(t("contact.toast.schedule"))}
+                        onClick={() => setFormData((current) => ({ ...current, subject: "demo" }))}
                       >
                         {t("contact.info.phoneVal")}
                         <ArrowRight className="w-3.5 h-3.5" />
-                      </button>
+                      </a>
                     </div>
                   </div>
                 </motion.div>

@@ -7,7 +7,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
-import { serveStatic, setupVite } from "./vite";
+import { serveStatic } from "./static";
 import { webhookLimiter, relaxedLimiter } from "../lib/rateLimiter";
 import { createLogger } from "../lib/logger";
 import { registerFabOperationsRoutes } from "../fabOperations";
@@ -93,6 +93,8 @@ async function startServer() {
 
   // ── Static / Vite ─────────────────────────────────────────────
   if (process.env.NODE_ENV === "development") {
+    const developmentServer = "./vite";
+    const { setupVite } = await import(developmentServer);
     await setupVite(app, server);
   } else {
     serveStatic(app);

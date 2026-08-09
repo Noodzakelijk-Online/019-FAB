@@ -63,8 +63,48 @@ def trusted_category_suggestion_candidates(
     """Find exact built-in vendor matches that still have category review gates."""
     config = config or {}
     bounded_limit = max(1, min(_safe_int(limit) or 500, 5000))
+    open_reviews = []
+    while len(open_reviews) < 5000:
+        page = ledger.list_review_items(
+            status=("pending", "in_review"),
+            limit=500,
+            offset=len(open_reviews),
+        )
+        open_reviews.extend(page)
+        if len(page) < 500:
+            break
+    reviews_by_document: Dict[int, list] = {}
+    for review in open_reviews:
+        document_id = _safe_int(review.get("document_id"))
+        if document_id:
+            reviews_by_document.setdefault(document_id, []).append(review)
+    category_document_ids = [
+        document_id
+        for document_id, reviews in reviews_by_document.items()
+        if any(
+            review.get("reason") in {
+                "low_confidence_categorization",
+                "manual_review_category",
+            }
+            for review in reviews
+        )
+    ]
+    documents_by_id = {}
+    for start in range(0, len(category_document_ids), 500):
+        context = ledger.get_review_work_item_context(
+            category_document_ids[start:start + 500],
+        )
+        documents_by_id.update(context["documents"])
+    documents = sorted(
+        documents_by_id.values(),
+        key=lambda document: (
+            str(document.get("updated_at") or ""),
+            int(document.get("id") or 0),
+        ),
+        reverse=True,
+    )
     candidates = []
-    for document in ledger.list_documents(limit=5000):
+    for document in documents:
         if len(candidates) >= bounded_limit:
             break
         if (
@@ -84,19 +124,15 @@ def trusted_category_suggestion_candidates(
             and classification.get("reviewRequired") is True
         ):
             continue
-        open_reviews = ledger.list_review_items(
-            status=("pending", "in_review"),
-            document_id=int(document["id"]),
-            limit=100,
-        )
+        document_reviews = reviews_by_document.get(int(document["id"]), [])
         if (
             document.get("duplicate_of_document_id")
-            and not any(item.get("reason") == "duplicate_candidate" for item in open_reviews)
+            and not any(item.get("reason") == "duplicate_candidate" for item in document_reviews)
         ):
             continue
         category_reviews = [
             item
-            for item in open_reviews
+            for item in document_reviews
             if item.get("status") in {"pending", "in_review"}
             and item.get("reason") in {
                 "low_confidence_categorization",

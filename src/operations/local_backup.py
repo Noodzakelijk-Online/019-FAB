@@ -124,12 +124,16 @@ class LocalBackupService:
             "manifest": manifest,
         }
 
-    def list_backups(self, limit: int = 25) -> Dict[str, Any]:
+    def list_backups(self, limit: int = 25, deep_verify: bool = True) -> Dict[str, Any]:
         backups = []
         for path in self._backup_paths(limit):
             name = os.path.basename(path)
             try:
-                inspected = self.inspect_backup(path)
+                inspected = (
+                    self.inspect_backup(path)
+                    if deep_verify
+                    else self.inspect_backup_manifest(path)
+                )
                 source_evidence = inspected.get("manifest", {}).get("sourceEvidence") or {}
                 backups.append({
                     "backupFilename": name,
@@ -168,7 +172,53 @@ class LocalBackupService:
             "backupDir": self.backup_dir,
             "restoreConfirmationPhrase": RESTORE_CONFIRMATION_PHRASE,
             "backups": backups[: _bounded_limit(limit)],
-            "schedule": self.schedule_status(),
+            "schedule": self.schedule_status(deep_verify=deep_verify),
+            "verificationMode": "deep" if deep_verify else "manifest_only",
+        }
+
+    def inspect_backup_manifest(self, backup_path: str) -> Dict[str, Any]:
+        """Validate archive structure and manifest without reading financial bytes."""
+        resolved_path = self._resolve_backup_path(backup_path)
+        if not os.path.exists(resolved_path):
+            raise ValueError(f"Backup not found: {resolved_path}")
+        if not resolved_path.lower().endswith(".zip"):
+            raise ValueError("Only .zip local FAB backups are supported")
+        with zipfile.ZipFile(resolved_path, "r") as archive:
+            names = archive.namelist()
+            self._validate_member_names(names)
+            try:
+                with archive.open(BACKUP_MANIFEST_NAME) as handle:
+                    manifest = json.loads(handle.read().decode("utf-8"))
+            except KeyError:
+                raise ValueError("Backup archive is missing manifest.json") from None
+            if not isinstance(manifest, dict):
+                raise ValueError("Backup manifest must be a JSON object")
+            backup_format = manifest.get("format")
+            if backup_format not in {BACKUP_FORMAT_V1, BACKUP_FORMAT_V2}:
+                raise ValueError("Unsupported FAB backup format")
+            expected_names = {BACKUP_MANIFEST_NAME, BACKUP_LEDGER_NAME}
+            if backup_format == BACKUP_FORMAT_V2:
+                expected_names.update(
+                    self._validate_source_evidence_manifest(manifest, archive)
+                )
+            self._validate_expected_archive_names(names, expected_names)
+            ledger_info = archive.getinfo(BACKUP_LEDGER_NAME)
+            expected_bytes = manifest.get("ledgerBytes")
+            if expected_bytes is not None and int(expected_bytes) != int(ledger_info.file_size):
+                raise ValueError("Backup ledger size does not match manifest")
+            expected_sha256 = str(manifest.get("ledgerSha256") or "").strip().lower()
+            if not _valid_sha256(expected_sha256):
+                raise ValueError("Backup manifest has no valid ledger SHA-256")
+            total_uncompressed = sum(info.file_size for info in archive.infolist())
+            if total_uncompressed > MAX_BACKUP_UNCOMPRESSED_BYTES:
+                raise ValueError("Backup exceeds the maximum uncompressed size")
+        return {
+            "success": True,
+            "status": "manifest_valid",
+            "backupPath": resolved_path,
+            "backupFilename": os.path.basename(resolved_path),
+            "manifest": manifest,
+            "deepVerification": "not_executed",
         }
 
     def inspect_backup(self, backup_path: str) -> Dict[str, Any]:
@@ -248,7 +298,7 @@ class LocalBackupService:
         }
         return result
 
-    def schedule_status(self) -> Dict[str, Any]:
+    def schedule_status(self, deep_verify: bool = True) -> Dict[str, Any]:
         interval_hours = _positive_float_config(
             self.config,
             "backup_schedule_interval_hours",
@@ -265,7 +315,11 @@ class LocalBackupService:
         invalid_count = 0
         for path in self._backup_paths(100):
             try:
-                latest = self.inspect_backup(path)
+                latest = (
+                    self.inspect_backup(path)
+                    if deep_verify
+                    else self.inspect_backup_manifest(path)
+                )
                 break
             except (
                 OSError,
@@ -320,6 +374,7 @@ class LocalBackupService:
             "sourceEvidenceFiles": source_evidence.get("includedFiles", 0),
             "sourceEvidenceBytes": source_evidence.get("includedBytes", 0),
             "sourceEvidenceGaps": source_evidence.get("gapCount", 0),
+            "integrityVerification": "deep" if deep_verify else "manifest_only",
         }
 
     def run_due(self, actor: str = "local_worker") -> Dict[str, Any]:

@@ -13,11 +13,24 @@ class LocalExceptionQueueService:
         self.ledger = ledger
         self.config = config or {}
 
-    def list_exceptions(self, limit: int = 50, include_entities: bool = True) -> Dict[str, Any]:
-        health = LocalOperationsHealth(self.ledger, self.config).summarize()
+    def list_exceptions(
+        self,
+        limit: int = 50,
+        include_entities: bool = True,
+        *,
+        health: Optional[Dict[str, Any]] = None,
+        master_ledger: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if health is None:
+            health = LocalOperationsHealth(self.ledger, self.config).summarize(
+                master_ledger=master_ledger,
+            )
         bounded_limit = _bounded_limit(limit)
         issues = [
-            *self._master_ledger_row_issues(limit=bounded_limit),
+            *self._master_ledger_row_issues(
+                limit=bounded_limit,
+                master_ledger=master_ledger,
+            ),
             *list(health.get("issues") or []),
             *LocalLedgerAnomalyService(self.ledger, self.config).list_issues(limit=bounded_limit),
         ]
@@ -53,8 +66,14 @@ class LocalExceptionQueueService:
             exception["entity"] = self._entity_summary(issue)
         return exception
 
-    def _master_ledger_row_issues(self, limit: int) -> List[Dict[str, Any]]:
-        projection = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
+    def _master_ledger_row_issues(
+        self,
+        limit: int,
+        master_ledger: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        projection = master_ledger
+        if projection is None:
+            projection = LocalMasterLedgerService(self.ledger, self.config).project(limit=limit)
         issues = []
         for row in projection.get("rows") or []:
             row_issues = _issues_for_master_ledger_row(row)

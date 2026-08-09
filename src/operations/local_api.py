@@ -19,6 +19,7 @@ from src.data_entry.waveapps_entity_sync import WaveappsEntitySyncService
 from src.document_handling.duplicate_detector import DuplicateDetector
 from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_autonomy import LocalAutonomousService
+from src.operations.local_autonomy_control import LocalAutonomyControlService
 from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
 from src.operations.local_bookkeeping_records import (
@@ -60,6 +61,7 @@ from src.operations.local_notifications import ACTIVE_NOTIFICATION_STATUSES, Loc
 from src.operations.local_photos_picker import LocalGooglePhotosPickerService
 from src.operations.local_processing import LocalDocumentProcessor
 from src.operations.local_readiness import LocalReadinessService
+from src.operations.local_support_bundle import LocalSupportBundleService
 from src.operations.local_reconciliation import LocalReconciliationService
 from src.operations.local_reporting import LocalFinancialReportingService, LocalScheduledReportService
 from src.operations.local_review import LocalReviewService
@@ -221,6 +223,9 @@ DASHBOARD_TEMPLATE = """
     }
     tbody tr:hover { background: #f9fbfc; }
     .muted { color: var(--muted); }
+    .notice { margin: 14px 0; border: 1px solid var(--line); padding: 12px 14px; background: #fff; }
+    .notice.error { border-color: #f1aaa4; background: #fff5f4; color: #7a271a; }
+    .notice p { margin: 5px 0 10px; }
     .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; overflow-wrap: anywhere; }
     .badge {
       display: inline-flex;
@@ -298,6 +303,7 @@ DASHBOARD_TEMPLATE = """
       line-height: 1.2;
     }
     .button-link:hover { background: var(--panel-soft); text-decoration: none; }
+    button.danger { background: var(--danger); }
     .export-table { min-width: 0; table-layout: fixed; }
     .export-table td { min-width: 0; overflow-wrap: anywhere; }
     .export-actions > .button-link { margin-bottom: 8px; }
@@ -931,6 +937,22 @@ DASHBOARD_TEMPLATE = """
           <button type="submit" {% if not autonomy_plan.canRunAutonomously or (autonomy_plan.runtimeLease and autonomy_plan.runtimeLease.active) %}disabled{% endif %}>Run safe cycle</button>
         </form>
       </div>
+      {% if autonomy_control.active %}
+      <div class="notice error">
+        <strong>Automation emergency stop is engaged.</strong>
+        <p>{{ autonomy_control.reason }} Updated by {{ autonomy_control.updatedBy }} at {{ autonomy_control.updatedAt }}.</p>
+        <form class="table-actions" method="post" action="{{ url_for('clear_autonomy_emergency_stop_form') }}">
+          <input type="text" name="reason" placeholder="Why automation may resume" required>
+          <input type="text" name="confirmation" placeholder="{{ autonomy_control.resumeConfirmationPhrase }}" required>
+          <button class="compact" type="submit" {% if autonomy_control.cycleActive %}disabled{% endif %}>Clear stop</button>
+        </form>
+      </div>
+      {% else %}
+      <form class="inline-actions" method="post" action="{{ url_for('engage_autonomy_emergency_stop_form') }}">
+        <input type="text" name="reason" value="Operator stopped autonomous processing for inspection." required>
+        <button class="compact danger" type="submit">Stop automation</button>
+      </form>
+      {% endif %}
       <div class="summary-grid">
         <div class="summary-item"><span>Status</span><strong>{{ autonomy_plan.status }}</strong></div>
         <div class="summary-item"><span>Runnable</span><strong>{{ autonomy_plan.runnableActionIds|length }}</strong></div>
@@ -3827,6 +3849,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         "operations_intake_extensions",
     ) or sorted(DEFAULT_ALLOWED_EXTENSIONS)
     ledger = LocalOperationsLedger(ledger_path)
+    instance_id = local_instance_id(Path(__file__).resolve().parents[2])
     app = Flask(__name__)
     app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(ledger, config)
     app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(ledger, config)
@@ -3945,7 +3968,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify({
             "service": "fab-ledger-api",
             "apiVersion": "1",
-            "instanceId": local_instance_id(Path(__file__).resolve().parents[2]),
+            "instanceId": instance_id,
             "status": health_status,
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
@@ -3953,6 +3976,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "intakeExtensions": app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
             "operations": operations_health,
             "readiness": readiness,
+        })
+
+    @app.get("/api/live")
+    def live():
+        return jsonify({
+            "service": "fab-ledger-api",
+            "apiVersion": "1",
+            "instanceId": instance_id,
+            "status": "ok",
+            "authRequired": bool(token),
         })
 
     @app.get("/")
@@ -3976,6 +4009,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             intake_paths,
             intake_extensions,
         ).plan()
+        autonomy_control = LocalAutonomyControlService(ledger).status()
         documents = ledger.list_documents(limit=25)
         connector_plan = LocalConnectorIntakeService(ledger, config).plan()
         photos_picker_service = LocalGooglePhotosPickerService(ledger, config)
@@ -4161,6 +4195,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return render_template_string(
             DASHBOARD_TEMPLATE,
             autonomy_plan=autonomy_plan,
+            autonomy_control=autonomy_control,
             autonomy_summary=last_autonomy_summary,
             audit_events=audit_events,
             backup_summary=last_backup_summary,
@@ -4335,6 +4370,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 dry_run=bool(payload.get("dryRun", False)),
             )
 
+        def engage_emergency_stop_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
+            return LocalAutonomyControlService(ledger).engage(
+                actor=actor,
+                reason=str(payload.get("reason") or "HAI requested an immediate stop for operator inspection."),
+                metadata={"source": "hai_connector"},
+            )
+
         def run_due_recovery_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
             return _workflow_recovery_scheduler(
                 ledger,
@@ -4380,6 +4422,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "reprocess_review_queue": reprocess_review_queue_command,
                 "sync_sources": sync_sources_command,
                 "run_safe_cycle": run_safe_cycle_command,
+                "engage_emergency_stop": engage_emergency_stop_command,
                 "run_due_recovery": run_due_recovery_command,
                 "run_reconciliation": run_reconciliation_command,
                 "refresh_notifications": lambda payload, actor: LocalNotificationService(
@@ -5061,6 +5104,35 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             intake_extensions,
         ).summarize())
 
+    @app.get("/api/doctor")
+    def doctor():
+        readiness = _readiness_service(
+            config,
+            ledger_path,
+            host,
+            bool(token),
+            intake_paths,
+            intake_extensions,
+        )
+        return jsonify(LocalSupportBundleService(ledger, config, readiness).doctor())
+
+    @app.post("/api/support-bundles")
+    def create_support_bundle():
+        payload = request.get_json(silent=True) or {}
+        readiness = _readiness_service(
+            config,
+            ledger_path,
+            host,
+            bool(token),
+            intake_paths,
+            intake_extensions,
+        )
+        result = LocalSupportBundleService(ledger, config, readiness).create(
+            actor=str(payload.get("actor") or "fab_local_api")[:200],
+            note=str(payload.get("note") or "")[:500],
+        )
+        return jsonify(result), 201
+
     @app.get("/api/autonomy/plan")
     def autonomy_plan():
         limit = _bounded_positive_int(request.args.get("limit"), default=25, maximum=100)
@@ -5108,6 +5180,37 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             status_code = 200
         return jsonify(result), status_code
 
+    @app.get("/api/autonomy/emergency-stop")
+    def autonomy_emergency_stop_status():
+        return jsonify(LocalAutonomyControlService(ledger).status())
+
+    @app.post("/api/autonomy/emergency-stop")
+    def engage_autonomy_emergency_stop():
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            return jsonify({"error": "reason is required"}), 400
+        result = LocalAutonomyControlService(ledger).engage(
+            actor=str(payload.get("actor") or "fab_local_api")[:200],
+            reason=reason,
+            metadata={"source": "local_api"},
+        )
+        return jsonify(result)
+
+    @app.delete("/api/autonomy/emergency-stop")
+    def clear_autonomy_emergency_stop():
+        payload = request.get_json(silent=True) or {}
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            return jsonify({"error": "reason is required"}), 400
+        result = LocalAutonomyControlService(ledger).clear(
+            actor=str(payload.get("actor") or "fab_local_api")[:200],
+            reason=reason,
+            confirmation=str(payload.get("confirmation") or ""),
+        )
+        status_code = 200 if result.get("success") else 409 if result.get("status") == "cycle_still_active" else 400
+        return jsonify(result), status_code
+
     @app.post("/autonomy/run")
     def run_autonomy_form():
         session["fab_last_autonomy_summary"] = _autonomy_service(
@@ -5121,6 +5224,24 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             include_wave_plan=True,
             include_wave_sync=True,
             include_connector_sync=True,
+        )
+        return redirect(url_for("dashboard_page", _anchor="autonomy"))
+
+    @app.post("/autonomy/emergency-stop")
+    def engage_autonomy_emergency_stop_form():
+        LocalAutonomyControlService(ledger).engage(
+            actor="fab_dashboard:local_operator",
+            reason=str(request.form.get("reason") or "Operator emergency stop"),
+            metadata={"source": "legacy_dashboard"},
+        )
+        return redirect(url_for("dashboard_page", _anchor="autonomy"))
+
+    @app.post("/autonomy/emergency-stop/clear")
+    def clear_autonomy_emergency_stop_form():
+        session["fab_last_autonomy_summary"] = LocalAutonomyControlService(ledger).clear(
+            actor="fab_dashboard:local_operator",
+            reason=str(request.form.get("reason") or "Operator resumed autonomous processing"),
+            confirmation=str(request.form.get("confirmation") or ""),
         )
         return redirect(url_for("dashboard_page", _anchor="autonomy"))
 
@@ -6786,7 +6907,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/backups")
     def list_backups():
-        return jsonify(LocalBackupService(ledger, config).list_backups(limit=_limit_arg()))
+        return jsonify(LocalBackupService(ledger, config).list_backups(
+            limit=_limit_arg(),
+            deep_verify=_bool_value(request.args.get("verify"), default=True),
+        ))
 
     @app.post("/api/backups")
     def create_backup():
@@ -8084,7 +8208,21 @@ def run(config: Optional[Dict[str, Any]] = None):
     app = create_app(config)
     host = str(config.get("fab_local_api_host") or config.get("operations_api_host") or "127.0.0.1")
     port = int(config.get("fab_local_api_port") or config.get("operations_api_port") or 5001)
-    app.run(host=host, port=port)
+    threads = max(4, min(32, int(
+        config.get("fab_local_api_threads")
+        or config.get("operations_api_threads")
+        or 8
+    )))
+    from waitress import serve
+
+    serve(
+        app,
+        host=host,
+        port=port,
+        threads=threads,
+        channel_timeout=120,
+        ident="FAB",
+    )
 
 
 if __name__ == "__main__":

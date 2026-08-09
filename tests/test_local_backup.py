@@ -101,6 +101,14 @@ class TestLocalBackupService(unittest.TestCase):
             self.assertEqual(listed["backups"][0]["backupFilename"], backup["backupFilename"])
             self.assertEqual(listed["backups"][0]["status"], "valid")
 
+            manifest_only = service.list_backups(deep_verify=False)
+            self.assertEqual(manifest_only["verificationMode"], "manifest_only")
+            self.assertEqual(manifest_only["backups"][0]["status"], "manifest_valid")
+            self.assertEqual(
+                manifest_only["schedule"]["integrityVerification"],
+                "manifest_only",
+            )
+
     def test_inspect_rejects_checksum_mismatched_ledger_bytes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
