@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 
 from src.operations.local_api import create_app
@@ -59,6 +60,88 @@ class TestLocalHaiConnector(unittest.TestCase):
                 "refresh_notifications",
             )
 
+    def test_concurrent_duplicate_request_executes_only_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            started = threading.Event()
+            release = threading.Event()
+            executions = []
+
+            def executor(payload, actor):
+                executions.append(actor)
+                started.set()
+                self.assertTrue(release.wait(timeout=10))
+                return {"status": "refreshed"}
+
+            connector = LocalHaiConnector(
+                ledger,
+                {
+                    "fab_hai_connector_enabled": True,
+                    "fab_hai_allowed_commands": "refresh_notifications",
+                },
+                executors={"refresh_notifications": executor},
+            )
+            first_result = {}
+
+            def run_first():
+                first_result.update(connector.execute(
+                    "concurrent-request-1",
+                    "refresh_notifications",
+                    actor="first-controller",
+                ))
+
+            thread = threading.Thread(target=run_first)
+            thread.start()
+            self.assertTrue(started.wait(timeout=10))
+            concurrent = connector.execute(
+                "concurrent-request-1",
+                "refresh_notifications",
+                actor="second-controller",
+            )
+            release.set()
+            thread.join(timeout=10)
+            replay = connector.execute("concurrent-request-1", "refresh_notifications")
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(first_result["status"], "completed")
+            self.assertEqual(concurrent["status"], "execution_in_progress")
+            self.assertEqual(replay["status"], "already_executed")
+            self.assertEqual(executions, ["first-controller"])
+
+    def test_request_id_is_bound_to_command_and_normalized_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            connector = LocalHaiConnector(
+                ledger,
+                {
+                    "fab_hai_connector_enabled": True,
+                    "fab_hai_allowed_commands": "process_imported,refresh_notifications",
+                },
+                executors={
+                    "process_imported": lambda payload, actor: payload,
+                    "refresh_notifications": lambda payload, actor: {},
+                },
+            )
+
+            completed = connector.execute(
+                "bound-request-1",
+                "process_imported",
+                {"limit": 1},
+            )
+            changed_payload = connector.execute(
+                "bound-request-1",
+                "process_imported",
+                {"limit": 2},
+            )
+            changed_command = connector.execute(
+                "bound-request-1",
+                "refresh_notifications",
+            )
+
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(changed_payload["status"], "idempotency_conflict")
+            self.assertEqual(changed_command["status"], "idempotency_conflict")
+
     def test_hai_can_engage_but_cannot_clear_operator_emergency_stop(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -113,24 +196,54 @@ class TestLocalHaiConnector(unittest.TestCase):
             self.assertEqual(result["status"], "invalid")
             self.assertIn("bankTransactions", result["error"])
 
-    def test_request_ids_and_executor_failures_do_not_leak_exception_details(self):
+            empty_array = connector.plan("run_reconciliation", [])
+            self.assertEqual(empty_array["status"], "invalid")
+            self.assertEqual(empty_array["error"], "payload must be an object.")
+
+    def test_compliance_dates_follow_manifest_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
             connector = LocalHaiConnector(
                 ledger,
                 {
                     "fab_hai_connector_enabled": True,
+                    "fab_hai_allowed_commands": "assess_compliance",
+                },
+                executors={"assess_compliance": lambda payload, actor: payload},
+            )
+
+            malformed = connector.plan("assess_compliance", {"fromDate": "09-08-2026"})
+            reversed_period = connector.plan(
+                "assess_compliance",
+                {"fromDate": "2026-08-10", "toDate": "2026-08-09"},
+            )
+
+            self.assertEqual(malformed["status"], "invalid")
+            self.assertIn("YYYY-MM-DD", malformed["error"])
+            self.assertEqual(reversed_period["status"], "invalid")
+            self.assertIn("on or before", reversed_period["error"])
+
+    def test_request_ids_and_executor_failures_do_not_leak_exception_details(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            executions = []
+
+            def fail_executor(payload, actor):
+                executions.append(actor)
+                raise RuntimeError("provider token and financial detail")
+
+            connector = LocalHaiConnector(
+                ledger,
+                {
+                    "fab_hai_connector_enabled": True,
                     "fab_hai_allowed_commands": "refresh_notifications",
                 },
-                executors={
-                    "refresh_notifications": lambda payload, actor: (_ for _ in ()).throw(
-                        RuntimeError("provider token and financial detail")
-                    ),
-                },
+                executors={"refresh_notifications": fail_executor},
             )
 
             invalid = connector.execute("unsafe request id", "refresh_notifications")
             failed = connector.execute("safe-request-001", "refresh_notifications")
+            repeated = connector.execute("safe-request-001", "refresh_notifications")
             audit = ledger.find_audit_event(
                 "hai.command.failed",
                 "hai_command_request",
@@ -140,6 +253,8 @@ class TestLocalHaiConnector(unittest.TestCase):
             self.assertEqual(invalid["status"], "invalid_request")
             self.assertEqual(failed["errorCode"], "executor_failed")
             self.assertEqual(failed["errorType"], "RuntimeError")
+            self.assertEqual(repeated["status"], "previously_failed")
+            self.assertEqual(executions, ["hai"])
             self.assertNotIn("provider token", str(failed))
             self.assertEqual(audit["details"]["errorType"], "RuntimeError")
             self.assertNotIn("provider token", str(audit))
@@ -164,6 +279,16 @@ class TestLocalHaiConnector(unittest.TestCase):
                 "commandId": "process_imported",
                 "actor": "dashboard-test",
                 "payload": {"limit": 1},
+            })
+            conflicting = client.post("/api/hai/commands/execute", json={
+                "requestId": "api-request-1",
+                "commandId": "process_imported",
+                "actor": "dashboard-test",
+                "payload": {"limit": 2},
+            })
+            invalid_nested_payload = client.post("/api/hai/commands/plan", json={
+                "commandId": "process_imported",
+                "payload": [],
             })
 
             self.assertEqual(manifest.status_code, 200)
@@ -191,6 +316,10 @@ class TestLocalHaiConnector(unittest.TestCase):
             self.assertEqual(executed.status_code, 200)
             self.assertEqual(executed.get_json()["status"], "completed")
             self.assertEqual(executed.get_json()["externalSubmission"], "not_executed")
+            self.assertEqual(conflicting.status_code, 409)
+            self.assertEqual(conflicting.get_json()["status"], "idempotency_conflict")
+            self.assertEqual(invalid_nested_payload.status_code, 400)
+            self.assertEqual(invalid_nested_payload.get_json()["status"], "invalid")
 
 
 if __name__ == "__main__":

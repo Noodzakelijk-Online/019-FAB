@@ -509,6 +509,14 @@ released = [
         reason='owned_services_stopped',
     )
 ]
+for lease in ledger.list_runtime_leases(name_prefix='hai_command:', limit=500):
+    lease_name = str(lease.get('leaseName') or '')
+    if lease_name and ledger.force_release_runtime_lease(
+        lease_name,
+        actor='Stop-FAB.ps1',
+        reason='owned_hai_api_stopped',
+    ):
+        released.append(lease_name)
 print(chr(44).join(released))
 "@
     $releasedLeases = & $venvPython -c $cleanupScript

@@ -317,6 +317,21 @@ class TestLocalOperationsLedger(unittest.TestCase):
                 reason="owned_services_stopped",
             ))
 
+    def test_runtime_leases_can_be_listed_by_literal_name_prefix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.acquire_runtime_lease("hai_command:request-1", "owner-1")
+            ledger.acquire_runtime_lease("haiXcommand:request-2", "owner-2")
+            ledger.acquire_runtime_lease("local_autonomous_cycle", "owner-3")
+
+            leases = ledger.list_runtime_leases(name_prefix="hai_command:")
+
+            self.assertEqual(
+                [lease["leaseName"] for lease in leases],
+                ["hai_command:request-1"],
+            )
+            self.assertNotIn("owner_token", leases[0])
+
     def test_source_accounts_are_upserted_and_counted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

@@ -1,5 +1,7 @@
 import re
+import secrets
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from src.operations.local_ledger import LocalOperationsLedger
@@ -239,6 +241,7 @@ class LocalHaiConnector:
             "authentication": "bearer_token" if self.api_token_configured else "loopback_origin_controls",
             "sourceOfTruth": "fab_local_ledger",
             "idempotencyField": "requestId",
+            "idempotencyPolicy": "single_execution_fail_closed",
             "executionPolicy": "explicit_allowlist",
             "commands": [
                 command.as_dict(command.command_id in self.allowed_command_ids)
@@ -344,7 +347,10 @@ class LocalHaiConnector:
         if command is None:
             return self._blocked_plan(command_id, "unsupported", "Command is not in the HAI manifest.")
         try:
-            normalized_payload = _normalize_payload(command.command_id, payload or {})
+            normalized_payload = _normalize_payload(
+                command.command_id,
+                {} if payload is None else payload,
+            )
         except ValueError as exc:
             return self._blocked_plan(command.command_id, "invalid", str(exc), command=command)
         if not self.enabled:
@@ -394,90 +400,208 @@ class LocalHaiConnector:
                 "requestId must be 1-128 ASCII letters, numbers, dots, underscores, colons, or hyphens.",
             )
 
-        previous = self.ledger.find_audit_event(
-            action="hai.command.completed",
-            entity_type="hai_command_request",
-            entity_id=request_id,
-        )
-        if previous:
-            details = previous.get("details") or {}
+        command_id = str(command_id or "").strip()
+        command = self._commands.get(command_id)
+        if command is None:
             return {
-                "success": True,
-                "status": "already_executed",
+                **self._blocked_plan(command_id, "unsupported", "Command is not in the HAI manifest."),
                 "requestId": request_id,
-                "commandId": details.get("commandId") or command_id,
-                "result": details.get("result") or {},
-                "auditEventId": previous.get("id"),
-                "externalSubmission": "not_executed",
+            }
+        try:
+            normalized_payload = _normalize_payload(
+                command_id,
+                {} if payload is None else payload,
+            )
+        except ValueError as exc:
+            return {
+                **self._blocked_plan(command_id, "invalid", str(exc), command=command),
+                "requestId": request_id,
             }
 
-        plan = self.plan(command_id, payload)
+        previous = self._previous_execution_result(request_id, command_id, normalized_payload)
+        if previous:
+            return previous
+
+        plan = self.plan(command_id, normalized_payload)
         if plan.get("status") != "ready":
             return {
                 **plan,
                 "requestId": request_id,
             }
 
-        normalized_payload = plan["payload"]
-        self.ledger.record_audit_event({
-            "action": "hai.command.requested",
-            "entityType": "hai_command_request",
-            "entityId": request_id,
-            "details": {
+        lease_name = f"hai_command:{request_id}"
+        owner_token = secrets.token_hex(32)
+        lease_result = self.ledger.acquire_runtime_lease(
+            lease_name,
+            owner_token,
+            ttl_seconds=_hai_lease_ttl_seconds(self.config),
+            metadata={"requestId": request_id, "commandId": command_id, "actor": actor},
+        )
+        if not lease_result.get("acquired"):
+            previous = self._previous_execution_result(request_id, command_id, normalized_payload)
+            if previous:
+                return previous
+            lease = lease_result.get("lease") if isinstance(lease_result.get("lease"), dict) else {}
+            return {
+                "success": False,
+                "status": "execution_in_progress",
                 "requestId": request_id,
                 "commandId": command_id,
-                "actor": actor,
-                "payload": normalized_payload,
+                "error": "This HAI request is already executing.",
+                "retryAfter": lease.get("expiresAt"),
                 "externalSubmission": "not_executed",
-            },
-        })
+            }
+
         try:
-            result = self.executors[command_id](normalized_payload, actor)
-        except Exception as exc:
-            audit_event_id = self.ledger.record_audit_event({
-                "action": "hai.command.failed",
+            previous = self._previous_execution_result(request_id, command_id, normalized_payload)
+            if previous:
+                return previous
+            requested = self.ledger.find_audit_event(
+                action="hai.command.requested",
+                entity_type="hai_command_request",
+                entity_id=request_id,
+            )
+            if requested:
+                if _audit_contract_conflicts(requested, command_id, normalized_payload):
+                    return self._idempotency_conflict(request_id, command_id, requested)
+                return {
+                    "success": False,
+                    "status": "execution_indeterminate",
+                    "requestId": request_id,
+                    "commandId": command_id,
+                    "error": (
+                        "A prior execution started without a durable outcome. "
+                        "Inspect the correlated audit event before retrying with a new requestId."
+                    ),
+                    "auditEventId": requested.get("id"),
+                    "externalSubmission": "not_executed",
+                }
+
+            self.ledger.record_audit_event({
+                "action": "hai.command.requested",
                 "entityType": "hai_command_request",
                 "entityId": request_id,
                 "details": {
                     "requestId": request_id,
                     "commandId": command_id,
                     "actor": actor,
+                    "payload": normalized_payload,
+                    "externalSubmission": "not_executed",
+                },
+            })
+            try:
+                result = self.executors[command_id](normalized_payload, actor)
+            except Exception as exc:
+                audit_event_id = self.ledger.record_audit_event({
+                    "action": "hai.command.failed",
+                    "entityType": "hai_command_request",
+                    "entityId": request_id,
+                    "details": {
+                        "requestId": request_id,
+                        "commandId": command_id,
+                        "actor": actor,
+                        "payload": normalized_payload,
+                        "errorType": type(exc).__name__,
+                        "externalSubmission": "not_executed",
+                    },
+                })
+                return {
+                    "success": False,
+                    "status": "failed",
+                    "requestId": request_id,
+                    "commandId": command_id,
+                    "error": "Command execution failed; inspect the correlated local audit event.",
+                    "errorCode": "executor_failed",
                     "errorType": type(exc).__name__,
+                    "auditEventId": audit_event_id,
+                    "externalSubmission": "not_executed",
+                }
+
+            audit_event_id = self.ledger.record_audit_event({
+                "action": "hai.command.completed",
+                "entityType": "hai_command_request",
+                "entityId": request_id,
+                "details": {
+                    "requestId": request_id,
+                    "commandId": command_id,
+                    "actor": actor,
+                    "payload": normalized_payload,
+                    "result": result,
                     "externalSubmission": "not_executed",
                 },
             })
             return {
-                "success": False,
-                "status": "failed",
+                "success": True,
+                "status": "completed",
                 "requestId": request_id,
                 "commandId": command_id,
-                "error": "Command execution failed; inspect the correlated local audit event.",
-                "errorCode": "executor_failed",
-                "errorType": type(exc).__name__,
+                "result": result,
                 "auditEventId": audit_event_id,
                 "externalSubmission": "not_executed",
             }
+        finally:
+            self.ledger.release_runtime_lease(lease_name, owner_token)
 
-        audit_event_id = self.ledger.record_audit_event({
-            "action": "hai.command.completed",
-            "entityType": "hai_command_request",
-            "entityId": request_id,
-            "details": {
+    def _previous_execution_result(
+        self,
+        request_id: str,
+        command_id: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        completed = self.ledger.find_audit_event(
+            action="hai.command.completed",
+            entity_type="hai_command_request",
+            entity_id=request_id,
+        )
+        if completed:
+            if _audit_contract_conflicts(completed, command_id, payload):
+                return self._idempotency_conflict(request_id, command_id, completed)
+            details = completed.get("details") or {}
+            return {
+                "success": True,
+                "status": "already_executed",
                 "requestId": request_id,
-                "commandId": command_id,
-                "actor": actor,
-                "payload": normalized_payload,
-                "result": result,
+                "commandId": details.get("commandId") or command_id,
+                "result": details.get("result") or {},
+                "auditEventId": completed.get("id"),
                 "externalSubmission": "not_executed",
-            },
-        })
+            }
+
+        failed = self.ledger.find_audit_event(
+            action="hai.command.failed",
+            entity_type="hai_command_request",
+            entity_id=request_id,
+        )
+        if not failed:
+            return None
+        if _audit_contract_conflicts(failed, command_id, payload):
+            return self._idempotency_conflict(request_id, command_id, failed)
+        details = failed.get("details") or {}
         return {
-            "success": True,
-            "status": "completed",
+            "success": False,
+            "status": "previously_failed",
+            "requestId": request_id,
+            "commandId": details.get("commandId") or command_id,
+            "error": "This requestId already has a failed execution outcome.",
+            "errorCode": "executor_failed",
+            "errorType": details.get("errorType"),
+            "auditEventId": failed.get("id"),
+            "externalSubmission": "not_executed",
+        }
+
+    @staticmethod
+    def _idempotency_conflict(
+        request_id: str,
+        command_id: str,
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "success": False,
+            "status": "idempotency_conflict",
             "requestId": request_id,
             "commandId": command_id,
-            "result": result,
-            "auditEventId": audit_event_id,
+            "error": "requestId is already bound to a different command or payload.",
+            "auditEventId": event.get("id"),
             "externalSubmission": "not_executed",
         }
 
@@ -532,6 +656,25 @@ def _bool_config(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _hai_lease_ttl_seconds(config: Dict[str, Any]) -> float:
+    value = config.get("fab_hai_command_lease_ttl_seconds") or 21600
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = 21600.0
+    return max(60.0, min(parsed, 86400.0))
+
+
+def _audit_contract_conflicts(
+    event: Dict[str, Any],
+    command_id: str,
+    payload: Dict[str, Any],
+) -> bool:
+    details = event.get("details") if isinstance(event.get("details"), dict) else {}
+    stored_payload = details.get("payload") if isinstance(details.get("payload"), dict) else {}
+    return str(details.get("commandId") or "") != command_id or stored_payload != payload
 
 
 def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -618,7 +761,15 @@ def _normalize_payload(command_id: str, payload: Dict[str, Any]) -> Dict[str, An
                 continue
             if len(value) > 100:
                 raise ValueError(f"{field} must be at most 100 characters.")
+            if field in {"fromDate", "toDate"}:
+                try:
+                    date.fromisoformat(value)
+                except ValueError:
+                    raise ValueError(f"{field} must be an ISO date in YYYY-MM-DD format.")
             normalized[field] = value
+    if normalized.get("fromDate") and normalized.get("toDate"):
+        if date.fromisoformat(normalized["fromDate"]) > date.fromisoformat(normalized["toDate"]):
+            raise ValueError("fromDate must be on or before toDate.")
     if "reason" in payload:
         reason = str(payload["reason"] or "").strip()
         if len(reason) > 500:

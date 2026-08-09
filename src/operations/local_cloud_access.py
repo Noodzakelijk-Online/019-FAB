@@ -9,6 +9,7 @@ from src.utils.runtime_identity import local_instance_id
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 MAX_INSPECTOR_RESPONSE_BYTES = 256 * 1024
+DEFAULT_SHARED_INSPECTOR_URL = "http://127.0.0.1:4040/api/tunnels"
 
 
 InspectorFetch = Callable[[str, float], Mapping[str, Any]]
@@ -25,6 +26,7 @@ class LocalCloudAccessService:
         api_token_configured: bool = False,
         inspector_fetch: Optional[InspectorFetch] = None,
         inspector_timeout_seconds: float = 0.75,
+        shared_inspector_url: Optional[str] = None,
     ) -> None:
         self.project_root = (project_root or Path(__file__).resolve().parents[2]).resolve()
         self.runtime_path = (
@@ -32,6 +34,9 @@ class LocalCloudAccessService:
         )
         self.api_token_configured = bool(api_token_configured)
         self.inspector_fetch = inspector_fetch or _fetch_inspector_json
+        self.shared_inspector_url = _loopback_inspector_url(
+            shared_inspector_url or DEFAULT_SHARED_INSPECTOR_URL
+        )
         self.inspector_timeout_seconds = max(
             0.1,
             min(float(inspector_timeout_seconds), 3.0),
@@ -39,6 +44,17 @@ class LocalCloudAccessService:
 
     def summarize(self) -> Dict[str, Any]:
         if not self.runtime_path.is_file():
+            endpoint_count = self._shared_endpoint_count()
+            if self.api_token_configured and endpoint_count:
+                return self._result(
+                    status="endpoint_required",
+                    blocker_code="ngrok_endpoint_already_active",
+                    detected_endpoint_count=endpoint_count,
+                    next_action=(
+                        "Reserve a separate FAB HTTPS endpoint in ngrok, then run "
+                        "Start-FAB-Ngrok.cmd -Url https://<fab-endpoint>."
+                    ),
+                )
             return self._result(
                 status="not_running",
                 next_action=(
@@ -99,6 +115,22 @@ class LocalCloudAccessService:
             next_action="Authenticated FAB API and HAI access are available through the verified HTTPS endpoint.",
         )
 
+    def _shared_endpoint_count(self) -> int:
+        if not self.shared_inspector_url:
+            return 0
+        try:
+            inspector = self.inspector_fetch(
+                self.shared_inspector_url,
+                self.inspector_timeout_seconds,
+            )
+        except Exception:
+            return 0
+        return sum(
+            1
+            for tunnel in _tunnels(inspector)
+            if _https_origin(str(tunnel.get("public_url") or "")) is not None
+        )
+
     def _read_runtime(self) -> Optional[Dict[str, Any]]:
         try:
             if self.runtime_path.stat().st_size > MAX_INSPECTOR_RESPONSE_BYTES:
@@ -157,6 +189,8 @@ class LocalCloudAccessService:
         hai_manifest_url: Optional[str] = None,
         started_at: Optional[str] = None,
         verified_at: Optional[str] = None,
+        blocker_code: Optional[str] = None,
+        detected_endpoint_count: int = 0,
     ) -> Dict[str, Any]:
         return {
             "service": "fab-ngrok-cloud-access",
@@ -169,6 +203,8 @@ class LocalCloudAccessService:
             "haiManifestUrl": hai_manifest_url if active else None,
             "startedAt": started_at,
             "verifiedAt": verified_at,
+            "blockerCode": blocker_code,
+            "detectedEndpointCount": max(0, min(int(detected_endpoint_count), 100)),
             "nextAction": next_action,
             "externalSubmission": "not_executed",
         }
@@ -251,6 +287,25 @@ def _loopback_target_port(value: str) -> Optional[int]:
         candidate = f"http://{candidate}"
     origin = _loopback_http_origin(candidate)
     return urlsplit(origin).port if origin else None
+
+
+def _loopback_inspector_url(value: str) -> Optional[str]:
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        if (
+            parsed.scheme.lower() != "http"
+            or (parsed.hostname or "").lower() not in LOOPBACK_HOSTS
+            or parsed.username
+            or parsed.password
+            or parsed.path.rstrip("/") != "/api/tunnels"
+            or parsed.query
+            or parsed.fragment
+            or parsed.port is None
+        ):
+            return None
+        return parsed.geturl()
+    except ValueError:
+        return None
 
 
 def _same_path(left: Path, right: Path) -> bool:

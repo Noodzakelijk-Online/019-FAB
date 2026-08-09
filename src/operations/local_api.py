@@ -4621,14 +4621,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             project_root=Path(__file__).resolve().parents[2],
             runtime_path=Path(str(runtime_path)) if runtime_path else None,
             api_token_configured=bool(token),
+            shared_inspector_url=config.get("fab_ngrok_shared_inspector_url"),
         ).summarize())
 
     @app.post("/api/hai/commands/plan")
     def hai_command_plan_api():
         payload = request.get_json(silent=True) or {}
+        command_payload = payload.get("payload")
         result = hai_connector().plan(
             str(payload.get("commandId") or ""),
-            payload.get("payload") or {},
+            {} if command_payload is None else command_payload,
         )
         status_code = 200 if result.get("success") else 400
         if result.get("status") in {"connector_disabled", "not_allowed"}:
@@ -4638,10 +4640,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.post("/api/hai/commands/execute")
     def hai_command_execute_api():
         payload = request.get_json(silent=True) or {}
+        command_payload = payload.get("payload")
         result = hai_connector().execute(
             request_id=str(payload.get("requestId") or ""),
             command_id=str(payload.get("commandId") or ""),
-            payload=payload.get("payload") or {},
+            payload={} if command_payload is None else command_payload,
             actor=str(payload.get("actor") or "hai"),
         )
         status = result.get("status")
@@ -4651,6 +4654,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             status_code = 403
         elif status == "failed":
             status_code = 500
+        elif status in {
+            "execution_in_progress",
+            "execution_indeterminate",
+            "idempotency_conflict",
+            "previously_failed",
+        }:
+            status_code = 409
         else:
             status_code = 400
         return jsonify(result), status_code

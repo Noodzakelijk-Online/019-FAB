@@ -15,6 +15,7 @@ class TestLocalCloudAccessService(unittest.TestCase):
             result = LocalCloudAccessService(
                 project_root=root,
                 api_token_configured=True,
+                inspector_fetch=lambda _url, _timeout: {"tunnels": []},
             ).summarize()
 
         self.assertEqual(result["status"], "not_running")
@@ -22,6 +23,44 @@ class TestLocalCloudAccessService(unittest.TestCase):
         self.assertTrue(result["configured"])
         self.assertIsNone(result["publicUrl"])
         self.assertEqual(result["externalSubmission"], "not_executed")
+
+    def test_existing_shared_agent_reports_separate_endpoint_requirement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = LocalCloudAccessService(
+                project_root=root,
+                api_token_configured=True,
+                inspector_fetch=lambda _url, _timeout: {
+                    "tunnels": [{
+                        "name": "another-project",
+                        "public_url": "https://other-project.example.test",
+                        "config": {"addr": "http://127.0.0.1:3000"},
+                    }],
+                },
+            ).summarize()
+
+        self.assertEqual(result["status"], "endpoint_required")
+        self.assertEqual(result["blockerCode"], "ngrok_endpoint_already_active")
+        self.assertEqual(result["detectedEndpointCount"], 1)
+        self.assertFalse(result["active"])
+        self.assertIsNone(result["publicUrl"])
+        self.assertNotIn("other-project", json.dumps(result))
+
+    def test_non_loopback_shared_inspector_is_never_contacted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = LocalCloudAccessService(
+                project_root=root,
+                api_token_configured=True,
+                shared_inspector_url="https://attacker.example/api/tunnels",
+                inspector_fetch=lambda _url, _timeout: self.fail(
+                    "non-loopback inspector must not be contacted"
+                ),
+            ).summarize()
+
+        self.assertEqual(result["status"], "not_running")
+        self.assertFalse(result["active"])
+        self.assertIsNone(result["publicUrl"])
 
     def test_valid_owned_tunnel_is_active_and_sanitized(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,6 +159,7 @@ class TestLocalCloudAccessService(unittest.TestCase):
                 "fab_local_ledger_path": str(root / "fab.sqlite3"),
                 "fab_local_api_token": "cloud-status-test-token",
                 "fab_ngrok_runtime_path": str(runtime_path),
+                "fab_ngrok_shared_inspector_url": "http://127.0.0.1:1/api/tunnels",
             }).test_client()
 
             unauthorized = client.get("/api/cloud/status")

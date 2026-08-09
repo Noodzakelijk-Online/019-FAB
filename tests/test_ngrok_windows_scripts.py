@@ -40,6 +40,8 @@ class TestNgrokWindowsScripts(unittest.TestCase):
         )
         self.assertLess(ngrok_stop, api_stop)
         self.assertIn(".venv\\Scripts\\python.exe", script)
+        self.assertIn("name_prefix='hai_command:'", script)
+        self.assertIn("owned_hai_api_stopped", script)
         self.assertNotIn("Get-Command python -ErrorAction Stop", script)
 
     def test_cmd_launchers_forward_operator_arguments(self):

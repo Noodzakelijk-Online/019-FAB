@@ -1177,6 +1177,27 @@ class LocalOperationsLedger:
             return None
         return self._public_runtime_lease(self._row_to_dict(row), now)
 
+    def list_runtime_leases(
+        self,
+        name_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        query = "SELECT * FROM runtime_leases"
+        params: list = []
+        normalized_prefix = str(name_prefix or "").strip()
+        if normalized_prefix:
+            query += " WHERE substr(lease_name, 1, length(?)) = ?"
+            params.extend((normalized_prefix, normalized_prefix))
+        query += " ORDER BY updated_at DESC, lease_name ASC LIMIT ?"
+        params.append(self._bounded_limit(limit))
+        now = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            self._public_runtime_lease(self._row_to_dict(row), now)
+            for row in rows
+        ]
+
     def set_runtime_control(
         self,
         control_name: str,
