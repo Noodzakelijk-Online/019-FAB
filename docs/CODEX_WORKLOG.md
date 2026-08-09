@@ -10,6 +10,7 @@
 - Verification passed 777 backend tests with three optional-runtime skips, 163 dashboard tests, TypeScript checking, production build budgets, dependency and peer audits, Windows API/dashboard/worker/HAI acceptance, and clean desktop/narrow in-app Browser geometry and console checks.
 - Exact-source Compose acceptance passed with healthy non-root API, worker, and web services, matching API/dashboard instance identities, HAI ready with 14 commands, and no fatal log matches. The isolated containers and volumes were removed afterward.
 - No recovery was executed against the live ledger, no provider record was changed, no Drive source was archived, and no external submission was performed.
+- Implementation commit `3f2d5c6` is on `origin/main`; GitHub Actions run `31319135326` passed the frontend, Linux backend, and all four Windows backend jobs.
 
 ## 2026-08-09 - Authoritative worker and placeholder retirement
 
