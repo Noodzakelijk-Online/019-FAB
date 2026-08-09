@@ -15,6 +15,7 @@ FAB is local-first, but it processes high-risk financial and health-related evid
 - The persistent emergency stop is audited and checked between workflow steps. HAI may engage it but cannot clear it.
 - Drive archival requires downstream record and attachment readback evidence.
 - Audit events redact sensitive details before persistence.
+- Advanced ledger/evidence links use a 45-second, one-time HMAC handoff from the authenticated dashboard. Both services validate the relative destination; the long-lived local API token remains server-only; Flask rotates the session and records only bounded actor/path evidence. Replays, expired/tampered tickets, encoded redirect escapes, and non-HTTPS remote browser origins fail closed.
 
 ## Support bundle privacy contract
 

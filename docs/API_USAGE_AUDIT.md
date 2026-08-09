@@ -31,6 +31,8 @@ The Express/tRPC gateway calls fixed local paths from `web/server/fabLocalGatewa
 - does not convert an API error into success;
 - uses role-gated `fabOperatorProcedure` for financial operations.
 
+Operator-facing links into the protected Flask ledger use `GET /api/fab/operator-session?next=...` instead of exposing a direct token-gated URL. The gateway authorizes a loopback operator or authenticated administrator, accepts only a bounded relative destination, and creates a 45-second HMAC ticket using the server-only API token. `/operator/session/bootstrap` independently verifies audience, version, signature, issue/expiry bounds, actor, nonce, and destination; consumes the nonce once; rotates the Flask session; writes redacted audit evidence; and redirects to the requested ledger page or read-only artifact. The bearer token is never placed in browser code or URLs. Non-loopback public API origins must be clean HTTPS origins.
+
 ## Provider APIs
 
 - Google connectors use owner OAuth and scoped read operations against configured sources.

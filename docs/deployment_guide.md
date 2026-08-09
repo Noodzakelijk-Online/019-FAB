@@ -196,7 +196,7 @@ docker compose up -d api worker web
 
 `docker-compose.maintenance.yml` is a recovery override, not a remotely exposed deployment mode. Do not place TLS ingress or ngrok in front of it.
 
-The web service's Docker gateway trust is intentionally narrow: it applies only in explicit local-operator mode, to private bridge gateway addresses ending in `.1`, and with a loopback hostname. Put an authenticated reverse proxy in front and disable local-operator mode for a remotely reachable deployment. In a managed remote deployment, set `FAB_LOCAL_API_PUBLIC_URL` to the clean external HTTPS origin that a browser can reach; credentials, paths, queries, fragments, and non-loopback HTTP values are rejected.
+The web service's Docker gateway trust is intentionally narrow: it applies only in explicit local-operator mode, to private bridge gateway addresses ending in `.1`, and with a loopback hostname. Put an authenticated reverse proxy in front and disable local-operator mode for a remotely reachable deployment. In a managed remote deployment, set `FAB_LOCAL_API_PUBLIC_URL` to the clean external HTTPS origin that a browser can reach; credentials, paths, queries, fragments, and non-loopback HTTP values are rejected. Advanced operator links enter that origin through a 45-second one-time HMAC handoff. The remote dashboard request must already belong to an authenticated administrator; the long-lived API token remains server-only, and HTTPS makes the resulting Flask session cookie `Secure`.
 
 ## 3. Cloud Deployment Boundary
 

@@ -251,7 +251,12 @@ For manual startup or development:
 server bridges without printing it. Compose wires the same server-only trust
 boundary. For manual startup, set `FAB_LOCAL_API_TOKEN` and
 `FAB_OPERATIONS_SERVICE_TOKEN` in `web/.env` to the same long random value. The
-token is used only by the web server and is never sent to the browser. Local operator access accepts direct loopback requests in development;
+token is used only by the web server and is never sent to the browser. Advanced
+ledger, evidence, report-artifact, delivery, recovery, and connector-contract
+links use a 45-second one-time signed handoff, so an authenticated operator is
+not asked to paste the hidden API token. Only bounded relative FAB targets are
+accepted; the Flask session is rotated and the handoff is redacted in audit
+history. Local operator access accepts direct loopback requests in development;
 deployed environments require an authenticated administrator unless
 `FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
 

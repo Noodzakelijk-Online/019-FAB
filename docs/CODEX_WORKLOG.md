@@ -1,5 +1,15 @@
 # Codex Worklog
 
+## 2026-08-09 - Authenticated operator ledger handoff
+
+- Found that every advanced ledger, evidence, work-order, report-artifact, recovery, and connector-contract link left the authenticated React dashboard and opened the token-protected Flask service directly. A non-technical operator was redirected to a token-entry page even though the launcher deliberately keeps that token in DPAPI-backed server state and out of browser code.
+- Added a same-origin Express handoff for loopback operators and authenticated administrators. It creates a 45-second HMAC ticket containing only a bounded relative target, actor, issue/expiry time, and random nonce; the long-lived local API token never enters browser HTML, JavaScript, query parameters, audit records, or response content.
+- Added a Flask bootstrap that independently verifies signature, audience, version, time bounds, actor, nonce, and redirect target; consumes each nonce once under a process lock; rotates the existing session; sets `HttpOnly`, `SameSite=Lax`, and HTTPS-only `Secure` policy; records a redacted local audit event; and rejects replays, tampering, encoded redirect escapes, absolute URLs, and bootstrap recursion.
+- Reused one operator-access resolver for the handoff and verified source-preview gateway. Converted every operator-facing direct service link across overview, exceptions, review, activity, recovery, reports, backups, delivery, connections, and the receipt-executor drawer. Machine-facing HAI/executor URLs remain direct and continue to omit browser session state.
+- Verification passed all four CI-equivalent backend shards (`808 passed`, `4 skipped`), all 182 web tests across 22 files, TypeScript checking, production build budgets, the high-severity dependency audit, and peer checks. New tests cover local/admin authorization, target validation, token absence, public HTTPS origins, signature contents, expiry, secure cookies, authenticated continuation, audit redaction, tampering, and one-time replay rejection.
+- The exact production build restarted on Windows at `http://127.0.0.1:3005/admin/operations`. Live Browser acceptance followed the handoff to `http://127.0.0.1:5001/#audit`, found the complete FAB Operations ledger with no token prompt, and found no console warnings/errors in fresh dashboard or ledger tabs. Desktop and narrow measurements both reported page width equal to viewport width.
+- Implementation commit `6e9dad0` is on `origin/main`; GitHub Actions run `31337125650` passed the frontend, Linux backend, and all four Windows backend jobs. No provider record, review decision, financial submission, attachment, source file, or Drive archive was changed.
+
 ## 2026-08-09 - Guided activation and review draft continuity
 
 - Replaced the descriptive activation checklist with a dependency-ordered five-step flow over Google Drive, Gmail, Wave, the supervised Wave receipt session, and queue-wide posting decisions. The dashboard now shows authoritative progress, highlights one current step, and opens the matching guarded setup surface.
