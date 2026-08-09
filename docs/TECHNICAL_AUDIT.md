@@ -72,6 +72,11 @@ Audit date: 2026-08-09
   internal `api` hostname is accepted only server-side; operator links allow
   loopback HTTP or a clean HTTPS origin and reject credentials, paths, queries,
   fragments, and insecure non-loopback hosts.
+- Unified runtime access identity across Windows readiness, doctor/support
+  diagnostics, API settings, Compose, and the operator dashboard. Launcher
+  metadata is accepted only after a bounded direct loopback identity probe
+  proves the service, checkout, routes, and exact API origin; a short
+  signature-bound cache avoids repeated probes under dashboard refresh load.
 
 ## Remaining risks
 

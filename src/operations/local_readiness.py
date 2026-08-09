@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import platform
 import sqlite3
 import sys
+import threading
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from src.utils.tesseract_runtime import (
     available_tesseract_languages,
@@ -13,10 +19,19 @@ from src.utils.tesseract_runtime import (
     resolve_poppler_path,
     resolve_tesseract_command,
 )
+from src.utils.runtime_identity import local_instance_id
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 SECRET_MARKERS = ("token", "secret", "password", "api_key", "client_secret", "credential")
+MAX_RUNTIME_METADATA_BYTES = 64 * 1024
+MAX_RUNTIME_IDENTITY_BYTES = 32 * 1024
+RUNTIME_IDENTITY_CACHE_SECONDS = 2.0
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class LocalReadinessService:
@@ -33,6 +48,9 @@ class LocalReadinessService:
         api_token_configured: Optional[bool] = None,
         intake_paths: Optional[List[str]] = None,
         intake_extensions: Optional[List[str]] = None,
+        operator_dashboard_url: Optional[str] = None,
+        runtime_path: Optional[str] = None,
+        instance_root: Optional[str] = None,
     ):
         self.config = config or {}
         self.ledger_path = ledger_path or str(
@@ -92,6 +110,31 @@ class LocalReadinessService:
             "operations_local_intake_extensions",
             "operations_intake_extensions",
         )
+        self.instance_root = os.path.realpath(os.path.abspath(str(
+            instance_root
+            or _config_value(self.config, "fab_instance_root", default=os.getcwd())
+        )))
+        runtime_value = runtime_path or _config_value(
+            self.config,
+            "fab_runtime_path",
+            "operations_runtime_path",
+            default=os.path.join(os.path.dirname(os.path.abspath(self.ledger_path)), "fab-runtime.json"),
+        )
+        self.runtime_path = os.path.realpath(os.path.abspath(str(runtime_value)))
+        configured_dashboard_url = (
+            operator_dashboard_url
+            if operator_dashboard_url is not None
+            else _config_value(
+                self.config,
+                "fab_operator_dashboard_url",
+                "operations_operator_dashboard_url",
+            )
+        )
+        self.operator_dashboard_url = _normalized_operator_dashboard_url(configured_dashboard_url)
+        self._runtime_cache_lock = threading.Lock()
+        self._runtime_cache_signature: Optional[tuple] = None
+        self._runtime_cache_checked_at = 0.0
+        self._runtime_cache_dashboard_url = ""
 
     def summarize(self) -> Dict[str, Any]:
         dependencies = self._dependencies()
@@ -408,12 +451,23 @@ class LocalReadinessService:
         }
 
     def _local_access(self, security: Dict[str, Any]) -> Dict[str, Any]:
-        dashboard_url = self.base_url or f"http://{self.api_host}:{self.api_port}/"
-        api_base_url = dashboard_url.rstrip("/") + "/api"
+        ledger_dashboard_url = self.base_url or f"http://{self.api_host}:{self.api_port}/"
+        api_origin = ledger_dashboard_url.rstrip("/")
+        dashboard_url = self.operator_dashboard_url
+        dashboard_source = "configured_operator_dashboard" if dashboard_url else "ledger_api"
+        if not dashboard_url:
+            runtime_dashboard_url = self._runtime_operator_dashboard_url(api_origin)
+            if runtime_dashboard_url:
+                dashboard_url = runtime_dashboard_url
+                dashboard_source = "verified_launcher_runtime"
+        dashboard_url = dashboard_url or ledger_dashboard_url
+        api_base_url = api_origin + "/api"
         token_required = bool(self.api_token_configured)
         ngrok_ready = bool(token_required and security["remoteExposureSafe"])
         return {
             "dashboardUrl": dashboard_url,
+            "dashboardSource": dashboard_source,
+            "ledgerDashboardUrl": ledger_dashboard_url,
             "apiBaseUrl": api_base_url,
             "authMode": "bearer_token_or_dashboard_login" if token_required else "loopback_no_token",
             "authHeaderRequired": token_required,
@@ -444,6 +498,74 @@ class LocalReadinessService:
             ],
             "externalSubmission": "not_executed",
         }
+
+    def _runtime_operator_dashboard_url(self, api_origin: str) -> str:
+        if not os.path.isfile(self.runtime_path) or os.path.islink(self.runtime_path):
+            return ""
+        try:
+            runtime_stat = os.stat(self.runtime_path)
+            if runtime_stat.st_size > MAX_RUNTIME_METADATA_BYTES:
+                return ""
+            signature = (
+                runtime_stat.st_mtime_ns,
+                runtime_stat.st_size,
+                api_origin,
+                self.instance_root,
+            )
+        except OSError:
+            return ""
+        now = time.monotonic()
+        with self._runtime_cache_lock:
+            if (
+                signature == self._runtime_cache_signature
+                and now - self._runtime_cache_checked_at < RUNTIME_IDENTITY_CACHE_SECONDS
+            ):
+                return self._runtime_cache_dashboard_url
+            dashboard_url = self._read_runtime_operator_dashboard_url(api_origin)
+            self._runtime_cache_signature = signature
+            self._runtime_cache_checked_at = now
+            self._runtime_cache_dashboard_url = dashboard_url
+            return dashboard_url
+
+    def _read_runtime_operator_dashboard_url(self, api_origin: str) -> str:
+        try:
+            with open(self.runtime_path, "r", encoding="utf-8-sig") as handle:
+                runtime = json.load(handle)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(runtime, dict):
+            return ""
+        runtime_root = str(runtime.get("root") or "").strip()
+        if not runtime_root or not _same_path(runtime_root, self.instance_root):
+            return ""
+        runtime_api_origin = _normalized_service_origin(runtime.get("apiBaseUrl"), require_loopback=True)
+        expected_api_origin = _normalized_service_origin(api_origin, require_loopback=True)
+        if not runtime_api_origin or runtime_api_origin != expected_api_origin:
+            return ""
+        dashboard_url = _normalized_operator_dashboard_url(
+            runtime.get("dashboardUrl"),
+            require_loopback=True,
+        )
+        identity_url = _normalized_identity_url(
+            runtime.get("webIdentityUrl"),
+            require_loopback=True,
+        )
+        if not dashboard_url or not identity_url or _url_origin(dashboard_url) != _url_origin(identity_url):
+            return ""
+        identity = _fetch_runtime_identity(identity_url)
+        if not isinstance(identity, dict):
+            return ""
+        if str(identity.get("service") or "") != "fab-operator-dashboard":
+            return ""
+        identity_api_origin = _normalized_service_origin(
+            identity.get("localApiEndpoint"),
+            require_loopback=True,
+        )
+        if identity_api_origin != expected_api_origin:
+            return ""
+        if str(identity.get("instanceId") or "") != local_instance_id(Path(self.instance_root)):
+            return ""
+        return dashboard_url
 
     def _issues(
         self,
@@ -811,6 +933,86 @@ def _normalized_base_url(value: Any) -> str:
     if not text:
         return ""
     return text if text.endswith("/") else f"{text}/"
+
+
+def _normalized_operator_dashboard_url(value: Any, *, require_loopback: bool = False) -> str:
+    return _normalized_url(
+        value,
+        expected_path="/admin/operations",
+        require_loopback=require_loopback,
+    )
+
+
+def _normalized_identity_url(value: Any, *, require_loopback: bool = False) -> str:
+    return _normalized_url(
+        value,
+        expected_path="/api/fab/runtime",
+        require_loopback=require_loopback,
+    )
+
+
+def _normalized_service_origin(value: Any, *, require_loopback: bool = False) -> str:
+    return _normalized_url(value, expected_path="", require_loopback=require_loopback)
+
+
+def _normalized_url(value: Any, *, expected_path: str, require_loopback: bool) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > 2048:
+        return ""
+    try:
+        parsed = urlsplit(text)
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = str(parsed.hostname or "").lower()
+    normalized_path = parsed.path.rstrip("/")
+    path_matches = normalized_path == expected_path if expected_path else parsed.path in {"", "/"}
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or not path_matches
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme == "http" and hostname not in LOOPBACK_HOSTS)
+        or (require_loopback and hostname not in LOOPBACK_HOSTS)
+    ):
+        return ""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    authority = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme}://{authority}{expected_path}"
+
+
+def _url_origin(value: str) -> str:
+    parsed = urlsplit(value)
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
+
+
+def _same_path(first: str, second: str) -> bool:
+    try:
+        return os.path.normcase(os.path.realpath(os.path.abspath(first))) == os.path.normcase(
+            os.path.realpath(os.path.abspath(second))
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _fetch_runtime_identity(url: str) -> Optional[Dict[str, Any]]:
+    try:
+        request = Request(
+            url,
+            headers={"Accept": "application/json", "User-Agent": "FAB-readiness/1"},
+        )
+        opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
+        with opener.open(request, timeout=0.5) as response:
+            payload = response.read(MAX_RUNTIME_IDENTITY_BYTES + 1)
+        if len(payload) > MAX_RUNTIME_IDENTITY_BYTES:
+            return None
+        parsed = json.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _configured_secret_keys(config: Dict[str, Any]) -> List[str]:

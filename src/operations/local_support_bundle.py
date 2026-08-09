@@ -92,6 +92,8 @@ class LocalSupportBundleService:
                 if source.get("status") == "ready"
             ),
             "dashboardUrl": (readiness.get("localAccess") or {}).get("dashboardUrl"),
+            "dashboardSource": (readiness.get("localAccess") or {}).get("dashboardSource"),
+            "ledgerDashboardUrl": (readiness.get("localAccess") or {}).get("ledgerDashboardUrl"),
             "apiBaseUrl": (readiness.get("localAccess") or {}).get("apiBaseUrl"),
             "authMode": (readiness.get("localAccess") or {}).get("authMode"),
             "remoteExposureSafe": (readiness.get("security") or {}).get("remoteExposureSafe"),

@@ -26,6 +26,8 @@ The first start installs the local Python requirements into `.venv` and the dash
 - Authenticated constant-time liveness: `GET /api/live`
 - Authenticated deep health: `GET /api/health`
 
+Readiness, doctor output, and sanitized support bundles use the active React dashboard URL only after its loopback identity endpoint proves the same checkout and exact API origin. A stale, malformed, mismatched, or unreachable launcher runtime file is ignored and diagnostics fall back to the ledger API dashboard. Compose supplies the operator URL explicitly through `FAB_OPERATOR_DASHBOARD_URL`.
+
 API clients use `Authorization: Bearer <token>`. The API runs under Waitress with bounded threads; the worker and dashboard are separate managed processes. `Stop-FAB.ps1` stops only the FAB instance recorded for this checkout.
 
 ## Managed ngrok access

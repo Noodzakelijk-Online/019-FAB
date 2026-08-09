@@ -8,7 +8,10 @@ x-fab-python: &fab-python
   environment: &fab-environment
     FAB_LOCAL_API_HOST: 0.0.0.0
     FAB_LOCAL_API_PORT: 5001
+    FAB_LOCAL_API_BASE_URL: http://127.0.0.1:${FAB_API_HOST_PORT:-5001}
     FAB_LOCAL_API_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}
+    FAB_INSTANCE_ROOT: /app
+    FAB_OPERATOR_DASHBOARD_URL: http://127.0.0.1:${FAB_WEB_HOST_PORT:-3000}/admin/operations
     FAB_MAINTENANCE_MODE: "false"
     FAB_LOCAL_LEDGER_PATH: /app/data/fab_operations.sqlite3
     FAB_LOCAL_INTAKE_PATHS: /app/downloads/sort-out

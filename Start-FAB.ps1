@@ -716,9 +716,11 @@ if (-not $apiPid) {
     $apiUrl = "http://127.0.0.1:$apiPort/api/live"
     $previousApiPort = $env:FAB_LOCAL_API_PORT
     $previousMaintenanceMode = $env:FAB_MAINTENANCE_MODE
+    $previousApiInstanceRoot = $env:FAB_INSTANCE_ROOT
     try {
         $env:FAB_LOCAL_API_PORT = [string]$apiPort
         $env:FAB_MAINTENANCE_MODE = if ($requestedMaintenanceMode) { "true" } else { "false" }
+        $env:FAB_INSTANCE_ROOT = $root
         $apiProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.operations.local_api") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "local-api.out.log") -RedirectStandardError (Join-Path $logsRoot "local-api.err.log") -PassThru
         $apiPid = $apiProcess.Id
     }
@@ -734,6 +736,12 @@ if (-not $apiPid) {
         }
         else {
             $env:FAB_MAINTENANCE_MODE = $previousMaintenanceMode
+        }
+        if ($null -eq $previousApiInstanceRoot) {
+            Remove-Item Env:FAB_INSTANCE_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_INSTANCE_ROOT = $previousApiInstanceRoot
         }
     }
 }
@@ -780,8 +788,20 @@ if (-not $webPid) {
 }
 
 if (-not $requestedMaintenanceMode -and -not $workerPid) {
-    $workerProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.run_worker") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "worker.out.log") -RedirectStandardError (Join-Path $logsRoot "worker.err.log") -PassThru
-    $workerPid = $workerProcess.Id
+    $previousWorkerInstanceRoot = $env:FAB_INSTANCE_ROOT
+    try {
+        $env:FAB_INSTANCE_ROOT = $root
+        $workerProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.run_worker") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "worker.out.log") -RedirectStandardError (Join-Path $logsRoot "worker.err.log") -PassThru
+        $workerPid = $workerProcess.Id
+    }
+    finally {
+        if ($null -eq $previousWorkerInstanceRoot) {
+            Remove-Item Env:FAB_INSTANCE_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_INSTANCE_ROOT = $previousWorkerInstanceRoot
+        }
+    }
 }
 
 if (-not $webPid) {
@@ -801,12 +821,14 @@ if (-not $webPid) {
     $previousLocalApiPublicUrl = $env:FAB_LOCAL_API_PUBLIC_URL
     $previousLocalApiToken = $env:FAB_LOCAL_API_TOKEN
     $previousOperationsServiceToken = $env:FAB_OPERATIONS_SERVICE_TOKEN
+    $previousWebInstanceRoot = $env:FAB_INSTANCE_ROOT
     $previousNodeEnvironment = $env:NODE_ENV
     $previousJwtSecret = $env:JWT_SECRET
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
         $env:FAB_LOCAL_API_PUBLIC_URL = $apiBaseUrl
+        $env:FAB_INSTANCE_ROOT = $root
         $env:JWT_SECRET = $webJwtSecret
         if ($apiToken) {
             $env:FAB_LOCAL_API_TOKEN = $apiToken
@@ -858,6 +880,12 @@ if (-not $webPid) {
         }
         else {
             $env:FAB_OPERATIONS_SERVICE_TOKEN = $previousOperationsServiceToken
+        }
+        if ($null -eq $previousWebInstanceRoot) {
+            Remove-Item Env:FAB_INSTANCE_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_INSTANCE_ROOT = $previousWebInstanceRoot
         }
         if ($null -eq $previousNodeEnvironment) {
             Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue

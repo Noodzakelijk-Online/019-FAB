@@ -1,5 +1,15 @@
 # Codex Worklog
 
+## 2026-08-09 - Authoritative runtime access identity
+
+- Fixed readiness and doctor output that advertised the legacy ledger dashboard on port 5001 even while the supported React operator dashboard was running on the launcher's selected port 3005.
+- Added bounded launcher-runtime discovery that accepts an operator URL only after a direct loopback, no-proxy, no-redirect identity probe proves the FAB service, checkout instance ID, exact API origin, and expected routes. Invalid, stale, oversized, mismatched, or remote runtime metadata falls back to the ledger dashboard.
+- Separated `dashboardUrl`, `ledgerDashboardUrl`, and `apiBaseUrl` in readiness and sanitized support diagnostics, and exposed the non-secret dashboard identity source.
+- Added a two-second signature-bound single-flight cache so concurrent readiness refreshes do not repeatedly probe the dashboard identity. On the final restarted runtime, twenty live settings reads completed with a 33.56 ms minimum, 40.45 ms median, and 51.83 ms maximum.
+- Scoped `FAB_INSTANCE_ROOT` into the API, worker, and dashboard child environments on Windows and restored the caller environment afterward. Compose now supplies the exact instance root plus host-reachable API and operator dashboard URLs.
+- Live Windows acceptance made doctor output and authenticated `/api/settings` agree on `http://127.0.0.1:3005/admin/operations`, retained the ledger dashboard at `http://127.0.0.1:5001/`, kept HAI ready with 14 governed commands, and found all three managed processes alive with zero-byte error logs.
+- Verification passed 18 focused readiness/support/launcher tests, 792 backend tests with four optional-runtime skips, 165 web tests, TypeScript checking, production build budgets, Python compilation, PowerShell parsing, and Compose configuration. No provider record, review decision, source file, or external submission was changed.
+
 ## 2026-08-09 - Authoritative review queue pagination
 
 - Replaced the review API's raw-row slice with complete document-group paging, so multiple open decisions for one document cannot be split across pages or counted as separate dashboard records.

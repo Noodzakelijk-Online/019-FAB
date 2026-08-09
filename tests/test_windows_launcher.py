@@ -16,6 +16,11 @@ class TestWindowsLauncher(unittest.TestCase):
         self.assertIn("$env:FAB_LOCAL_API_PUBLIC_URL = $apiBaseUrl", script)
         self.assertIn("$previousLocalApiPublicUrl = $env:FAB_LOCAL_API_PUBLIC_URL", script)
         self.assertIn("Remove-Item Env:FAB_LOCAL_API_PUBLIC_URL", script)
+        self.assertIn("$env:FAB_INSTANCE_ROOT = $root", script)
+        self.assertIn("$previousApiInstanceRoot = $env:FAB_INSTANCE_ROOT", script)
+        self.assertIn("$previousWorkerInstanceRoot = $env:FAB_INSTANCE_ROOT", script)
+        self.assertIn("$previousWebInstanceRoot = $env:FAB_INSTANCE_ROOT", script)
+        self.assertIn("Remove-Item Env:FAB_INSTANCE_ROOT", script)
 
     def test_launcher_reconciles_only_its_checksum_bound_virtual_environment(self):
         script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")

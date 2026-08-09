@@ -2,9 +2,12 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from src.operations.local_api import create_app
 from src.operations.local_readiness import LocalReadinessService
+from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalReadinessService(unittest.TestCase):
@@ -127,19 +130,103 @@ class TestLocalReadinessService(unittest.TestCase):
         self.assertEqual(summary["localAccess"]["authHeaderExample"], "Authorization: Bearer <FAB_LOCAL_API_TOKEN>")
         self.assertNotIn("secret-token", rendered)
 
-    def test_connector_api_url_cannot_replace_local_fab_access_url(self):
+    def test_verified_launcher_runtime_exposes_operator_dashboard_without_changing_api_origin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            runtime_path = os.path.join(temp_dir, "fab-runtime.json")
+            runtime = {
+                "root": temp_dir,
+                "apiBaseUrl": "http://127.0.0.1:5055",
+                "dashboardUrl": "http://127.0.0.1:3005/admin/operations",
+                "webIdentityUrl": "http://127.0.0.1:3005/api/fab/runtime",
+            }
+            with open(runtime_path, "w", encoding="utf-8") as handle:
+                json.dump(runtime, handle)
+            identity = {
+                "service": "fab-operator-dashboard",
+                "localApiEndpoint": "http://127.0.0.1:5055",
+                "instanceId": local_instance_id(Path(temp_dir)),
+            }
+            service = LocalReadinessService(
+                {},
+                ledger_path=ledger_path,
+                api_host="127.0.0.1",
+                api_port=5055,
+                api_token_configured=True,
+                intake_paths=[],
+                intake_extensions=[],
+                instance_root=temp_dir,
+            )
+
+            with patch("src.operations.local_readiness._fetch_runtime_identity", return_value=identity) as probe:
+                summary = service.summarize()
+                cached_summary = service.summarize()
+
+            self.assertEqual(summary["localAccess"]["dashboardUrl"], "http://127.0.0.1:3005/admin/operations")
+            self.assertEqual(cached_summary["localAccess"]["dashboardUrl"], summary["localAccess"]["dashboardUrl"])
+            self.assertEqual(summary["localAccess"]["dashboardSource"], "verified_launcher_runtime")
+            self.assertEqual(summary["localAccess"]["ledgerDashboardUrl"], "http://127.0.0.1:5055/")
+            self.assertEqual(summary["localAccess"]["apiBaseUrl"], "http://127.0.0.1:5055/api")
+            probe.assert_called_once_with("http://127.0.0.1:3005/api/fab/runtime")
+
+    def test_untrusted_launcher_runtime_cannot_redirect_operator_or_probe_remote_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            runtime_path = os.path.join(temp_dir, "fab-runtime.json")
+            with open(runtime_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "root": temp_dir,
+                    "apiBaseUrl": "http://127.0.0.1:5055",
+                    "dashboardUrl": "http://attacker.invalid/admin/operations",
+                    "webIdentityUrl": "http://attacker.invalid/api/fab/runtime",
+                }, handle)
+
+            with patch("src.operations.local_readiness._fetch_runtime_identity") as probe:
+                summary = LocalReadinessService(
+                    {"fab_operator_dashboard_url": "http://attacker.invalid/admin/operations"},
+                    ledger_path=ledger_path,
+                    api_host="127.0.0.1",
+                    api_port=5055,
+                    api_token_configured=True,
+                    intake_paths=[],
+                    intake_extensions=[],
+                    instance_root=temp_dir,
+                ).summarize()
+
+            self.assertEqual(summary["localAccess"]["dashboardUrl"], "http://127.0.0.1:5055/")
+            self.assertEqual(summary["localAccess"]["dashboardSource"], "ledger_api")
+            probe.assert_not_called()
+
+    def test_configured_operator_dashboard_is_used_for_compose_projection(self):
         summary = LocalReadinessService(
-            {
-                "api_url": "https://gql.waveapps.com/graphql/public",
-                "waveapps_api_url": "https://gql.waveapps.com/graphql/public",
-            },
+            {"fab_operator_dashboard_url": "http://localhost:3010/admin/operations/"},
             ledger_path="data/fab.sqlite3",
             api_host="127.0.0.1",
             api_port=5001,
-            api_token_configured=False,
+            api_token_configured=True,
             intake_paths=[],
             intake_extensions=[],
         ).summarize()
+
+        self.assertEqual(summary["localAccess"]["dashboardUrl"], "http://localhost:3010/admin/operations")
+        self.assertEqual(summary["localAccess"]["dashboardSource"], "configured_operator_dashboard")
+        self.assertEqual(summary["localAccess"]["apiBaseUrl"], "http://127.0.0.1:5001/api")
+
+    def test_connector_api_url_cannot_replace_local_fab_access_url(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = LocalReadinessService(
+                {
+                    "api_url": "https://gql.waveapps.com/graphql/public",
+                    "waveapps_api_url": "https://gql.waveapps.com/graphql/public",
+                },
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                api_host="127.0.0.1",
+                api_port=5001,
+                api_token_configured=False,
+                intake_paths=[],
+                intake_extensions=[],
+                instance_root=temp_dir,
+            ).summarize()
 
         self.assertEqual(summary["localAccess"]["dashboardUrl"], "http://127.0.0.1:5001/")
         self.assertEqual(summary["localAccess"]["apiBaseUrl"], "http://127.0.0.1:5001/api")
