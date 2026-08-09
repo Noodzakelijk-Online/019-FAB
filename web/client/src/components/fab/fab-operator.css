@@ -160,18 +160,26 @@ html.fab-operator-active body {
 
 .fab-activation-checklist { margin-bottom: 20px; overflow: hidden; border: 1px solid #e2bd80; border-radius: 8px; background: var(--fab-panel); box-shadow: 0 8px 24px rgba(96,60,9,.06); }
 .fab-activation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 64px; padding: 12px 16px; background: var(--fab-amber-soft); border-bottom: 1px solid #ecd3aa; }
-.fab-activation-heading > div { display: grid; }
-.fab-activation-heading > div > span { color: var(--fab-amber); font-size: 9px; font-weight: 760; text-transform: uppercase; }
+.fab-activation-heading-main { display: grid; flex: 1; grid-template-columns: auto minmax(150px, 300px); align-items: center; gap: 20px; min-width: 0; }
+.fab-activation-heading-main > div:first-child { display: grid; min-width: 0; }
+.fab-activation-heading-main > div:first-child > span { color: var(--fab-amber); font-size: 9px; font-weight: 760; text-transform: uppercase; }
 .fab-activation-heading h2 { margin: 3px 0 0; font-size: 17px; }
+.fab-activation-heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.fab-activation-heading-actions .fab-primary-button svg { order: 2; }
+.fab-activation-progress { display: grid; gap: 5px; }
+.fab-activation-progress > span { display: block; width: 100%; height: 6px; overflow: hidden; border-radius: 3px; background: #ead8b9; }
+.fab-activation-progress i { display: block; height: 100%; border-radius: inherit; background: var(--fab-teal); transition: width .2s ease-out; }
+.fab-activation-progress small { color: var(--fab-muted); font-size: 10px; font-weight: 680; text-align: right; }
 .fab-activation-steps { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
-.fab-activation-step { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 106px; padding: 12px 14px; border-right: 1px solid var(--fab-line); }
+.fab-activation-step { display: grid; position: relative; grid-template-columns: 36px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 106px; padding: 12px 14px; border-right: 1px solid var(--fab-line); }
+.fab-activation-step.is-current { background: #fffaf0; box-shadow: inset 0 3px 0 var(--fab-amber); }
 .fab-activation-step:last-child { border-right: 0; }
 .fab-activation-step > div { display: grid; min-width: 0; }
 .fab-activation-step > div strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .fab-activation-step > div span { margin-top: 2px; color: var(--fab-muted); font-size: 11px; line-height: 1.35; }
 .fab-activation-step > button,
 .fab-activation-step > .fab-status-chip { grid-column: 1 / -1; width: max-content; }
-.fab-activation-icon { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid currentColor; border-radius: 6px; }
+.fab-activation-icon { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid currentColor; border-radius: 6px; font-size: 12px; font-weight: 750; }
 .fab-activation-safety { display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--fab-line); background: #f7faf9; color: var(--fab-muted); font-size: 11px; line-height: 1.45; }
 .fab-activation-safety svg { margin-top: 1px; color: var(--fab-green); }
 
@@ -670,6 +678,12 @@ html.fab-operator-active body {
 .fab-review-field-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .fab-review-checkbox { display: flex !important; grid-template-columns: none; align-items: flex-start; gap: 9px !important; color: var(--fab-ink) !important; font-weight: 500 !important; }
 .fab-review-checkbox input { width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--fab-teal); }
+.fab-review-draft-state { display: grid; grid-template-columns: 18px minmax(0, 1fr) 34px; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid #bdd5d0; border-radius: 6px; background: #f2f8f6; color: var(--fab-teal); }
+.fab-review-draft-state > svg { width: 17px; height: 17px; }
+.fab-review-draft-state > span { display: grid; gap: 2px; min-width: 0; }
+.fab-review-draft-state strong { color: var(--fab-ink); font-size: 12px; }
+.fab-review-draft-state small { color: var(--fab-muted); font-size: 11px; font-weight: 450; line-height: 1.35; }
+.fab-review-draft-state .fab-icon-button { width: 34px; height: 34px; min-height: 34px; color: var(--fab-muted); }
 .fab-review-batch { padding: 11px 12px; border: 1px solid #bdd5d0; border-radius: 6px; background: #f2f8f6; }
 .fab-review-batch > span { display: grid; gap: 3px; }
 .fab-review-batch strong { color: var(--fab-ink); font-size: 12px; }
@@ -922,7 +936,7 @@ html.fab-operator-active body {
 .fab-segmented-control button strong,
 .fab-delivery-metric small { font-size: 12px; }
 
-.fab-activation-heading > div > span,
+.fab-activation-heading-main > div:first-child > span,
 .fab-activation-safety,
 .fab-review-batch small,
 .fab-review-readiness small,
@@ -956,6 +970,8 @@ html.fab-operator-active body {
   .fab-pipeline { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 19px; }
   .fab-pipeline-step:nth-child(3) .fab-pipeline-arrow { display: none; }
   .fab-priority-grid { grid-template-columns: 1fr; gap: 0; }
+  .fab-activation-heading-main { grid-template-columns: 1fr; gap: 8px; }
+  .fab-activation-progress small { text-align: left; }
 }
 
 @media (max-width: 900px) {
@@ -1028,6 +1044,10 @@ html.fab-operator-active body {
   .fab-heading-actions > .fab-icon-button { width: 44px; padding: 0; }
   .fab-metric-strip { grid-template-columns: 1fr; }
   .fab-activation-heading { align-items: flex-start; flex-direction: column; }
+  .fab-activation-heading-main,
+  .fab-activation-heading-actions { width: 100%; }
+  .fab-activation-heading-actions { align-items: stretch; flex-direction: column; }
+  .fab-activation-heading-actions .fab-primary-button { width: 100%; }
   .fab-activation-step { grid-template-columns: 34px minmax(0, 1fr); }
   .fab-activation-step > button,
   .fab-activation-step > .fab-status-chip { grid-column: 1 / -1; grid-row: auto; width: 100%; }

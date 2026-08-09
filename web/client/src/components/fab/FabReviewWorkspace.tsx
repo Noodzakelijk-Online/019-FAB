@@ -11,9 +11,11 @@ import {
   FileSearch,
   ListPlus,
   LoaderCircle,
+  Save,
   Scale,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
@@ -30,6 +32,14 @@ import {
   reviewApprovalBlockers,
   type FabReviewApprovalBlocker,
 } from "./fabReviewApproval";
+import {
+  clearReviewDraft,
+  loadReviewDraft,
+  reviewDraftChanged,
+  saveReviewDraft,
+  type FabReviewDraftForm,
+  type FabReviewDraftStorage,
+} from "./fabReviewDraft";
 import {
   asRecord,
   count,
@@ -318,6 +328,15 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
   const [error, setError] = useState("");
   const [selectedDuplicateCandidateId, setSelectedDuplicateCandidateId] = useState(0);
   const [previewDocumentId, setPreviewDocumentId] = useState(0);
+  const [draftContextKey, setDraftContextKey] = useState("");
+  const [draftStatus, setDraftStatus] = useState<"clean" | "restored" | "saved">("clean");
+  const draftContextRef = useRef<{
+    key: string;
+    reviewItemId: number;
+    identity: string;
+    baseline: ReviewForm;
+    restoredForm: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!item) return;
@@ -327,7 +346,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     const invalidDate = financialIssues.some((issue) => text(issue.field, "") === "recordDate");
     const invalidVat = financialIssues.some((issue) => text(issue.field, "") === "vatAmount");
     const documentType = normalizedDocumentType(document.documentType);
-    setForm({
+    const baseline: ReviewForm = {
       vendorName: text(document.vendorName, ""),
       transactionDate: invalidDate ? "" : text(document.normalizedRecordDate, text(document.transactionDate, "")),
       totalAmount: normalizedReviewEvidenceAmount(document.totalAmount, documentType),
@@ -352,7 +371,25 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         : copy("Verified against the source document in FAB.", "Geverifieerd aan de hand van het brondocument in FAB."),
       learnRule: true,
       applyToMatchingVendor: defaultApplyToMatchingVendor,
-    });
+    };
+    const reviewItemId = reviewDraftReviewItemId(item);
+    const identity = reviewDraftIdentity(item, reviewItemId);
+    const key = reviewItemId > 0 ? `${reviewItemId}:${identity}` : "";
+    const storage = reviewDraftStorage();
+    const restored = storage && reviewItemId > 0
+      ? loadReviewDraft(storage, reviewItemId, identity)
+      : null;
+    const nextForm = restored || baseline;
+    draftContextRef.current = key ? {
+      key,
+      reviewItemId,
+      identity,
+      baseline,
+      restoredForm: restored ? JSON.stringify(restored) : "",
+    } : null;
+    setForm(nextForm);
+    setDraftContextKey(key);
+    setDraftStatus(restored ? "restored" : "clean");
     const duplicateCandidates = records(item.duplicateCandidates);
     setSelectedDuplicateCandidateId((current) => (
       duplicateCandidates.some((candidate) => count(candidate.id) === current)
@@ -362,6 +399,20 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
     setPreviewDocumentId(count(item.documentId));
     setError("");
   }, [copy, defaultApplyToMatchingVendor, item]);
+
+  useEffect(() => {
+    const context = draftContextRef.current;
+    const storage = reviewDraftStorage();
+    if (!storage || !context || !draftContextKey || context.key !== draftContextKey) return;
+    if (!reviewDraftChanged(form, context.baseline)) {
+      clearReviewDraft(storage, context.reviewItemId);
+      setDraftStatus("clean");
+      return;
+    }
+    if (saveReviewDraft(storage, context.reviewItemId, context.identity, form)) {
+      setDraftStatus(JSON.stringify(form) === context.restoredForm ? "restored" : "saved");
+    }
+  }, [draftContextKey, form]);
 
   useEffect(() => {
     if (!item) return;
@@ -435,6 +486,25 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
       && candidateReasons.some((reason) => VENDOR_CATEGORY_REASONS.has(text(reason, "")));
   }).length : 0;
 
+  function discardDraft() {
+    const context = draftContextRef.current;
+    const storage = reviewDraftStorage();
+    if (!context || !storage) return;
+    clearReviewDraft(storage, context.reviewItemId);
+    context.restoredForm = "";
+    setForm(context.baseline);
+    setDraftStatus("clean");
+    setError("");
+  }
+
+  function clearCurrentDraft() {
+    const context = draftContextRef.current;
+    const storage = reviewDraftStorage();
+    if (context && storage) clearReviewDraft(storage, context.reviewItemId);
+    if (context) context.restoredForm = "";
+    setDraftStatus("clean");
+  }
+
   async function approveDetails() {
     if (!detailReview) return;
     if (selectedNonPosting) {
@@ -452,6 +522,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           learnRule: false,
           applyToMatchingVendor: false,
         });
+        clearCurrentDraft();
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : copy("Review update failed.", "Bijwerken van controle mislukt."));
       }
@@ -485,6 +556,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
         learnRule: form.learnRule,
         applyToMatchingVendor: form.applyToMatchingVendor,
       });
+      clearCurrentDraft();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : copy("Review update failed.", "Bijwerken van controle mislukt."));
     }
@@ -596,6 +668,11 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           {detailReview && (
             <form className="fab-review-form" onSubmit={(event) => { event.preventDefault(); void approveDetails(); }}>
               <div className="fab-subsection-heading"><div><span>{selectedNonPosting ? copy("Evidence classification", "Bewijsclassificatie") : copy("Bookkeeping fields", "Boekhoudvelden")}</span><h3>{selectedNonPosting ? copy("Confirm document role", "Bevestig documentrol") : copy("Confirm extracted details", "Bevestig uitgelezen gegevens")}</h3></div></div>
+              {draftStatus !== "clean" && <div className="fab-review-draft-state" role="status">
+                <Save aria-hidden="true" />
+                <span><strong>{draftStatus === "restored" ? copy("Draft restored", "Concept hersteld") : copy("Draft saved", "Concept opgeslagen")}</strong><small>{copy("Retained in this browser tab until submitted or discarded.", "Bewaard in dit browsertabblad tot verzending of verwijdering.")}</small></span>
+                <button className="fab-icon-button" type="button" onClick={discardDraft} aria-label={copy("Discard review draft", "Controleconcept verwijderen")} title={copy("Discard draft", "Concept verwijderen")}><Trash2 aria-hidden="true" /></button>
+              </div>}
               {typeDecisionRequired && <label><span>{copy("Document type", "Documenttype")}</span><select value={form.documentType} onChange={(event) => {
                 const documentType = event.target.value as ReviewDocumentType;
                 setForm((current) => ({
@@ -774,18 +851,7 @@ function DuplicateIdentityEvidence({ identity, copy }: {
   );
 }
 
-type ReviewForm = {
-  vendorName: string;
-  transactionDate: string;
-  totalAmount: string;
-  vatAmount: string;
-  category: string;
-  documentType: ReviewDocumentType;
-  targetSystem: "waveapps_business" | "waveapps_personal" | "mijngeldzaken";
-  resolution: string;
-  learnRule: boolean;
-  applyToMatchingVendor: boolean;
-};
+type ReviewForm = FabReviewDraftForm;
 
 function emptyForm(): ReviewForm {
   return { vendorName: "", transactionDate: "", totalAmount: "", vatAmount: "", category: "", documentType: "receipt", targetSystem: "waveapps_business", resolution: "", learnRule: true, applyToMatchingVendor: false };
@@ -804,6 +870,40 @@ function normalizedDocumentType(value: unknown): ReviewDocumentType {
 
 function normalizedVendor(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function reviewDraftStorage(): FabReviewDraftStorage | null {
+  try {
+    return globalThis.sessionStorage || null;
+  } catch {
+    return null;
+  }
+}
+
+function reviewDraftReviewItemId(item: FabRecord): number {
+  const reviewItems = records(item.reviewItems);
+  const detailReview = reviewItems.find((review) => TYPE_REVIEW_REASONS.has(text(review.reason, "")))
+    || reviewItems.find((review) => text(review.reason, "") !== "duplicate_candidate")
+    || null;
+  return count(detailReview?.id);
+}
+
+function reviewDraftIdentity(item: FabRecord, reviewItemId: number): string {
+  const document = asRecord(item.document);
+  const gateIdentity = records(item.reviewItems)
+    .map((review) => [text(review.id), text(review.reason), text(review.status), text(review.updatedAt)].join(":"))
+    .sort()
+    .join(",");
+  return [
+    `document:${count(item.documentId)}`,
+    `review:${reviewItemId}`,
+    `state:${text(document.processingStatus)}`,
+    `type:${text(document.documentType)}`,
+    `date:${text(document.transactionDate)}`,
+    `amount:${text(document.totalAmount)}`,
+    `vendor:${text(document.vendorName)}`,
+    `gates:${gateIdentity}`,
+  ].join("|").slice(0, 2_048);
 }
 
 function stringList(value: unknown): string[] {
