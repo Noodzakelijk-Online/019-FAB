@@ -35,6 +35,6 @@ The Express/tRPC gateway calls fixed local paths from `web/server/fabLocalGatewa
 - MijnGeldzaken is an artifact export with supervised completion tracking.
 - Direct PSD2 and SVB mutation APIs are absent and are not advertised as live.
 
-## Known contract debt
+## Error contract
 
-Some legacy Flask endpoints return route-specific error bodies rather than one universal error envelope. Clients currently rely on HTTP status plus `error`/`status`; normalization remains tracked technical debt.
+Every JSON error below `/api/` has the same transport envelope: `success=false`, `status`, `errorCode`, `message`, and `requestId`. Route-specific fields such as `error`, validation details, or provider state are preserved. FAB accepts a caller-provided `X-Request-ID` only when it is a bounded safe identifier; otherwise it creates one and always returns the effective value in the response header and body. Unexpected exceptions return a generic message and create a sanitized correlated ledger audit event plus local log entry without exposing financial or provider details.

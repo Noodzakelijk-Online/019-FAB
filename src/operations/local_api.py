@@ -5,12 +5,14 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, g, jsonify, redirect, render_template_string, request, session, url_for
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from src.config_loader import ConfigLoader
@@ -97,6 +99,23 @@ LOCAL_FORM_SESSION_KEY = "fab_local_form_session"
 REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
 RULE_RESOLUTION_STATUSES = VENDOR_CATEGORY_RULE_STATUSES - {"learned"}
+API_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,64}$")
+
+
+def _api_error_code(status_code: int) -> str:
+    return {
+        400: "invalid_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        405: "method_not_allowed",
+        409: "conflict",
+        413: "payload_too_large",
+        421: "misdirected_request",
+        429: "rate_limited",
+        502: "upstream_error",
+        503: "service_unavailable",
+    }.get(status_code, "internal_error" if status_code >= 500 else "request_failed")
 
 
 DASHBOARD_TEMPLATE = """
@@ -3867,6 +3886,15 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     )
 
     @app.before_request
+    def assign_request_id():
+        supplied = request.headers.get("X-Request-ID", "").strip()
+        g.fab_request_id = (
+            supplied
+            if API_REQUEST_ID_PATTERN.fullmatch(supplied)
+            else secrets.token_hex(12)
+        )
+
+    @app.before_request
     def require_token():
         request_hostname = (urlsplit(request.host_url).hostname or "").lower()
         if not token and request_hostname not in LOOPBACK_HOSTS:
@@ -3929,6 +3957,26 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.after_request
     def harden_financial_responses(response):
+        request_id = str(getattr(g, "fab_request_id", "") or secrets.token_hex(12))
+        response.headers.setdefault("X-Request-ID", request_id)
+        if request.path.startswith("/api/") and response.status_code >= 400 and response.is_json:
+            payload = response.get_json(silent=True)
+            if isinstance(payload, dict):
+                error_value = payload.get("error")
+                message_value = payload.get("message")
+                if not isinstance(message_value, str) or not message_value.strip():
+                    message_value = (
+                        error_value
+                        if isinstance(error_value, str) and error_value.strip()
+                        else "Request failed"
+                    )
+                payload.setdefault("success", False)
+                payload.setdefault("status", "error")
+                payload.setdefault("errorCode", _api_error_code(response.status_code))
+                payload.setdefault("message", message_value)
+                payload.setdefault("requestId", request_id)
+                response.set_data(app.json.dumps(payload, separators=(",", ":")))
+                response.content_type = "application/json"
         response.headers.setdefault("Cache-Control", "no-store, max-age=0")
         response.headers.setdefault("Pragma", "no-cache")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -3940,6 +3988,39 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "form-action 'self'; frame-ancestors 'none'; base-uri 'self'",
         )
         return response
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(exc: HTTPException):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": str(exc.description or exc.name)}), int(exc.code or 500)
+        return exc
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_exception(exc: Exception):
+        request_id = str(getattr(g, "fab_request_id", "unknown"))
+        try:
+            ledger.record_audit_event({
+                "action": "local_api.unhandled_exception",
+                "entityType": "api_request",
+                "entityId": request_id,
+                "details": {
+                    "requestId": request_id,
+                    "method": request.method,
+                    "endpoint": request.endpoint or "unmatched",
+                    "errorType": type(exc).__name__,
+                    "externalSubmission": "not_executed",
+                },
+            })
+        except Exception:
+            pass
+        app.logger.error(
+            "Unhandled FAB request %s (%s)",
+            request_id,
+            type(exc).__name__,
+        )
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Internal server error"}), 500
+        return "Internal server error", 500
 
     @app.get("/api/health")
     def health():
@@ -3972,6 +4053,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "status": health_status,
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
+            "ledgerSchema": ledger.schema_status(),
             "intakePaths": app.config["FAB_LOCAL_INTAKE_PATHS"],
             "intakeExtensions": app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
             "operations": operations_health,

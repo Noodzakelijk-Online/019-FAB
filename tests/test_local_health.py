@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from src.operations.local_api import create_app
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
@@ -15,6 +16,38 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalOperationsHealth(unittest.TestCase):
+    def test_failed_workflow_recovery_filter_uses_bulk_lookup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            recovered_source_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "connector_intake",
+            })
+            active_failed_id = ledger.create_workflow_run({
+                "status": "completed_with_errors",
+                "triggerSource": "connector_intake",
+            })
+            ledger.create_workflow_run({
+                "status": "completed",
+                "triggerSource": "connector_intake_recovery",
+                "recoverySourceWorkflowRunId": recovered_source_id,
+                "recoveryRootWorkflowRunId": recovered_source_id,
+            })
+
+            with patch.object(
+                ledger,
+                "get_workflow_recovery_child",
+                side_effect=AssertionError("N+1 recovery lookup used"),
+            ):
+                health = LocalOperationsHealth(ledger).summarize()
+
+            failed_issues = [
+                issue for issue in health["issues"]
+                if issue["type"] == "failed_workflow_run"
+            ]
+            self.assertEqual([issue["entityId"] for issue in failed_issues], [str(active_failed_id)])
+            self.assertEqual(health["metrics"]["failedWorkflowRuns"], 1)
+
     def tearDown(self):
         reset_all_limiters()
 

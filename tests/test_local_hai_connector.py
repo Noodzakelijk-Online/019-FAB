@@ -113,6 +113,37 @@ class TestLocalHaiConnector(unittest.TestCase):
             self.assertEqual(result["status"], "invalid")
             self.assertIn("bankTransactions", result["error"])
 
+    def test_request_ids_and_executor_failures_do_not_leak_exception_details(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            connector = LocalHaiConnector(
+                ledger,
+                {
+                    "fab_hai_connector_enabled": True,
+                    "fab_hai_allowed_commands": "refresh_notifications",
+                },
+                executors={
+                    "refresh_notifications": lambda payload, actor: (_ for _ in ()).throw(
+                        RuntimeError("provider token and financial detail")
+                    ),
+                },
+            )
+
+            invalid = connector.execute("unsafe request id", "refresh_notifications")
+            failed = connector.execute("safe-request-001", "refresh_notifications")
+            audit = ledger.find_audit_event(
+                "hai.command.failed",
+                "hai_command_request",
+                "safe-request-001",
+            )
+
+            self.assertEqual(invalid["status"], "invalid_request")
+            self.assertEqual(failed["errorCode"], "executor_failed")
+            self.assertEqual(failed["errorType"], "RuntimeError")
+            self.assertNotIn("provider token", str(failed))
+            self.assertEqual(audit["details"]["errorType"], "RuntimeError")
+            self.assertNotIn("provider token", str(audit))
+
     def test_api_exposes_manifest_plan_and_audited_execution(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

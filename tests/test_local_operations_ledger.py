@@ -1,13 +1,111 @@
+import hashlib
+import json
 import os
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_schema_history_is_versioned_and_current(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+
+            status = ledger.schema_status()
+            connection = sqlite3.connect(ledger_path)
+            try:
+                user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+                migration = connection.execute(
+                    "SELECT version, name, checksum FROM schema_migrations"
+                ).fetchone()
+            finally:
+                connection.close()
+
+            self.assertEqual(status["status"], "current")
+            self.assertEqual(status["currentVersion"], 1)
+            self.assertTrue(status["historyComplete"])
+            self.assertEqual(user_version, 1)
+            self.assertEqual(migration[0], 1)
+            self.assertEqual(len(migration[2]), 64)
+
+    def test_existing_unversioned_ledger_gets_verified_pre_migration_backup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            connection = sqlite3.connect(ledger_path)
+            try:
+                connection.execute("CREATE TABLE legacy_evidence (value TEXT NOT NULL)")
+                connection.execute("INSERT INTO legacy_evidence (value) VALUES ('retained')")
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger = LocalOperationsLedger(ledger_path)
+            backup_dir = os.path.join(temp_dir, "schema_backups")
+            manifests = [name for name in os.listdir(backup_dir) if name.endswith(".json")]
+            self.assertEqual(len(manifests), 1)
+            with open(os.path.join(backup_dir, manifests[0]), "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            backup_path = os.path.join(backup_dir, manifest["backupFilename"])
+            digest = hashlib.sha256(Path(backup_path).read_bytes()).hexdigest()
+            backup = sqlite3.connect(backup_path)
+            try:
+                retained = backup.execute("SELECT value FROM legacy_evidence").fetchone()[0]
+                integrity = backup.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                backup.close()
+
+            self.assertEqual(manifest["sourceSchemaVersion"], 0)
+            self.assertEqual(manifest["targetSchemaVersion"], 1)
+            self.assertEqual(manifest["sha256"], digest)
+            self.assertEqual(retained, "retained")
+            self.assertEqual(integrity, "ok")
+            self.assertTrue(ledger.schema_status()["preMigrationBackupCreated"])
+            reopened_status = LocalOperationsLedger(ledger_path).schema_status()
+            self.assertTrue(reopened_status["preMigrationBackupCreated"])
+            self.assertIsNotNone(reopened_status["lastPreMigrationBackupAt"])
+            event = ledger.list_audit_events(limit=1)[0]
+            self.assertEqual(event["action"], "local_ledger.pre_migration_backup_created")
+
+    def test_future_or_tampered_schema_history_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            future_path = os.path.join(temp_dir, "future.sqlite3")
+            connection = sqlite3.connect(future_path)
+            try:
+                connection.execute("CREATE TABLE retained (value TEXT)")
+                connection.execute("PRAGMA user_version = 99")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(RuntimeError, "newer than supported"):
+                LocalOperationsLedger(future_path)
+
+            tampered_path = os.path.join(temp_dir, "tampered.sqlite3")
+            LocalOperationsLedger(tampered_path)
+            connection = sqlite3.connect(tampered_path)
+            try:
+                connection.execute("UPDATE schema_migrations SET checksum = 'tampered'")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(RuntimeError, "failed checksum validation"):
+                LocalOperationsLedger(tampered_path)
+
+            incomplete_path = os.path.join(temp_dir, "incomplete.sqlite3")
+            LocalOperationsLedger(incomplete_path)
+            connection = sqlite3.connect(incomplete_path)
+            try:
+                connection.execute("DELETE FROM schema_migrations")
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaisesRegex(RuntimeError, "history does not match"):
+                LocalOperationsLedger(incomplete_path)
+
     def test_existing_ledger_gets_workflow_recovery_linkage_columns_and_indexes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

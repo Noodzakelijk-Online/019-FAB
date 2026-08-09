@@ -95,6 +95,7 @@ class LocalSupportBundleService:
                 "platform": platform.system(),
                 "platformRelease": platform.release(),
                 "sqlite": sqlite3.sqlite_version,
+                "ledgerSchema": self.ledger.schema_status(),
             },
             "readiness": {
                 **readiness_compact,

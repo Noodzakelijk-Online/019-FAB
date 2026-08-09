@@ -1,5 +1,19 @@
 # Codex Worklog
 
+## 2026-08-09 - Reliability, migration, and API contract follow-up
+
+- Normalized every JSON error below `/api/` to a correlated machine-readable envelope while preserving route-specific details.
+- Added bounded request IDs, generic unexpected-error responses, and sanitized persistent failure audit events without exception messages or provider data.
+- Hardened HAI request identifiers and executor failures so command responses and ledger audit events cannot leak executor exception details.
+- Added ordered checksum-bound SQLite migration history with future/unknown/incomplete/tampered-history refusal.
+- Added an automatic SQLite backup, integrity check, atomic SHA-256 manifest, and private file permissions before any populated legacy ledger is upgraded.
+- Exposed persisted schema/backup status consistently through API health, doctor, and support diagnostics, including from a separate process.
+- Replaced the failed-workflow health N+1 lookup with one bounded bulk query.
+- Verified the real 180,838,400-byte pre-upgrade ledger snapshot independently: manifest hash matched and both integrity checks returned `ok`.
+- Final verification passed 775 backend tests, 134 affected-path tests, 153 web tests, TypeScript checking, production web build, API image build, non-root Compose acceptance, and the native Windows runtime.
+- Live native measurements: liveness 45 ms, five deep-health calls 259-412 ms, dashboard 310 ms, all with 441 real backlog issues retained as blockers rather than hidden.
+- No Wave/Google/provider record was changed, no Drive file was archived, and no external submission was performed.
+
 ## 2026-08-08 - Giant goal implementation audit
 
 - Recorded `main` at starting commit `8a2b43d`; `origin/HEAD` also targets `main`.

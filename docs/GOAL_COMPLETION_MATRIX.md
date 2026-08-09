@@ -13,7 +13,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 006 Configuration validation and startup guards | Implemented | `LocalReadinessService`, loopback/token checks, launch scripts. |
 | 007 Authentication model and session security | Partial | Web operator auth and local API token exist; production identity deployment is unverified. |
 | 008 Authorization and resource ownership | Partial | Operator/admin and HAI bounds exist; full team/tenant ownership is not complete. |
-| 009 API contract and error envelope | Partial | Typed gateway and status codes exist; some legacy errors are route-specific. |
+| 009 API contract and error envelope | Implemented | Typed gateway plus correlated machine-readable JSON errors preserve route details and hide unexpected exception content. |
 | 010 Frontend architecture and navigation model | Implemented | Functional operator shell and panels. |
 | 011 Core workflow vertical slice | Implemented | Intake through recovery covered by ledger services and tests. |
 | 012 External provider reality review | Implemented | Capability states distinguish live, supervised, and blocked. |
@@ -37,7 +37,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 030 Secrets management and credential rotation | Partial | Local encrypted Wave store and OAuth reauthorization state; full rotation drill remains. |
 | 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` and `Stop-FAB.ps1/.cmd`. |
 | 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, and local-operator acceptance passed. |
-| 033 Database migrations and rollback safety | Partial | Additive SQLite startup migrations and verified backups; no general down migrations. |
+| 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |
 | 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, and workflow state. |
 | 036 Admin/operator diagnostics | Implemented | Dashboard diagnostics and sanitized support bundle. |

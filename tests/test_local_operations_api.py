@@ -22,6 +22,73 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_api_errors_use_stable_envelope_and_request_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_token": "test-api-token",
+            })
+            client = app.test_client()
+
+            unauthorized = client.get(
+                "/api/live",
+                headers={"X-Request-ID": "fab-test-request-001"},
+            )
+            missing = client.get(
+                "/api/not-a-route",
+                headers={
+                    "Authorization": "Bearer test-api-token",
+                    "X-Request-ID": "fab-test-request-002",
+                },
+            )
+            unsafe_id = client.get(
+                "/api/live",
+                headers={"X-Request-ID": "invalid request id value"},
+            )
+
+            self.assertEqual(unauthorized.status_code, 401)
+            self.assertEqual(unauthorized.headers["X-Request-ID"], "fab-test-request-001")
+            self.assertEqual(unauthorized.get_json(), {
+                "error": "Unauthorized",
+                "errorCode": "unauthorized",
+                "message": "Unauthorized",
+                "requestId": "fab-test-request-001",
+                "status": "error",
+                "success": False,
+            })
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.get_json()["errorCode"], "not_found")
+            self.assertEqual(missing.get_json()["requestId"], "fab-test-request-002")
+            self.assertRegex(unsafe_id.headers["X-Request-ID"], r"^[0-9a-f]{24}$")
+
+    def test_unhandled_api_error_is_generic_and_correlated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({"fab_local_ledger_path": ledger_path})
+
+            @app.get("/api/test-unhandled-error")
+            def test_unhandled_error():
+                raise RuntimeError("financial implementation detail")
+
+            response = app.test_client().get(
+                "/api/test-unhandled-error",
+                headers={"X-Request-ID": "fab-test-error-001"},
+            )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.headers["X-Request-ID"], "fab-test-error-001")
+            self.assertEqual(response.get_json()["errorCode"], "internal_error")
+            self.assertEqual(response.get_json()["message"], "Internal server error")
+            self.assertNotIn("financial implementation detail", response.get_data(as_text=True))
+            audit = LocalOperationsLedger(ledger_path).find_audit_event(
+                "local_api.unhandled_exception",
+                "api_request",
+                "fab-test-error-001",
+            )
+            self.assertEqual(audit["details"]["errorType"], "RuntimeError")
+            self.assertEqual(audit["details"]["endpoint"], "test_unhandled_error")
+            self.assertNotIn("financial implementation detail", str(audit))
+
     def test_local_ledger_uses_wal_and_allows_reads_during_worker_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

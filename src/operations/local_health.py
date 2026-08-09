@@ -134,10 +134,13 @@ class LocalOperationsHealth:
         pending_routes = self.ledger.list_routing_attempts(status=PENDING_ROUTING_STATUSES, limit=500)
         running_runs = self.ledger.list_workflow_runs(status=RUNNING_WORKFLOW_STATUSES, limit=100)
         failed_runs = self.ledger.list_workflow_runs(status=FAILED_WORKFLOW_STATUSES, limit=100)
+        recovered_failed_run_ids = self.ledger.workflow_run_ids_with_recovery_children(
+            [int(run["id"]) for run in failed_runs]
+        )
         active_failed_runs = [
             run
             for run in failed_runs
-            if self.ledger.get_workflow_recovery_child(int(run["id"])) is None
+            if int(run["id"]) not in recovered_failed_run_ids
         ]
         picker_runs = self.ledger.list_workflow_runs(
             status=PICKER_ATTENTION_STATUSES,

@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional
 
@@ -5,6 +6,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 HAI_CONNECTOR_VERSION = "fab-hai-connector-v1"
+HAI_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 DEFAULT_HAI_COMMAND_IDS = (
     "rescan_intake",
     "process_imported",
@@ -386,8 +388,11 @@ class LocalHaiConnector:
     ) -> Dict[str, Any]:
         request_id = str(request_id or "").strip()
         actor = str(actor or "hai").strip()[:200] or "hai"
-        if not request_id or len(request_id) > 200:
-            return self._execution_error("invalid_request", "requestId is required and must be at most 200 characters.")
+        if not HAI_REQUEST_ID_PATTERN.fullmatch(request_id):
+            return self._execution_error(
+                "invalid_request",
+                "requestId must be 1-128 ASCII letters, numbers, dots, underscores, colons, or hyphens.",
+            )
 
         previous = self.ledger.find_audit_event(
             action="hai.command.completed",
@@ -437,7 +442,7 @@ class LocalHaiConnector:
                     "requestId": request_id,
                     "commandId": command_id,
                     "actor": actor,
-                    "error": str(exc),
+                    "errorType": type(exc).__name__,
                     "externalSubmission": "not_executed",
                 },
             })
@@ -446,7 +451,9 @@ class LocalHaiConnector:
                 "status": "failed",
                 "requestId": request_id,
                 "commandId": command_id,
-                "error": str(exc),
+                "error": "Command execution failed; inspect the correlated local audit event.",
+                "errorCode": "executor_failed",
+                "errorType": type(exc).__name__,
                 "auditEventId": audit_event_id,
                 "externalSubmission": "not_executed",
             }

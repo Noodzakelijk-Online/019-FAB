@@ -49,6 +49,12 @@ python -m src.run_fab_doctor --support-bundle
 
 Create a verified recovery package from the dashboard. Restore remains confirmation-gated in the local recovery console. Preserve the current database before repair and verify the restored checksum and source-evidence coverage.
 
+### Schema upgrades and rollback
+
+FAB records ordered, checksum-bound SQLite schema migrations. Before an existing ledger is upgraded, startup creates a private SQLite snapshot and JSON manifest in the ledger's sibling `schema_backups` directory. The snapshot must pass SQLite integrity verification, and its SHA-256 must match the manifest, before FAB changes the live schema. `/api/health`, the doctor report, and support diagnostics expose the current and supported schema versions without exposing ledger contents.
+
+For rollback, stop FAB first. Preserve the failed live database and its WAL/SHM sidecars as incident evidence; do not overwrite or delete them. Verify the selected pre-upgrade snapshot against its JSON manifest and run `PRAGMA integrity_check` on a copy. Restore that verified copy atomically to the configured ledger path, then start the prior FAB release that supports the snapshot's source schema. Starting the newer release will intentionally upgrade it again. Keep both copies until the prior release starts, health is green, and document/audit counts have been reconciled.
+
 ## Verification
 
 ```powershell

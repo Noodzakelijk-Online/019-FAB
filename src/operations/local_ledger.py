@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -9,6 +10,15 @@ from typing import Any, Dict, Optional, Sequence
 
 VENDOR_CATEGORY_RULE_STATUSES = {"suggested", "approved", "rejected", "disabled", "learned"}
 GOVERNED_VENDOR_CATEGORY_RULE_STATUSES = {"approved", "rejected", "disabled"}
+LEDGER_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_MIGRATIONS = {
+    1: {
+        "name": "operations_ledger_baseline_2026_08_09",
+        "checksum": hashlib.sha256(
+            b"FAB operations ledger schema v1: baseline through runtime controls and support diagnostics"
+        ).hexdigest(),
+    },
+}
 
 
 def default_ledger_path() -> str:
@@ -36,7 +46,22 @@ class LocalOperationsLedger:
             raise ValueError("Local ledger path is required")
         self.path = os.path.abspath(os.path.expanduser(path))
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._last_schema_backup = self._prepare_schema_migration_backup()
         self._init_schema()
+        if self._last_schema_backup:
+            self.record_audit_event({
+                "action": "local_ledger.pre_migration_backup_created",
+                "entityType": "schema_migration",
+                "entityId": str(LEDGER_SCHEMA_VERSION),
+                "details": {
+                    "sourceSchemaVersion": self._last_schema_backup["sourceSchemaVersion"],
+                    "targetSchemaVersion": LEDGER_SCHEMA_VERSION,
+                    "backupFilename": self._last_schema_backup["backupFilename"],
+                    "manifestFilename": self._last_schema_backup["manifestFilename"],
+                    "sha256": self._last_schema_backup["sha256"],
+                    "externalSubmission": "not_executed",
+                },
+            })
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30.0)
@@ -57,6 +82,7 @@ class LocalOperationsLedger:
 
     def _init_schema(self) -> None:
         with self._connection() as connection:
+            self._validate_schema_migration_history(connection)
             # WAL keeps dashboard reads available while the autonomous worker
             # commits a short bookkeeping transaction in another process.
             journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
@@ -886,6 +912,206 @@ class LocalOperationsLedger:
             self._ensure_wave_operation_snapshot_schema(connection)
             self._ensure_wave_entity_mirror_schema(connection)
             self._ensure_review_item_schema(connection)
+            self._record_schema_migration(connection)
+
+    def schema_status(self) -> Dict[str, Any]:
+        with self._connection() as connection:
+            self._validate_schema_migration_history(connection)
+            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            rows = connection.execute(
+                "SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            backup_row = connection.execute(
+                """
+                SELECT created_at FROM audit_events
+                WHERE action = 'local_ledger.pre_migration_backup_created'
+                  AND entity_type = 'schema_migration'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        migrations = [self._row_to_dict(row) for row in rows]
+        versions = {int(item["version"]) for item in migrations}
+        return {
+            "status": "current" if user_version == LEDGER_SCHEMA_VERSION else "attention_required",
+            "currentVersion": user_version,
+            "supportedVersion": LEDGER_SCHEMA_VERSION,
+            "historyComplete": versions == set(range(1, LEDGER_SCHEMA_VERSION + 1)),
+            "appliedMigrations": len(migrations),
+            "latestAppliedAt": migrations[-1]["applied_at"] if migrations else None,
+            "preMigrationBackupCreated": backup_row is not None,
+            "lastPreMigrationBackupAt": backup_row["created_at"] if backup_row else None,
+        }
+
+    def _prepare_schema_migration_backup(self) -> Optional[Dict[str, Any]]:
+        if not os.path.isfile(self.path) or os.path.getsize(self.path) == 0:
+            return None
+        state = self._inspect_existing_schema()
+        current_version = int(state["version"])
+        if current_version > LEDGER_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"FAB ledger schema version {current_version} is newer than supported version "
+                f"{LEDGER_SCHEMA_VERSION}; refusing to modify it"
+            )
+        if not state["hasUserTables"] or current_version >= LEDGER_SCHEMA_VERSION:
+            return None
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup_dir = os.path.join(os.path.dirname(self.path), "schema_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.path))[0]
+        backup_filename = (
+            f"{stem}.pre-schema-v{current_version}-to-v{LEDGER_SCHEMA_VERSION}.{timestamp}.sqlite3"
+        )
+        manifest_filename = f"{backup_filename}.json"
+        backup_path = os.path.join(backup_dir, backup_filename)
+        manifest_path = os.path.join(backup_dir, manifest_filename)
+        source: Optional[sqlite3.Connection] = None
+        destination: Optional[sqlite3.Connection] = None
+        try:
+            source = sqlite3.connect(self.path, timeout=30.0)
+            destination = sqlite3.connect(backup_path)
+            source.execute("PRAGMA busy_timeout = 30000")
+            source.backup(destination)
+            integrity = destination.execute("PRAGMA integrity_check").fetchone()
+            if not integrity or str(integrity[0]).lower() != "ok":
+                raise RuntimeError("Pre-migration ledger backup failed SQLite integrity verification")
+            destination.close()
+            destination = None
+            source.close()
+            source = None
+            digest = self._file_sha256(backup_path)
+            manifest = {
+                "schemaVersion": 1,
+                "sourceSchemaVersion": current_version,
+                "targetSchemaVersion": LEDGER_SCHEMA_VERSION,
+                "backupFilename": backup_filename,
+                "sha256": digest,
+                "createdAt": self._now(),
+                "integrityCheck": "ok",
+            }
+            temporary_manifest = f"{manifest_path}.tmp"
+            with open(temporary_manifest, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(manifest, handle, sort_keys=True, indent=2, ensure_ascii=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_manifest, manifest_path)
+            for private_path in (backup_path, manifest_path):
+                try:
+                    os.chmod(private_path, 0o600)
+                except OSError:
+                    pass
+            return {
+                **manifest,
+                "manifestFilename": manifest_filename,
+            }
+        except Exception:
+            for partial_path in (f"{manifest_path}.tmp", manifest_path, backup_path):
+                try:
+                    if os.path.isfile(partial_path):
+                        os.remove(partial_path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            if destination is not None:
+                destination.close()
+            if source is not None:
+                source.close()
+
+    def _inspect_existing_schema(self) -> Dict[str, Any]:
+        connection = sqlite3.connect(self.path, timeout=30.0)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout = 30000")
+            user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            has_user_tables = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                LIMIT 1
+                """
+            ).fetchone() is not None
+            has_history = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone() is not None
+            history_version = 0
+            if has_history:
+                row = connection.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+                history_version = int(row["version"] or 0)
+            return {
+                "version": max(user_version, history_version),
+                "hasUserTables": has_user_tables,
+            }
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError("FAB ledger could not be inspected safely before migration") from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _migration_table_exists(connection: sqlite3.Connection) -> bool:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone() is not None
+
+    def _validate_schema_migration_history(self, connection: sqlite3.Connection) -> None:
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if user_version > LEDGER_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"FAB ledger schema version {user_version} is newer than supported version "
+                f"{LEDGER_SCHEMA_VERSION}"
+            )
+        if not self._migration_table_exists(connection):
+            return
+        rows = connection.execute(
+            "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        versions = {int(row["version"]) for row in rows}
+        expected_versions = set(range(1, user_version + 1))
+        if versions != expected_versions:
+            raise RuntimeError(
+                "FAB ledger schema migration history does not match its declared schema version"
+            )
+        for row in rows:
+            version = int(row["version"])
+            expected = LEDGER_SCHEMA_MIGRATIONS.get(version)
+            if expected is None:
+                raise RuntimeError(f"FAB ledger contains unknown schema migration version {version}")
+            if row["name"] != expected["name"] or row["checksum"] != expected["checksum"]:
+                raise RuntimeError(f"FAB ledger schema migration {version} failed checksum validation")
+
+    def _record_schema_migration(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        applied_at = self._now()
+        for version in range(1, LEDGER_SCHEMA_VERSION + 1):
+            migration = LEDGER_SCHEMA_MIGRATIONS[version]
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO schema_migrations (version, name, checksum, applied_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (version, migration["name"], migration["checksum"], applied_at),
+            )
+        connection.execute(f"PRAGMA user_version = {LEDGER_SCHEMA_VERSION}")
+        self._validate_schema_migration_history(connection)
 
     def acquire_runtime_lease(
         self,
@@ -1233,6 +1459,38 @@ class LocalOperationsLedger:
                 (int(source_workflow_run_id),),
             ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def workflow_run_ids_with_recovery_children(
+        self,
+        source_workflow_run_ids: Sequence[int],
+    ) -> set[int]:
+        bounded_ids = []
+        seen_ids = set()
+        for value in source_workflow_run_ids:
+            workflow_run_id = self._optional_int(value)
+            if workflow_run_id is None or workflow_run_id in seen_ids:
+                continue
+            seen_ids.add(workflow_run_id)
+            bounded_ids.append(workflow_run_id)
+            if len(bounded_ids) >= 500:
+                break
+        if not bounded_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in bounded_ids)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT recovery_source_workflow_run_id
+                FROM workflow_runs
+                WHERE recovery_source_workflow_run_id IN ({placeholders})
+                """,
+                bounded_ids,
+            ).fetchall()
+        return {
+            int(row["recovery_source_workflow_run_id"])
+            for row in rows
+            if row["recovery_source_workflow_run_id"] is not None
+        }
 
     def create_workflow_step(self, payload: Dict[str, Any], preferred_id: Optional[int] = None) -> int:
         workflow_run_id = self._optional_int(
