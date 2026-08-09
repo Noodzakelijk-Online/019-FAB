@@ -18,6 +18,8 @@
 - Built and executed both production containers. Compose passed authenticated API liveness, dashboard HTML, tRPC local-operator authorization, health checks, and non-root execution on configurable loopback ports.
 - Removed the fixed Compose subnet after acceptance exposed a collision with an unrelated Docker network; added narrowly scoped Docker bridge-gateway trust and regression tests.
 - Fixed a production-only bundled-server crash (`Dynamic require of "fs" is not supported`) with an ESM `createRequire` bridge and re-ran container acceptance.
+- Verified implementation commit `c5e42aa` from a separate clean clone: source compilation, Compose parsing, clean status, and 123 focused tests passed.
+- Scanned the staged implementation snapshot for runtime paths and high-confidence credential patterns; none were present.
 
 ## Explicitly not performed
 

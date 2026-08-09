@@ -8,7 +8,8 @@ This report separates local software verification from provider, account, infras
 
 - Working/default branch: `main` / `main`.
 - Starting commit: `8a2b43d`.
-- Delivery commit: recorded by the final Git push and delivery response.
+- Implementation commit: `c5e42aa`.
+- Final evidence commit and remote hash: recorded by the final Git push and delivery response.
 
 ## Results
 
@@ -24,8 +25,8 @@ This report separates local software verification from provider, account, infras
 | Local API/worker/dashboard start | Pass | Production Start/Stop scripts launched Waitress, worker, and built web dashboard. A 26-resource, four-worker profile returned 26 HTTP 200 responses in 2.641 seconds with no SQLite lock failures. |
 | Desktop/mobile browser QA | Partial | In-app Browser DOM and geometry checks passed at desktop and 480x844 mobile: meaningful live content, no framework overlay, no horizontal overflow, and paginated exception/review/delivery queues. Browser screenshot and click dispatch failed inside the Browser runtime despite controls being visible and enabled. |
 | No-excuses search | Pass | No operational `TODO`, `FIXME`, fake-success, mock-integration, or placeholder-credential path remains. Unsupported features are explicitly documented as unavailable or supervised. |
-| Tracked-secret/runtime scan | Pending delivery gate | Final staged-file scan runs immediately before commit. |
-| Fresh-clone verification | Pending delivery gate | Runs after commit before push completion. |
+| Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
+| Fresh-clone verification | Pass | Clean clone of `c5e42aa`: clean status, Python compilation, Compose config, and 123 focused API/autonomy/backup/HAI/support tests passed; one third-party `dateutil` deprecation warning. |
 
 ## Provider state
 

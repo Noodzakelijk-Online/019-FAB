@@ -96,11 +96,11 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 089 Progressive stabilization gates | Implemented | Baseline, focused tests, full verification, browser, hygiene, delivery checkpoints. |
 | 090 No vanity work rule | Implemented | Changes address safety, diagnostics, truthfulness, and operations. |
 | 091 Feature-level definition of done | Implemented | Status definition and acceptance contract in this matrix. |
-| 092 Fresh-clone dry run | Partial | CI covers clean checkout; local post-commit fresh-clone run is a final gate. |
+| 092 Fresh-clone dry run | Implemented | Clean clone of `c5e42aa` passed status, compilation, Compose config, and 123 focused tests. |
 | 093 Manual verification evidence | Partial | Browser evidence is a final gate; live providers remain blocked. |
-| 094 Final no-excuses search | Partial | Final post-build search must be recorded in verification report. |
+| 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, and `git diff --check` passed. |
 | 095 Completion matrix | Implemented | This document includes every phase. |
-| 096 Final verification report | Partial | `FINAL_VERIFICATION_REPORT.md` awaits final results. |
+| 096 Final verification report | Implemented | `FINAL_VERIFICATION_REPORT.md` records local, browser, container, fresh-clone, safety, and provider-boundary results. |
 | 097 Final response requirements | Partial | Can be complete only in the delivery response. |
 | 098 Post-completion maintenance plan | Implemented | Technical debt priorities and operator verification cadence documented. |
 | 099 Roadmap and blocked items | Implemented | Exact provider/deployment/privacy blockers listed in audit and verification docs. |

@@ -9,7 +9,7 @@
 | C4 Focused verification | Complete | Emergency-stop and support-bundle tests plus Python compilation. |
 | C5 Full verification | Complete | 768 backend tests, 153 web tests, type check, build, focused safety tests, live 26-resource profile, both images, and the Compose service acceptance passed. |
 | C6 Browser acceptance | Partial | Desktop/mobile DOM and geometry passed without overflow or overlays. The in-app Browser runtime could not capture screenshots or dispatch clicks despite finding enabled controls. |
-| C7 Source hygiene | Pending final run | Remove temporary PDF extraction and confirm no ignored/runtime data is tracked. |
-| C8 Delivery | Pending final run | Commit, push `main`, and record final commit and remote state. |
+| C7 Source hygiene | Complete | Temporary extraction/build probes removed; staged snapshot has no runtime paths or high-confidence credential patterns. |
+| C8 Delivery | Complete on remote verification | Implementation commit `c5e42aa` passed a clean-clone gate; the final delivery response records the pushed `origin/main` hash. |
 
 On context loss, resume at the first non-complete checkpoint and re-run `git status --short` before editing.
