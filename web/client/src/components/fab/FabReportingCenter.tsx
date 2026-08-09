@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   count,
   exactDateTime,
@@ -39,7 +40,6 @@ type FabReportingCenterProps = {
   complianceResource?: FabResourceState;
   connected: boolean;
   pendingCommand: FabCommandId | null;
-  localApiEndpoint: string;
   onCommand: (commandId: FabCommandId) => void;
 };
 
@@ -50,7 +50,6 @@ export function FabReportingCenter({
   complianceResource,
   connected,
   pendingCommand,
-  localApiEndpoint,
   onCommand,
 }: FabReportingCenterProps) {
   const { copy, dateLocale, status } = useFabLocale();
@@ -172,8 +171,8 @@ export function FabReportingCenter({
                         <td data-label={copy("Status", "Status")}><span className={`fab-status-chip tone-${statusTone(report.status)}`}>{status(report.status)}</span><span>{count(report.rowCount)} {copy("rows", "regels")}, {count(report.blockerCount)} {copy("blockers", "blokkades")}</span></td>
                         <td data-label={copy("Evidence", "Bewijs")}>
                           <div className="fab-artifact-actions">
-                            {report.hasJsonArtifact === true && reportId > 0 && <a href={`${localApiEndpoint}/api/report-runs/${reportId}/artifact?format=json`} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> JSON</a>}
-                            {report.hasCsvArtifact === true && reportId > 0 && <a href={`${localApiEndpoint}/api/report-runs/${reportId}/artifact?format=csv`} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> CSV</a>}
+                            {report.hasJsonArtifact === true && reportId > 0 && <a href={fabOperatorLink(`/api/report-runs/${reportId}/artifact?format=json`)} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> JSON</a>}
+                            {report.hasCsvArtifact === true && reportId > 0 && <a href={fabOperatorLink(`/api/report-runs/${reportId}/artifact?format=csv`)} target="_blank" rel="noreferrer"><Download aria-hidden="true" /> CSV</a>}
                             {report.hasJsonArtifact !== true && report.hasCsvArtifact !== true && <span>{copy("No artifact", "Geen artefact")}</span>}
                           </div>
                           <code title={text(report.jsonSha256 || report.csvSha256, "")}>{shortHash(report.jsonSha256 || report.csvSha256)}</code>
@@ -223,8 +222,8 @@ export function FabReportingCenter({
 
       <div className="fab-panel-footer">
         <div className="fab-reporting-links">
-          <a href={`${localApiEndpoint}/#reports`} target="_blank" rel="noreferrer">{copy("Open full reports", "Open volledige rapporten")} <ArrowUpRight aria-hidden="true" /></a>
-          <a href={`${localApiEndpoint}/#compliance`} target="_blank" rel="noreferrer">{copy("Open compliance evidence", "Open compliancebewijs")} <ArrowUpRight aria-hidden="true" /></a>
+          <a href={fabOperatorLink("/#reports")} target="_blank" rel="noreferrer">{copy("Open full reports", "Open volledige rapporten")} <ArrowUpRight aria-hidden="true" /></a>
+          <a href={fabOperatorLink("/#compliance")} target="_blank" rel="noreferrer">{copy("Open compliance evidence", "Open compliancebewijs")} <ArrowUpRight aria-hidden="true" /></a>
         </div>
         <span>{copy("Reports are provisional local evidence. FAB does not file taxes or submit artifacts externally from this workspace.", "Rapporten zijn voorlopig lokaal bewijs. FAB dient vanuit deze werkruimte geen aangiften of artefacten extern in.")}</span>
       </div>

@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -27,6 +28,101 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    @staticmethod
+    def _operator_session_ticket(token, payload):
+        encoded_payload = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii").rstrip("=")
+        signature = base64.urlsafe_b64encode(
+            hmac.new(token.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256).digest()
+        ).decode("ascii").rstrip("=")
+        return f"{encoded_payload}.{signature}"
+
+    def test_operator_session_handoff_authenticates_once_and_records_bounded_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            token = "test-local-api-token"
+            now = int(time.time())
+            app = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_api_token": token,
+                "fab_local_api_base_url": "https://fab-api.example",
+            })
+            client = app.test_client()
+            ticket = self._operator_session_ticket(token, {
+                "actor": "fab_dashboard:local_operator",
+                "aud": "fab-local-operator-session",
+                "exp": now + 45,
+                "iat": now,
+                "nonce": "fixed_operator_nonce_1234",
+                "next": "/#reports",
+                "v": 1,
+            })
+
+            response = client.get(
+                f"/operator/session/bootstrap?ticket={ticket}",
+                base_url="https://fab-api.example",
+            )
+            authenticated = client.get("/api/live", base_url="https://fab-api.example")
+            replay = client.get(
+                f"/operator/session/bootstrap?ticket={ticket}",
+                base_url="https://fab-api.example",
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/#reports")
+            self.assertIn("Secure", response.headers["Set-Cookie"])
+            self.assertIn("HttpOnly", response.headers["Set-Cookie"])
+            self.assertIn("SameSite=Lax", response.headers["Set-Cookie"])
+            self.assertNotIn(token, response.headers["Set-Cookie"])
+            self.assertEqual(authenticated.status_code, 200)
+            self.assertEqual(replay.status_code, 409)
+
+            audit = LocalOperationsLedger(ledger_path).list_audit_events(limit=1)[0]
+            self.assertEqual(audit["action"], "local_api.operator_session_bootstrapped")
+            self.assertEqual(audit["details"]["actor"], "fab_dashboard:local_operator")
+            self.assertEqual(audit["details"]["targetPath"], "/")
+            self.assertEqual(audit["details"]["externalSubmission"], "not_executed")
+            self.assertNotIn("nonce", str(audit).lower())
+            self.assertNotIn("ticket", str(audit).lower())
+            self.assertNotIn(token, str(audit))
+
+    def test_operator_session_handoff_rejects_expired_tampered_and_unsafe_tickets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token = "test-local-api-token"
+            now = int(time.time())
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_token": token,
+            })
+            client = app.test_client()
+            baseline = {
+                "actor": "fab_dashboard:local_operator",
+                "aud": "fab-local-operator-session",
+                "exp": now + 45,
+                "iat": now,
+                "nonce": "fixed_operator_nonce_9876",
+                "next": "/api/audit?limit=10",
+                "v": 1,
+            }
+            expired = self._operator_session_ticket(token, {
+                **baseline,
+                "exp": now - 1,
+                "iat": now - 45,
+            })
+            unsafe = self._operator_session_ticket(token, {
+                **baseline,
+                "nonce": "different_operator_nonce_1234",
+                "next": "//evil.example",
+            })
+            valid = self._operator_session_ticket(token, baseline)
+            tampered = f"{valid[:-1]}{'A' if valid[-1] != 'A' else 'B'}"
+
+            self.assertEqual(client.get(f"/operator/session/bootstrap?ticket={expired}").status_code, 401)
+            self.assertEqual(client.get(f"/operator/session/bootstrap?ticket={unsafe}").status_code, 401)
+            self.assertEqual(client.get(f"/operator/session/bootstrap?ticket={tampered}").status_code, 401)
+            self.assertEqual(client.get("/api/live").status_code, 401)
+
     def test_health_api_bounds_issue_details_without_hiding_totals(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

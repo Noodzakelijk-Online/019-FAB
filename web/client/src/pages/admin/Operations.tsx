@@ -381,7 +381,6 @@ export default function AdminOperations() {
             pendingCommand={pendingCommand}
             uploading={uploading}
             bankImporting={importBankStatement.isPending}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
             onOpenIntake={() => setIntakeDrawerOpen(true)}
             onOpenBankImport={() => setBankImportOpen(true)}
@@ -395,7 +394,6 @@ export default function AdminOperations() {
               closeReadiness={data?.closeReadiness || {}}
               closeResource={data?.resourceStates.closeReadiness}
               search={search}
-              localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
               onOpenReview={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
             />
             <FabAutomationPanel
@@ -427,7 +425,6 @@ export default function AdminOperations() {
             pagination={reviewPagination}
             resource={data?.resourceStates.reviewQueue}
             search={search}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
             onResolve={resolveReviewItem}
             loadingMore={loadingMoreReviews}
@@ -441,7 +438,6 @@ export default function AdminOperations() {
             activityResource={data?.resourceStates.activity}
             workflowResource={data?.resourceStates.workflows}
             search={search}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
           />
           <FabReportingCenter
             reporting={data?.reporting || { scheduleStatus: {}, reportRuns: [], externalSubmission: null }}
@@ -450,7 +446,6 @@ export default function AdminOperations() {
             complianceResource={data?.resourceStates.compliance}
             connected={connected}
             pendingCommand={pendingCommand}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
           />
           <FabBackupCenter
@@ -459,7 +454,6 @@ export default function AdminOperations() {
             connected={connected}
             pending={createBackup.isPending}
             supportPending={createSupportBundle.isPending}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCreate={() => createBackup.mutate()}
             onCreateSupportBundle={() => createSupportBundle.mutate()}
           />
@@ -467,14 +461,12 @@ export default function AdminOperations() {
             delivery={data?.delivery || { status: {}, summary: {}, workOrders: [], count: null }}
             resource={data?.resourceStates.driveWaveWorkOrders}
             search={search}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
           />
           <FabConnections
             connections={data?.connections || []}
             search={search}
             commandPending={Boolean(pendingCommand) || importBankStatement.isPending}
             resource={data?.resourceStates.settings}
-            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
             onSetupConnection={(connectionId) => {
               if (connectionId === "gmail") setGmailSetupOpen(true);

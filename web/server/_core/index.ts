@@ -13,6 +13,7 @@ import { createLogger } from "../lib/logger";
 import { registerFabOperationsRoutes } from "../fabOperations";
 import { registerFabRuntimeRoute } from "../fabRuntime";
 import { registerFabSourcePreviewRoutes } from "../fabSourcePreview";
+import { registerFabOperatorSessionRoutes } from "../fabOperatorSession";
 import { ENV } from "./env";
 import { createFabSecurityMiddleware } from "./security";
 
@@ -77,6 +78,7 @@ async function startServer() {
   registerOAuthRoutes(app);
   registerFabOperationsRoutes(app, relaxedLimiter);
   registerFabSourcePreviewRoutes(app);
+  registerFabOperatorSessionRoutes(app, relaxedLimiter);
 
   // ── tRPC API with relaxed rate limiting ───────────────────────
   app.use(

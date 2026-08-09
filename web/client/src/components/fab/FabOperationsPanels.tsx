@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import { compactHumanize, count, exactDateTime, matchesSearch, panelState, records, statusTone, text, timeAgo, type FabRecord, type FabResourceState } from "./fabView";
 
 type FabOperationsPanelsProps = {
@@ -17,7 +18,6 @@ type FabOperationsPanelsProps = {
   activityResource?: FabResourceState;
   workflowResource?: FabResourceState;
   search: string;
-  localApiEndpoint: string;
 };
 
 export function FabOperationsPanels({
@@ -28,7 +28,6 @@ export function FabOperationsPanels({
   activityResource,
   workflowResource,
   search,
-  localApiEndpoint,
 }: FabOperationsPanelsProps) {
   const { copy, status, dateLocale } = useFabLocale();
   const visibleActivity = activity.filter((item) => matchesSearch(item, search));
@@ -56,7 +55,7 @@ export function FabOperationsPanels({
             {activityResource?.state !== "live" && activityResource?.state !== "stale" && <FabPanelStateMessage resource={activityResource} title={copy("Audit activity", "Auditactiviteit")} />}
             {activityResource?.state === "live" && !visibleActivity.length && <FabPanelStateMessage resource={{ ...activityResource, state: "empty" }} title={copy("Audit activity", "Auditactiviteit")} emptyTitle={search ? copy("No matching audit events", "Geen overeenkomende auditgebeurtenissen") : copy("No audit events", "Geen auditgebeurtenissen")} emptyMessage={search ? copy("Adjust the active search.", "Pas de zoekopdracht aan.") : copy("The audit service positively returned no events.", "De auditservice heeft bevestigd dat er geen gebeurtenissen zijn.")} />}
           </div>
-          <div className="fab-panel-footer"><a href={`${localApiEndpoint}/#audit`} target="_blank" rel="noreferrer">{copy("View full audit log", "Volledig auditlog bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Showing up to 8 of the latest 12 fetched events.", "Maximaal 8 van de 12 laatst opgehaalde gebeurtenissen worden getoond.")}</span></div>
+          <div className="fab-panel-footer"><a href={fabOperatorLink("/#audit")} target="_blank" rel="noreferrer">{copy("View full audit log", "Volledig auditlog bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Showing up to 8 of the latest 12 fetched events.", "Maximaal 8 van de 12 laatst opgehaalde gebeurtenissen worden getoond.")}</span></div>
         </section>
 
         <section className="fab-section" id="recovery">
@@ -88,7 +87,7 @@ export function FabOperationsPanels({
           <div className="fab-workflow-footnote">
             <Clock3 aria-hidden="true" /> {workflowResource?.state === "live" || workflowResource?.state === "stale" ? (workflows.length ? `${copy("Latest workflow", "Laatste workflow")}: ${status(workflows[0].status)} ${timeAgo(workflows[0].finished_at || workflows[0].updated_at, dateLocale)}` : copy("The workflow service positively returned no runs.", "De workflowservice heeft bevestigd dat er geen runs zijn.")) : copy("Workflow history unavailable.", "Workflowgeschiedenis niet beschikbaar.")}
           </div>
-          <div className="fab-panel-footer"><a href={`${localApiEndpoint}/#workflows`} target="_blank" rel="noreferrer">{copy("View recovery centre", "Herstelcentrum bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Automatic retries remain policy-bound.", "Automatische herpogingen blijven beleidsgebonden.")}</span></div>
+          <div className="fab-panel-footer"><a href={fabOperatorLink("/#workflows")} target="_blank" rel="noreferrer">{copy("View recovery centre", "Herstelcentrum bekijken")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("Automatic retries remain policy-bound.", "Automatische herpogingen blijven beleidsgebonden.")}</span></div>
         </section>
       </div>
 

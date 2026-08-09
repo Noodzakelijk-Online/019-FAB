@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { AlertTriangle, ArrowUpRight, ChevronLeft, ChevronRight, Filter, Search, X } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   asRecord,
   compactHumanize,
@@ -24,7 +25,6 @@ type FabExceptionsPanelProps = {
   closeReadiness: FabRecord;
   closeResource?: FabResourceState;
   search: string;
-  localApiEndpoint: string;
   onOpenReview: () => void;
 };
 
@@ -35,7 +35,7 @@ type AgeFilter = "all" | "24" | "72" | "168";
 const severityRank: Record<string, number> = { high: 3, medium: 2, low: 1 };
 const PAGE_SIZE = 8;
 
-export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, closeReadiness, closeResource, search, localApiEndpoint, onOpenReview }: FabExceptionsPanelProps) {
+export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, closeReadiness, closeResource, search, onOpenReview }: FabExceptionsPanelProps) {
   const { copy, status, dateLocale } = useFabLocale();
   const [severity, setSeverity] = useState<SeverityFilter>("all");
   const [exceptionType, setExceptionType] = useState("all");
@@ -180,13 +180,13 @@ export function FabExceptionsPanel({ exceptions, exceptionSummary, resource, clo
           </div>
         </div>
       )}
-      <FabNextDecisions closeReadiness={closeReadiness} resource={closeResource} localApiEndpoint={localApiEndpoint} />
-      <FabExceptionDrawer exception={selected} localApiEndpoint={localApiEndpoint} onOpenReview={onOpenReview} onClose={() => setSelected(null)} />
+      <FabNextDecisions closeReadiness={closeReadiness} resource={closeResource} />
+      <FabExceptionDrawer exception={selected} onOpenReview={onOpenReview} onClose={() => setSelected(null)} />
     </section>
   );
 }
 
-function FabNextDecisions({ closeReadiness, resource, localApiEndpoint }: { closeReadiness: FabRecord; resource?: FabResourceState; localApiEndpoint: string }) {
+function FabNextDecisions({ closeReadiness, resource }: { closeReadiness: FabRecord; resource?: FabResourceState }) {
   const { copy, status } = useFabLocale();
   const gates = records(closeReadiness.gates).filter((gate) => ["blocked", "attention"].includes(text(gate.status, "")));
   const nextActions = Array.isArray(closeReadiness.nextActions) ? closeReadiness.nextActions.filter((item): item is string => typeof item === "string") : [];
@@ -200,12 +200,12 @@ function FabNextDecisions({ closeReadiness, resource, localApiEndpoint }: { clos
           {!gates.length && !nextActions.length && <FabPanelStateMessage resource={{ ...resource, state: "empty" }} title={copy("Close readiness", "Afsluitgereedheid")} emptyTitle={copy("No close decisions due", "Geen afsluitbeslissingen nodig")} emptyMessage={copy("The live close-readiness service returned no blocked gates or next actions.", "De actuele afsluitservice gaf geen geblokkeerde poorten of volgende acties terug.")} />}
         </>
       )}
-      <div className="fab-panel-footer"><a href={`${localApiEndpoint}/#close-readiness`} target="_blank" rel="noreferrer">{copy("Open close evidence", "Afsluitbewijs openen")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("External submission remains approval-gated.", "Externe indiening blijft goedkeuringsplichtig.")}</span></div>
+      <div className="fab-panel-footer"><a href={fabOperatorLink("/#close-readiness")} target="_blank" rel="noreferrer">{copy("Open close evidence", "Afsluitbewijs openen")} <ArrowUpRight aria-hidden="true" /></a><span>{copy("External submission remains approval-gated.", "Externe indiening blijft goedkeuringsplichtig.")}</span></div>
     </div>
   );
 }
 
-function FabExceptionDrawer({ exception, localApiEndpoint, onOpenReview, onClose }: { exception: FabRecord | null; localApiEndpoint: string; onOpenReview: () => void; onClose: () => void }) {
+function FabExceptionDrawer({ exception, onOpenReview, onClose }: { exception: FabRecord | null; onOpenReview: () => void; onClose: () => void }) {
   const { copy, status } = useFabLocale();
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
@@ -257,9 +257,9 @@ function FabExceptionDrawer({ exception, localApiEndpoint, onOpenReview, onClose
           <div className="fab-detail-actions">
             {actions.map((action, index) => {
               const path = text(action.dashboardPath || action.path, "");
-              return <a key={`${path}-${index}`} className="fab-primary-button" href={`${localApiEndpoint}${path}`} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {text(action.label, compactHumanize(action.id || copy("Open evidence", "Bewijs openen")))}</a>;
+              return <a key={`${path}-${index}`} className="fab-primary-button" href={fabOperatorLink(path)} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {text(action.label, compactHumanize(action.id || copy("Open evidence", "Bewijs openen")))}</a>;
             })}
-            {!actions.length && <a className="fab-primary-button" href={`${localApiEndpoint}/#exceptions`} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {copy("Open advanced evidence", "Geavanceerd bewijs openen")}</a>}
+            {!actions.length && <a className="fab-primary-button" href={fabOperatorLink("/#exceptions")} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {copy("Open advanced evidence", "Geavanceerd bewijs openen")}</a>}
             <button className="fab-secondary-button" onClick={() => { onClose(); onOpenReview(); }}><Search aria-hidden="true" /> {copy("Open review queue", "Controlewachtrij openen")}</button>
           </div>
         </div>

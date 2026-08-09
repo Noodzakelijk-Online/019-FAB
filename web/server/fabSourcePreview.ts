@@ -2,8 +2,8 @@ import { createHash, timingSafeEqual } from "crypto";
 import type { Application, Request, Response } from "express";
 import { ENV } from "./_core/env";
 import { sdk } from "./_core/sdk";
-import { isLoopbackRequest } from "./lib/loopback";
 import { getFabLocalApiBaseUrl } from "./fabLocalGateway";
+import { resolveFabOperatorAccess } from "./fabOperatorAccess";
 
 export const MAX_FAB_SOURCE_PREVIEW_BYTES = 25 * 1024 * 1024;
 
@@ -71,25 +71,8 @@ export function registerFabSourcePreviewRoutes(
       return;
     }
 
-  const localOperatorMode = options.localOperatorMode ?? ENV.fabOperatorLocalMode;
-  const localOperator = localOperatorMode
-    && isLoopbackRequest(
-      req,
-      ENV.fabOperatorTrustedProxyAddresses,
-      ENV.fabOperatorTrustDockerGateway,
-    );
-    let adminOperator = false;
-    if (!localOperator) {
-      try {
-        const authenticateRequest = options.authenticateRequest
-          ?? sdk.authenticateRequest.bind(sdk);
-        const user = await authenticateRequest(req);
-        adminOperator = user?.role === "admin";
-      } catch {
-        adminOperator = false;
-      }
-    }
-    if (!localOperator && !adminOperator) {
+    const access = await resolveFabOperatorAccess(req, options);
+    if (!access.allowed) {
       sourceError(res, 403, "FAB operator access is required");
       return;
     }

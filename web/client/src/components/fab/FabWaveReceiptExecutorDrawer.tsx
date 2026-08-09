@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import { bool, statusTone, text, type FabRecord } from "./fabView";
 
 type FabWaveReceiptExecutorDrawerProps = {
@@ -158,7 +159,7 @@ export function FabWaveReceiptExecutorDrawer({
             <p>{copy("Give the pairing brief to the supervising executor. It registers only identifiers, heartbeat state, and capabilities; Wave cookies, tokens, and passwords are rejected.", "Geef de koppelingsinstructie aan de begeleidende executor. Alleen identificaties, hartslagstatus en mogelijkheden worden geregistreerd; Wave-cookies, tokens en wachtwoorden worden geweigerd.")}</p>
             <div className="fab-detail-actions">
               <button className="fab-primary-button" type="button" onClick={() => { void copyPairingBrief(); }} disabled={!connected}><ClipboardCopy aria-hidden="true" /> {copied ? copy("Pairing brief copied", "Koppelingsinstructie gekopieerd") : copy("Copy pairing brief", "Koppelingsinstructie kopieren")}</button>
-              <a className="fab-secondary-button" href={manifestUrl} target="_blank" rel="noreferrer"><Bot aria-hidden="true" /> {copy("Open HAI manifest", "HAI-manifest openen")}</a>
+              <a className="fab-secondary-button" href={fabOperatorLink(manifestPath)} target="_blank" rel="noreferrer"><Bot aria-hidden="true" /> {copy("Open HAI manifest", "HAI-manifest openen")}</a>
               <a className="fab-secondary-button" href={waveUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" /> {copy("Open Wave", "Wave openen")}</a>
             </div>
           </section>
@@ -176,7 +177,7 @@ export function FabWaveReceiptExecutorDrawer({
 
           <div className="fab-detail-actions">
             <button className="fab-secondary-button" type="button" onClick={() => { void refresh(); }} disabled={refreshing}><RefreshCw className={refreshing ? "is-spinning" : ""} aria-hidden="true" /> {copy("Refresh status", "Status vernieuwen")}</button>
-            <a className="fab-secondary-button" href={statusUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" /> {copy("Inspect contract", "Contract bekijken")}</a>
+            <a className="fab-secondary-button" href={fabOperatorLink("/api/wave/receipt-executor/status")} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" /> {copy("Inspect contract", "Contract bekijken")}</a>
           </div>
 
           <div className="fab-drive-safety-note"><ShieldCheck aria-hidden="true" /><div><strong>{copy("No source file is archived on session status alone", "Geen bronbestand wordt alleen op sessiestatus gearchiveerd")}</strong><span>{copy("FAB still requires the reviewed Wave transaction and a downloaded attachment whose SHA-256 equals the retained source file.", "FAB vereist nog steeds de gecontroleerde Wave-boeking en een gedownloade bijlage waarvan de SHA-256 gelijk is aan het behouden bronbestand.")}</span></div></div>

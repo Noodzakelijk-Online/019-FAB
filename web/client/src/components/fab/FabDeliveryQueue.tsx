@@ -12,6 +12,7 @@ import {
 import { useEffect, useState } from "react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   asRecord,
   count,
@@ -35,10 +36,9 @@ type FabDeliveryQueueProps = {
   };
   resource?: FabResourceState;
   search: string;
-  localApiEndpoint: string;
 };
 
-export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint }: FabDeliveryQueueProps) {
+export function FabDeliveryQueue({ delivery, resource, search }: FabDeliveryQueueProps) {
   const { copy, status: localizedStatus } = useFabLocale();
   const visibleOrders = delivery.workOrders.filter((item) => matchesSearch(item, search));
   const [page, setPage] = useState(1);
@@ -73,7 +73,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
         <div className="fab-section-statuses">
           <FabDataStatus resource={resource} state={state} />
           <span className={`fab-status-chip tone-${statusTone(connectorStatus)}`}>{localizedStatus(connectorStatus)}</span>
-          <a className="fab-icon-button" href={`${localApiEndpoint}/api/drive-wave/work-orders`} target="_blank" rel="noreferrer" aria-label={copy("Open delivery work orders", "Open leveringsopdrachten")} title={copy("Open delivery work orders", "Open leveringsopdrachten")}>
+          <a className="fab-icon-button" href={fabOperatorLink("/api/drive-wave/work-orders")} target="_blank" rel="noreferrer" aria-label={copy("Open delivery work orders", "Open leveringsopdrachten")} title={copy("Open delivery work orders", "Open leveringsopdrachten")}>
             <ArrowUpRight aria-hidden="true" />
           </a>
         </div>
@@ -109,7 +109,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
               ),
             )} {copy("Current state", "Huidige status")}: {humanize(receiptExecutorStatus)}.</span>
           </div>
-          <a className="fab-icon-button" href={`${localApiEndpoint}/api/wave/receipt-executor/status`} target="_blank" rel="noreferrer" aria-label={copy("Open receipt executor status", "Open bewijsexecutorstatus")} title={copy("Open receipt executor status", "Open bewijsexecutorstatus")}>
+          <a className="fab-icon-button" href={fabOperatorLink("/api/wave/receipt-executor/status")} target="_blank" rel="noreferrer" aria-label={copy("Open receipt executor status", "Open bewijsexecutorstatus")} title={copy("Open receipt executor status", "Open bewijsexecutorstatus")}>
             <ArrowUpRight aria-hidden="true" />
           </a>
         </div>
@@ -175,7 +175,7 @@ export function FabDeliveryQueue({ delivery, resource, search, localApiEndpoint 
                       </span>
                     </td>
                     <td>
-                      <a className="fab-icon-button" href={`${localApiEndpoint}/api/drive-wave/documents/${documentId}/work-order`} target="_blank" rel="noreferrer" aria-label={`${copy("Inspect work order", "Bekijk opdracht")} ${documentId}`} title={copy("Inspect work order", "Bekijk opdracht")}>
+                      <a className="fab-icon-button" href={fabOperatorLink(`/api/drive-wave/documents/${documentId}/work-order`)} target="_blank" rel="noreferrer" aria-label={`${copy("Inspect work order", "Bekijk opdracht")} ${documentId}`} title={copy("Inspect work order", "Bekijk opdracht")}>
                         <ArrowUpRight aria-hidden="true" />
                       </a>
                     </td>

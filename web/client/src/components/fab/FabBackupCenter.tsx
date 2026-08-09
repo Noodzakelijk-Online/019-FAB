@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   count,
   exactDateTime,
@@ -34,7 +35,6 @@ type FabBackupCenterProps = {
   connected: boolean;
   pending: boolean;
   supportPending: boolean;
-  localApiEndpoint: string;
   onCreate: () => void;
   onCreateSupportBundle: () => void;
 };
@@ -45,7 +45,6 @@ export function FabBackupCenter({
   connected,
   pending,
   supportPending,
-  localApiEndpoint,
   onCreate,
   onCreateSupportBundle,
 }: FabBackupCenterProps) {
@@ -242,7 +241,7 @@ export function FabBackupCenter({
       )}
 
       <div className="fab-panel-footer">
-        <a href={`${localApiEndpoint}/#backups`} target="_blank" rel="noreferrer">
+        <a href={fabOperatorLink("/#backups")} target="_blank" rel="noreferrer">
           {copy("Open advanced recovery", "Geavanceerd herstel openen")} <ArrowUpRight aria-hidden="true" />
         </a>
         <span>{copy(

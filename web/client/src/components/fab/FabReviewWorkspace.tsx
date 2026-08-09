@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   matchesReviewTriage,
   reviewTriageCounts,
@@ -81,7 +82,6 @@ type FabReviewWorkspaceProps = {
   pagination: FabRecord;
   resource?: FabResourceState;
   search: string;
-  localApiEndpoint: string;
   resolvingReviewId: number | null;
   onResolve: (input: FabReviewResolution) => Promise<void>;
   loadingMore: boolean;
@@ -95,7 +95,6 @@ export function FabReviewWorkspace({
   pagination,
   resource,
   search,
-  localApiEndpoint,
   resolvingReviewId,
   onResolve,
   loadingMore,
@@ -289,7 +288,6 @@ export function FabReviewWorkspace({
         item={selected}
         workItems={workItems}
         categoryOptions={categoryOptions}
-        localApiEndpoint={localApiEndpoint}
         resolvingReviewId={resolvingReviewId}
         onResolve={onResolve}
         onClose={() => setSelectedId("")}
@@ -311,11 +309,10 @@ function reviewFilterLabel(
   return copy("All", "Alles");
 }
 
-function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, resolvingReviewId, onResolve, onClose, defaultApplyToMatchingVendor }: {
+function FabReviewDrawer({ item, workItems, categoryOptions, resolvingReviewId, onResolve, onClose, defaultApplyToMatchingVendor }: {
   item: FabRecord | null;
   workItems: FabRecord[];
   categoryOptions: string[];
-  localApiEndpoint: string;
   resolvingReviewId: number | null;
   onResolve: (input: FabReviewResolution) => Promise<void>;
   onClose: () => void;
@@ -632,7 +629,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
           )}
 
           <div className="fab-review-evidence-links">
-            <a className="fab-secondary-button" href={`${localApiEndpoint}${text(item.reviewPath, "/#review")}`} target="_blank" rel="noreferrer"><FileSearch aria-hidden="true" /> {copy("Open FAB evidence", "Open FAB-bewijs")}</a>
+            <a className="fab-secondary-button" href={fabOperatorLink(text(item.reviewPath, "/#review"))} target="_blank" rel="noreferrer"><FileSearch aria-hidden="true" /> {copy("Open FAB evidence", "Open FAB-bewijs")}</a>
             {text(document.sourceUrl, "") && <a className="fab-secondary-button" href={text(document.sourceUrl)} target="_blank" rel="noreferrer"><ArrowUpRight aria-hidden="true" /> {copy("Open Drive source", "Open Drive-bron")}</a>}
           </div>
 
@@ -794,7 +791,7 @@ function FabReviewDrawer({ item, workItems, categoryOptions, localApiEndpoint, r
                       <span>{text(candidateDocument.vendorName, copy("Vendor missing", "Leverancier ontbreekt"))}</span>
                       <span>{text(candidateDocument.transactionDate, copy("Date missing", "Datum ontbreekt"))} | {formatMoney(candidateDocument.totalAmount, candidateDocument.currency, copy("Amount missing", "Bedrag ontbreekt"))}</span>
                       <DuplicateIdentityEvidence identity={candidateIdentity} copy={copy} />
-                      <a href={`${localApiEndpoint}/documents/${text(duplicateCandidate.candidateDocumentId)}`} target="_blank" rel="noreferrer">{copy("Open comparison evidence", "Open vergelijkingsbewijs")} <ArrowUpRight aria-hidden="true" /></a>
+                      <a href={fabOperatorLink(`/documents/${text(duplicateCandidate.candidateDocumentId)}`)} target="_blank" rel="noreferrer">{copy("Open comparison evidence", "Open vergelijkingsbewijs")} <ArrowUpRight aria-hidden="true" /></a>
                     </div>
                   </div>
 

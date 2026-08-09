@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import {
   bool,
   count,
@@ -70,7 +71,6 @@ type FabControlOverviewProps = {
   pendingCommand: FabCommandId | null;
   uploading: boolean;
   bankImporting: boolean;
-  localApiEndpoint: string;
   onCommand: (commandId: FabCommandId) => void;
   onOpenIntake: () => void;
   onOpenBankImport: () => void;
@@ -99,7 +99,6 @@ export function FabControlOverview({
   pendingCommand,
   uploading,
   bankImporting,
-  localApiEndpoint,
   onCommand,
   onOpenIntake,
   onOpenBankImport,
@@ -251,7 +250,7 @@ export function FabControlOverview({
           <button className="fab-icon-button" onClick={onOpenCommands} aria-label={copy("Open command centre", "Opdrachtencentrum openen")} title={copy("Command centre", "Opdrachtencentrum")}>
             <MoreHorizontal aria-hidden="true" />
           </button>
-          <a className="fab-icon-button" href={localApiEndpoint} target="_blank" rel="noreferrer" aria-label={copy("Open advanced local ledger", "Geavanceerd lokaal grootboek openen")} title={copy("Advanced local ledger", "Geavanceerd lokaal grootboek")}>
+          <a className="fab-icon-button" href={fabOperatorLink("/")} target="_blank" rel="noreferrer" aria-label={copy("Open advanced local ledger", "Geavanceerd lokaal grootboek openen")} title={copy("Advanced local ledger", "Geavanceerd lokaal grootboek")}>
             <ExternalLink aria-hidden="true" />
           </a>
         </div>

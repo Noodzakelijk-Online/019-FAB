@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from flask import Flask, Response, g, jsonify, redirect, render_template_string, request, session, url_for
 from werkzeug.exceptions import BadRequest, HTTPException
@@ -118,6 +118,51 @@ REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
 RULE_RESOLUTION_STATUSES = VENDOR_CATEGORY_RULE_STATUSES - {"learned"}
 API_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,64}$")
+OPERATOR_SESSION_AUDIENCE = "fab-local-operator-session"
+OPERATOR_SESSION_MAX_TTL_SECONDS = 60
+OPERATOR_SESSION_MAX_TICKET_LENGTH = 8_192
+OPERATOR_SESSION_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,96}$")
+OPERATOR_SESSION_ACTOR_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _normalize_operator_session_target(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value or len(value) > 2_048:
+        return None
+    if not value.startswith("/") or value.startswith("//"):
+        return None
+    if "\\" in value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+
+    decoded = value
+    try:
+        for _ in range(2):
+            next_decoded = unquote(decoded)
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
+    except (TypeError, ValueError):
+        return None
+    if not decoded.startswith("/") or decoded.startswith("//") or "\\" in decoded:
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in decoded):
+        return None
+
+    parsed = urlsplit(value)
+    decoded_parsed = urlsplit(decoded)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+        return None
+    decoded_path = decoded_parsed.path.lower()
+    if decoded_path == "/operator/session/bootstrap" or decoded_path.startswith(
+        "/operator/session/bootstrap/"
+    ):
+        return None
+    return value
+
+
+def _decode_operator_session_part(value: str) -> bytes:
+    if not value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("Invalid base64url value")
+    return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
 
 
 def _api_error_code(status_code: int) -> str:
@@ -3984,6 +4029,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     )
     health_cache: OrderedDict[int, tuple[float, Dict[str, Any]]] = OrderedDict()
     health_cache_lock = threading.Lock()
+    consumed_operator_session_nonces: Dict[str, int] = {}
+    operator_session_nonce_lock = threading.Lock()
 
     @app.before_request
     def assign_request_id():
@@ -4028,7 +4075,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 return "Cross-origin mutation rejected", 403
         if not token:
             return None
-        if request.endpoint == "login":
+        if request.endpoint in {"login", "operator_session_bootstrap"}:
             return None
         supplied_authorization = request.headers.get("Authorization", "")
         bearer_authenticated = hmac.compare_digest(
@@ -4088,6 +4135,87 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 return redirect(url_for("dashboard_page"))
             return render_template_string(LOGIN_TEMPLATE, error="Invalid token."), 401
         return render_template_string(LOGIN_TEMPLATE, error=None)
+
+    @app.get("/operator/session/bootstrap")
+    def operator_session_bootstrap():
+        if not token:
+            return "The protected FAB ledger is not configured.", 503
+
+        ticket = request.args.get("ticket", "")
+        if not ticket or len(ticket) > OPERATOR_SESSION_MAX_TICKET_LENGTH:
+            return "Invalid or expired FAB operator session.", 401
+        parts = ticket.split(".")
+        if len(parts) != 2:
+            return "Invalid or expired FAB operator session.", 401
+        encoded_payload, encoded_signature = parts
+
+        try:
+            supplied_signature = _decode_operator_session_part(encoded_signature)
+            expected_signature = hmac.new(
+                token.encode("utf-8"),
+                encoded_payload.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+            if not hmac.compare_digest(supplied_signature, expected_signature):
+                return "Invalid or expired FAB operator session.", 401
+            payload = json.loads(_decode_operator_session_part(encoded_payload).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError, binascii.Error):
+            return "Invalid or expired FAB operator session.", 401
+
+        if not isinstance(payload, dict):
+            return "Invalid or expired FAB operator session.", 401
+        issued_at = payload.get("iat")
+        expires_at = payload.get("exp")
+        nonce = payload.get("nonce")
+        actor = payload.get("actor")
+        next_target = _normalize_operator_session_target(payload.get("next"))
+        now = int(time.time())
+        valid_integer_times = (
+            isinstance(issued_at, int)
+            and not isinstance(issued_at, bool)
+            and isinstance(expires_at, int)
+            and not isinstance(expires_at, bool)
+        )
+        if (
+            payload.get("v") != 1
+            or payload.get("aud") != OPERATOR_SESSION_AUDIENCE
+            or not valid_integer_times
+            or issued_at < now - OPERATOR_SESSION_MAX_TTL_SECONDS
+            or issued_at > now + 5
+            or expires_at <= now
+            or expires_at > issued_at + OPERATOR_SESSION_MAX_TTL_SECONDS
+            or expires_at <= issued_at
+            or not isinstance(nonce, str)
+            or not OPERATOR_SESSION_NONCE_PATTERN.fullmatch(nonce)
+            or not isinstance(actor, str)
+            or not OPERATOR_SESSION_ACTOR_PATTERN.fullmatch(actor)
+            or next_target is None
+        ):
+            return "Invalid or expired FAB operator session.", 401
+
+        with operator_session_nonce_lock:
+            for consumed_nonce, consumed_expiry in list(consumed_operator_session_nonces.items()):
+                if consumed_expiry <= now:
+                    consumed_operator_session_nonces.pop(consumed_nonce, None)
+            if nonce in consumed_operator_session_nonces:
+                return "This FAB operator session has already been used.", 409
+            consumed_operator_session_nonces[nonce] = expires_at
+
+        session.clear()
+        session["fab_local_api_authenticated"] = True
+        session[LOCAL_FORM_SESSION_KEY] = secrets.token_urlsafe(24)
+        ledger.record_audit_event({
+            "action": "local_api.operator_session_bootstrapped",
+            "entityType": "operator_session",
+            "entityId": instance_id,
+            "details": {
+                "actor": actor,
+                "operatorMode": "admin" if ":admin:" in actor else "local",
+                "targetPath": urlsplit(next_target).path,
+                "externalSubmission": "not_executed",
+            },
+        })
+        return redirect(next_target, code=302)
 
     @app.after_request
     def harden_financial_responses(response):

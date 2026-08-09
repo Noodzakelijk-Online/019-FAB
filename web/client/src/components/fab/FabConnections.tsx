@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
+import { fabOperatorLink } from "./fabOperatorLink";
 import { compactHumanize, matchesSearch, panelState, statusTone, text, timeAgo, type FabCommandId, type FabRecord, type FabResourceState } from "./fabView";
 
 const connectorIcons: Record<string, typeof Cloud> = {
@@ -42,12 +43,11 @@ type FabConnectionsProps = {
   search: string;
   commandPending: boolean;
   resource?: FabResourceState;
-  localApiEndpoint: string;
   onCommand: (commandId: FabCommandId, payload?: FabRecord) => void;
   onSetupConnection: (connectionId: string) => void;
 };
 
-export function FabConnections({ connections, search, commandPending, resource, localApiEndpoint, onCommand, onSetupConnection }: FabConnectionsProps) {
+export function FabConnections({ connections, search, commandPending, resource, onCommand, onSetupConnection }: FabConnectionsProps) {
   const { copy, status: localizedStatus, dateLocale } = useFabLocale();
   const visibleConnections = connections.filter((item) => matchesSearch(item, search));
   const syncableConnections = connections.filter((item) => item.canSync === true);
@@ -68,7 +68,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
               <RefreshCw aria-hidden="true" /> {copy("Sync sources", "Bronnen synchroniseren")}
             </button>
           ) : (
-            <a className="fab-secondary-button compact" href={`${localApiEndpoint}/#settings`} target="_blank" rel="noreferrer">
+            <a className="fab-secondary-button compact" href={fabOperatorLink("/#settings")} target="_blank" rel="noreferrer">
               <Settings2 aria-hidden="true" /> {copy("Review setup", "Instellingen bekijken")}
             </a>
           )}
@@ -82,7 +82,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
           const status = text(connection.status, connection.ready ? "ready" : connection.configured ? "attention" : "not_configured");
           const canSync = connection.canSync === true && ["gmail", "google_drive", "google_photos", "freshdesk"].includes(id);
           const ready = connection.ready === true || status === "ready";
-          const setupTarget = connectionSetupTarget(id, localApiEndpoint);
+          const setupTarget = connectionSetupTarget(id);
           const connectorProfile = connection.connectorProfile && typeof connection.connectorProfile === "object"
             ? connection.connectorProfile as FabRecord
             : null;
@@ -119,7 +119,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
   );
 }
 
-function connectionSetupTarget(id: string, endpoint: string): string {
+function connectionSetupTarget(id: string): string {
   const anchor = ["gmail", "google_drive", "google_photos", "freshdesk"].includes(id)
     ? "sources"
     : id === "wave_receipt_executor"
@@ -135,5 +135,5 @@ function connectionSetupTarget(id: string, endpoint: string): string {
             : id === "ngrok_cloud"
               ? "api/cloud/status"
             : "settings";
-  return anchor.startsWith("api/") ? `${endpoint}/${anchor}` : `${endpoint}/#${anchor}`;
+  return fabOperatorLink(anchor.startsWith("api/") ? `/${anchor}` : `/#${anchor}`);
 }
