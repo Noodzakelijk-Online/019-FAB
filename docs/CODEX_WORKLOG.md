@@ -13,6 +13,7 @@
 - Updated the Windows launcher to create and use a project-local Python 3.13 `.venv` without modifying global Python packages.
 - Added web dependency vulnerability and peer-contract checks to CI.
 - Verification passed 780 backend tests plus 38 subtests, 161 web tests across 16 files, TypeScript checking, production build budgets, dependency/peer audits, live Windows startup, HAI read-only command planning, desktop/narrow browser interaction and console checks, and exact-source non-root Compose acceptance.
+- GitHub Actions run `31301840108` passed Linux, all four Windows shards, frontend dependency/peer gates, tests, and build. A separate clean clone of `2f70668` repeated exact identity, Python compile/mutex tests, frozen install, dependency gates, all 161 web tests, type check, production build budgets, and Compose parsing.
 - The isolated ngrok verifier again failed closed with `ERR_NGROK_334`; it did not modify the unrelated endpoint already online.
 - No provider record was changed, no Drive source was archived, and no external submission was performed.
 

@@ -12,7 +12,8 @@ This report separates local software verification from provider, account, infras
 - Reliability hardening commit: `182373f`.
 - Health and deployment efficiency commit: `8b3d1a7`.
 - Control-center hardening commit: `d563d95`.
-- Current production-runtime implementation and final evidence hashes: recorded after the final Git push and remote verification.
+- Production-runtime implementation commit: `2f70668`.
+- Final evidence commit: recorded by the final Git push and delivery response.
 
 ## Results
 
@@ -35,7 +36,8 @@ This report separates local software verification from provider, account, infras
 | Desktop/narrow browser QA | Pass | Connected Chrome screenshots and interaction checks passed at desktop and a 520-pixel narrow viewport: meaningful live content, responsive navigation, no document-level horizontal overflow, contained delivery records, visible per-record inspection controls, and zero browser errors/warnings. The in-app Browser independently confirmed table containment; its screenshot runtime remained unavailable. |
 | No-excuses search | Pass | No operational `TODO`, `FIXME`, fake-success, mock-integration, or placeholder-credential path remains. Unsupported features are explicitly documented as unavailable or supervised. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Fresh-clone verification | Pending final push | A clean clone of the final implementation commit will verify the exact remote hash, clean status, frozen dependency graph, focused backend/web gates, and production build before the evidence commit is recorded. |
+| Remote CI | Pass | GitHub Actions run `31301840108` passed the Linux backend, all four Windows backend shards, frontend dependency audit, peer check, TypeScript check, 161 web tests, and production build. |
+| Fresh-clone verification | Pass | Clean GitHub clone of implementation commit `2f70668`: exact remote hash, clean status, Python compilation, `2 passed` Windows worker-runtime tests, frozen web install, zero-vulnerability audit, peer check, TypeScript check, all 161 web tests, production build budgets, and Compose parsing passed. |
 
 ## Provider state
 

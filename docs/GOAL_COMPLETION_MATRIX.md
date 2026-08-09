@@ -96,7 +96,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 089 Progressive stabilization gates | Implemented | Baseline, focused tests, full verification, browser, hygiene, delivery checkpoints. |
 | 090 No vanity work rule | Implemented | Changes address safety, diagnostics, truthfulness, and operations. |
 | 091 Feature-level definition of done | Implemented | Status definition and acceptance contract in this matrix. |
-| 092 Fresh-clone dry run | Implemented | Clean clone of `c5e42aa` passed status, compilation, Compose config, and 123 focused tests. |
+| 092 Fresh-clone dry run | Implemented | Clean clone of `2f70668` passed exact remote identity, clean status, Python compilation, Windows mutex tests, frozen install, dependency/peer gates, TypeScript, all 161 web tests, production build budgets, and Compose parsing. |
 | 093 Manual verification evidence | Partial | Local browser, Windows, HAI, and container evidence passed; live provider acceptance remains blocked. |
 | 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, and `git diff --check` passed. |
 | 095 Completion matrix | Implemented | This document includes every phase. |
