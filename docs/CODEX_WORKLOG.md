@@ -9,6 +9,7 @@
 - Scoped `FAB_INSTANCE_ROOT` into the API, worker, and dashboard child environments on Windows and restored the caller environment afterward. Compose now supplies the exact instance root plus host-reachable API and operator dashboard URLs.
 - Live Windows acceptance made doctor output and authenticated `/api/settings` agree on `http://127.0.0.1:3005/admin/operations`, retained the ledger dashboard at `http://127.0.0.1:5001/`, kept HAI ready with 14 governed commands, and found all three managed processes alive with zero-byte error logs.
 - Verification passed 18 focused readiness/support/launcher tests, 792 backend tests with four optional-runtime skips, 165 web tests, TypeScript checking, production build budgets, Python compilation, PowerShell parsing, and Compose configuration. No provider record, review decision, source file, or external submission was changed.
+- Implementation commit `588179c` is on `origin/main`; GitHub Actions run `31326518357` passed the frontend, Linux backend, and all four Windows backend jobs.
 
 ## 2026-08-09 - Authoritative review queue pagination
 
