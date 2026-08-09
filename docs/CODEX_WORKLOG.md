@@ -67,6 +67,16 @@
 - The isolated ngrok verifier again failed closed with `ERR_NGROK_334`; it did not modify the unrelated endpoint already online.
 - No provider record was changed, no Drive source was archived, and no external submission was performed.
 
+## 2026-08-09 - Reporting and compliance operator workspace
+
+- Added compact gateway reads for scheduled report runs and compliance assessments, including explicit live, stale, empty, and external-submission states.
+- Projected only operator-safe fields: report periods, row/blocker counts, artifact availability, filing state, finding totals, and evidence checksums. Local artifact paths and private metadata are excluded from the browser contract.
+- Added a Reporting navigation target and a complete operator section with schedule state, report evidence downloads, provisional Dutch compliance findings, retention status, and governed local command entry points.
+- Kept tax filing and external artifact submission explicitly disabled from this workspace; the new controls prepare local evidence and assessments only.
+- Browser QA exposed a clipped report status at common desktop widths. The reporting ledgers now stack before their complete table columns would be constrained, while mobile tables switch to labeled records without horizontal overflow.
+- Live acceptance found two prepared report runs and five compliance assessments with one open finding. TypeScript checking, all 163 web tests, production build budgets, clean-console in-app browser checks, and desktop/mobile Playwright captures passed.
+- No provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Control-center data path and dependency hardening
 
 - Added compact Drive-to-Wave queue projections that preserve exact stage, review, retention, archive, and external-submission decisions while leaving complete evidence available from the default and per-document work-order endpoints.

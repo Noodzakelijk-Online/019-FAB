@@ -15,6 +15,7 @@ import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupD
 import { FabIntakeDrawer } from "@/components/fab/FabIntakeDrawer";
 import { FabOperationsPanels } from "@/components/fab/FabOperationsPanels";
 import { FabOperatorShell } from "@/components/fab/FabOperatorShell";
+import { FabReportingCenter } from "@/components/fab/FabReportingCenter";
 import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/FabReviewWorkspace";
 import { FabWaveReceiptExecutorDrawer } from "@/components/fab/FabWaveReceiptExecutorDrawer";
 import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
@@ -372,6 +373,16 @@ export default function AdminOperations() {
             workflowResource={data?.resourceStates.workflows}
             search={search}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+          />
+          <FabReportingCenter
+            reporting={data?.reporting || { scheduleStatus: {}, reportRuns: [], externalSubmission: null }}
+            compliance={data?.compliance || { summary: {}, assessments: [], statutoryStatus: null, filingStatus: null, externalFiling: null }}
+            reportingResource={data?.resourceStates.reportRuns}
+            complianceResource={data?.resourceStates.compliance}
+            connected={connected}
+            pendingCommand={pendingCommand}
+            localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
+            onCommand={executeCommand}
           />
           <FabBackupCenter
             backups={data?.backups || { backups: [], schedule: {}, verificationMode: null }}

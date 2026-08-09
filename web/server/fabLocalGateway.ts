@@ -91,6 +91,18 @@ export type FabControlCenter = {
     schedule: JsonRecord;
     verificationMode: string | null;
   };
+  reporting: {
+    scheduleStatus: JsonRecord;
+    reportRuns: JsonRecord[];
+    externalSubmission: string | null;
+  };
+  compliance: {
+    summary: JsonRecord;
+    assessments: JsonRecord[];
+    statutoryStatus: string | null;
+    filingStatus: string | null;
+    externalFiling: string | null;
+  };
   notifications: JsonRecord[];
   reconciliation: JsonRecord[];
   activity: JsonRecord[];
@@ -115,6 +127,8 @@ const READ_PATHS = {
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&view=summary",
   health: "/api/health",
   closeReadiness: "/api/close-readiness",
+  reportRuns: "/api/report-runs?limit=5",
+  compliance: "/api/compliance/assessments?limit=5",
   recovery: "/api/workflows/recovery?limit=10",
   liveness: "/api/live",
   waveSetup: "/api/wave/setup",
@@ -498,6 +512,8 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
     workflows: workflowRuns,
     recovery: resources.recovery || {},
     backups: projectBackups(resources.backups),
+    reporting: projectReporting(resources.reportRuns),
+    compliance: projectCompliance(resources.compliance),
     notifications: arrayValue(resources.notifications?.notifications),
     reconciliation: arrayValue(resources.reconciliation?.reconciliationMatches),
     activity: arrayValue(resources.activity?.auditEvents),
@@ -759,6 +775,14 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     workflows: [],
     recovery: {},
     backups: { backups: [], schedule: {}, verificationMode: null },
+    reporting: { scheduleStatus: {}, reportRuns: [], externalSubmission: null },
+    compliance: {
+      summary: {},
+      assessments: [],
+      statutoryStatus: null,
+      filingStatus: null,
+      externalFiling: null,
+    },
     notifications: [],
     reconciliation: [],
     activity: [],
@@ -842,6 +866,111 @@ function projectBackups(value: unknown): FabControlCenter["backups"] {
       "sourceEvidenceStatus",
       "status",
     ]),
+  };
+}
+
+function projectReporting(value: unknown): FabControlCenter["reporting"] {
+  const payload = asRecord(value) || {};
+  const scheduleStatus = asRecord(payload.scheduleStatus) || {};
+  const schedule = selectFields(scheduleStatus.schedule, [
+    "basis",
+    "formats",
+    "frequency",
+    "periodMode",
+    "reportType",
+    "scheduleId",
+    "targetSystem",
+    "timezone",
+  ]);
+  const slot = selectFields(scheduleStatus.slot, [
+    "nextDueAt",
+    "period",
+    "scheduledFor",
+    "scheduleSlot",
+  ]);
+  if (slot.period) slot.period = selectFields(slot.period, ["fromDate", "toDate"]);
+  const existingReportRun = projectReportRun(asRecord(scheduleStatus.existingReportRun) || {});
+  const compactScheduleStatus: JsonRecord = {
+    ...selectFields(scheduleStatus, ["due", "enabled", "externalSubmission", "status"]),
+    schedule,
+    slot,
+  };
+  if (Object.keys(existingReportRun).length) compactScheduleStatus.existingReportRun = existingReportRun;
+  return {
+    scheduleStatus: compactScheduleStatus,
+    reportRuns: arrayValue(payload.reportRuns).map(projectReportRun),
+    externalSubmission: nullableString(payload.externalSubmission),
+  };
+}
+
+function projectReportRun(run: JsonRecord): JsonRecord {
+  if (!Object.keys(run).length) return {};
+  return {
+    id: run.id,
+    scheduleId: run.schedule_id ?? run.scheduleId,
+    scheduleSlot: run.schedule_slot ?? run.scheduleSlot,
+    reportType: run.report_type ?? run.reportType,
+    basis: run.basis,
+    periodFrom: run.period_from ?? run.periodFrom,
+    periodTo: run.period_to ?? run.periodTo,
+    targetSystem: run.target_system ?? run.targetSystem,
+    scheduledFor: run.scheduled_for ?? run.scheduledFor,
+    status: run.status,
+    readiness: run.readiness,
+    rowCount: run.row_count ?? run.rowCount,
+    blockerCount: run.blocker_count ?? run.blockerCount,
+    attemptCount: run.attempt_count ?? run.attemptCount,
+    externalSubmission: run.external_submission ?? run.externalSubmission,
+    jsonSha256: run.json_sha256 ?? run.jsonSha256,
+    jsonBytes: run.json_bytes ?? run.jsonBytes,
+    csvSha256: run.csv_sha256 ?? run.csvSha256,
+    csvBytes: run.csv_bytes ?? run.csvBytes,
+    hasJsonArtifact: Boolean(run.json_path ?? run.jsonPath),
+    hasCsvArtifact: Boolean(run.csv_path ?? run.csvPath),
+    createdAt: run.created_at ?? run.createdAt,
+    updatedAt: run.updated_at ?? run.updatedAt,
+    finishedAt: run.finished_at ?? run.finishedAt,
+    nextRetryAt: run.next_retry_at ?? run.nextRetryAt,
+  };
+}
+
+function projectCompliance(value: unknown): FabControlCenter["compliance"] {
+  const payload = asRecord(value) || {};
+  return {
+    summary: selectFields(payload.summary, [
+      "assessmentCount",
+      "attentionFindings",
+      "blockingFindings",
+      "externalFiling",
+      "filingStatus",
+      "openFindings",
+      "retentionRecords",
+      "statutoryStatus",
+    ]),
+    assessments: arrayValue(payload.assessments).map(projectComplianceAssessment),
+    statutoryStatus: nullableString(payload.statutoryStatus),
+    filingStatus: nullableString(payload.filingStatus),
+    externalFiling: nullableString(payload.externalFiling),
+  };
+}
+
+function projectComplianceAssessment(assessment: JsonRecord): JsonRecord {
+  return {
+    id: assessment.id,
+    periodFrom: assessment.period_from ?? assessment.periodFrom,
+    periodTo: assessment.period_to ?? assessment.periodTo,
+    basis: assessment.basis,
+    targetSystem: assessment.target_system ?? assessment.targetSystem,
+    status: assessment.status,
+    recordCount: assessment.record_count ?? assessment.recordCount,
+    findingCount: assessment.finding_count ?? assessment.findingCount,
+    blockingCount: assessment.blocking_count ?? assessment.blockingCount,
+    attentionCount: assessment.attention_count ?? assessment.attentionCount,
+    sourceChecksum: assessment.source_checksum ?? assessment.sourceChecksum,
+    statutoryStatus: assessment.statutory_status ?? assessment.statutoryStatus,
+    externalFiling: assessment.external_filing ?? assessment.externalFiling,
+    createdAt: assessment.created_at ?? assessment.createdAt,
+    updatedAt: assessment.updated_at ?? assessment.updatedAt,
   };
 }
 

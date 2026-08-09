@@ -161,6 +161,85 @@ describe("FAB local API gateway", () => {
           sourceEvidenceGaps: 0,
         }],
       },
+      "/api/report-runs": {
+        scheduleStatus: {
+          enabled: true,
+          status: "current",
+          due: false,
+          reportDir: "C:\\private\\reports",
+          schedule: {
+            scheduleId: "quarterly-overview",
+            reportType: "overview",
+            basis: "accrual",
+            frequency: "quarterly",
+            periodMode: "previous_quarter",
+            timezone: "Europe/Amsterdam",
+            formats: ["json", "csv"],
+          },
+          slot: {
+            scheduleSlot: "2026-Q2",
+            scheduledFor: "2026-07-01T06:00:00Z",
+            nextDueAt: "2026-10-01T06:00:00Z",
+            period: {
+              fromDate: "2026-04-01",
+              toDate: "2026-06-30",
+              privatePeriodEvidence: "omit-this",
+            },
+          },
+        },
+        reportRuns: [{
+          id: 14,
+          schedule_id: "quarterly-overview",
+          schedule_slot: "2026-Q2",
+          report_type: "overview",
+          basis: "accrual",
+          period_from: "2026-04-01",
+          period_to: "2026-06-30",
+          status: "prepared",
+          readiness: "ready",
+          row_count: 42,
+          blocker_count: 0,
+          json_path: "C:\\private\\reports\\quarterly.json",
+          csv_path: "C:\\private\\reports\\quarterly.csv",
+          json_sha256: "c".repeat(64),
+          csv_sha256: "d".repeat(64),
+          external_submission: "not_executed",
+          metadata: { privateReportMetadata: "omit-this" },
+          finished_at: "2026-07-01T06:00:02Z",
+        }],
+        externalSubmission: "not_executed",
+      },
+      "/api/compliance/assessments": {
+        summary: {
+          assessmentCount: 3,
+          openFindings: 2,
+          blockingFindings: 1,
+          attentionFindings: 1,
+          retentionRecords: 18,
+          statutoryStatus: "provisional",
+          filingStatus: "not_filed",
+          externalFiling: "not_executed",
+        },
+        assessments: [{
+          id: 8,
+          period_from: "2026-04-01",
+          period_to: "2026-06-30",
+          basis: "accrual",
+          status: "blocked",
+          record_count: 42,
+          finding_count: 2,
+          blocking_count: 1,
+          attention_count: 1,
+          source_checksum: "e".repeat(64),
+          statutory_status: "provisional",
+          external_filing: "not_executed",
+          metadata: { privateComplianceEvidence: "omit-this" },
+          created_at: "2026-07-01T06:05:00Z",
+        }],
+        statutoryStatus: "provisional",
+        filingStatus: "not_filed",
+        externalFiling: "not_executed",
+      },
       "/api/notifications": { notifications: [{ id: 4, severity: "medium" }] },
       "/api/reconciliation": { reconciliationMatches: [{ id: 3, status: "needs_review" }] },
       "/api/audit": { auditEvents: [{ id: 2, action: "local_api.source.upsert" }] },
@@ -409,6 +488,41 @@ describe("FAB local API gateway", () => {
         sourceEvidenceFiles: 18,
       })],
     });
+    expect(result.reporting).toMatchObject({
+      scheduleStatus: {
+        enabled: true,
+        status: "current",
+        due: false,
+        schedule: { scheduleId: "quarterly-overview", reportType: "overview" },
+        slot: { scheduleSlot: "2026-Q2", nextDueAt: "2026-10-01T06:00:00Z" },
+      },
+      reportRuns: [expect.objectContaining({
+        id: 14,
+        status: "prepared",
+        rowCount: 42,
+        hasJsonArtifact: true,
+        hasCsvArtifact: true,
+        jsonSha256: "c".repeat(64),
+      })],
+      externalSubmission: "not_executed",
+    });
+    expect(result.compliance).toMatchObject({
+      summary: {
+        assessmentCount: 3,
+        openFindings: 2,
+        blockingFindings: 1,
+        retentionRecords: 18,
+      },
+      assessments: [expect.objectContaining({
+        id: 8,
+        status: "blocked",
+        recordCount: 42,
+        sourceChecksum: "e".repeat(64),
+      })],
+      statutoryStatus: "provisional",
+      filingStatus: "not_filed",
+      externalFiling: "not_executed",
+    });
     expect(result.delivery).toMatchObject({
       count: 1,
       summary: { needsAttachmentVerification: 1 },
@@ -522,6 +636,10 @@ describe("FAB local API gateway", () => {
     expect(serialized).not.toContain("Private latest vendor");
     expect(serialized).not.toContain("Private bank line");
     expect(serialized).not.toContain("C:\\private\\backups");
+    expect(serialized).not.toContain("C:\\private\\reports");
+    expect(serialized).not.toContain("privateReportMetadata");
+    expect(serialized).not.toContain("privatePeriodEvidence");
+    expect(serialized).not.toContain("privateComplianceEvidence");
     expect(serialized).not.toContain("RESTORE FAB LOCAL LEDGER");
   });
 
