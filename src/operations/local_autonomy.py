@@ -61,6 +61,29 @@ AUTONOMY_EXECUTION_ORDER = (
     "prepare_period_close_pack",
 )
 
+# Only local, idempotent data-flow edges belong here. Recovery follows these
+# edges after an exact failed-step retry; it never crosses the external export
+# boundary or schedules unrelated autonomous work.
+AUTONOMY_RECOVERY_DEPENDENCIES = {
+    "sync_connector_sources": ("process_imported",),
+    "rescan_intake": ("process_imported",),
+    "process_imported": (
+        "prepare_wave_drafts",
+        "prepare_master_ledger_projection",
+    ),
+    "refresh_bank_records": (
+        "prepare_wave_drafts",
+        "prepare_master_ledger_projection",
+    ),
+    "prepare_wave_drafts": (
+        "prepare_export_attempts",
+        "prepare_master_ledger_projection",
+    ),
+    "prepare_export_attempts": ("prepare_master_ledger_projection",),
+    "regenerate_stale_export_attempts": ("prepare_master_ledger_projection",),
+    "prepare_master_ledger_projection": ("prepare_period_close_pack",),
+}
+
 
 class AutonomyEmergencyStop(RuntimeError):
     """Raised between workflow steps when the operator stop is active."""
@@ -522,6 +545,8 @@ class LocalAutonomousService:
         workflow_metadata: Optional[Dict[str, Any]] = None,
         step_attempts: Optional[Dict[str, int]] = None,
         recovery_mode: bool = False,
+        recovery_action_id: Optional[str] = None,
+        recovery_continuation_action_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if dry_run:
             return self._run_cycle_once(
@@ -536,6 +561,8 @@ class LocalAutonomousService:
                 workflow_metadata=workflow_metadata,
                 step_attempts=step_attempts,
                 recovery_mode=recovery_mode,
+                recovery_action_id=recovery_action_id,
+                recovery_continuation_action_ids=recovery_continuation_action_ids,
             )
         owner_token = uuid4().hex
         lease = self.ledger.acquire_runtime_lease(
@@ -589,6 +616,8 @@ class LocalAutonomousService:
                 workflow_metadata=workflow_metadata,
                 step_attempts=step_attempts,
                 recovery_mode=recovery_mode,
+                recovery_action_id=recovery_action_id,
+                recovery_continuation_action_ids=recovery_continuation_action_ids,
             )
             return result
         finally:
@@ -623,6 +652,8 @@ class LocalAutonomousService:
         workflow_metadata: Optional[Dict[str, Any]] = None,
         step_attempts: Optional[Dict[str, int]] = None,
         recovery_mode: bool = False,
+        recovery_action_id: Optional[str] = None,
+        recovery_continuation_action_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         limit = _bounded_limit(limit, default=25, maximum=100)
         selected_action_ids = (
@@ -637,6 +668,29 @@ class LocalAutonomousService:
             raise ValueError(
                 "Unsupported autonomous action(s): " + ", ".join(sorted(unknown_action_ids))
             )
+        retry_action_id = str(recovery_action_id or "").strip() or None
+        continuation_action_ids = {
+            str(action_id)
+            for action_id in (recovery_continuation_action_ids or [])
+            if str(action_id).strip()
+        }
+        if recovery_mode:
+            if retry_action_id is None and selected_action_ids and len(selected_action_ids) == 1:
+                retry_action_id = next(iter(selected_action_ids))
+            if retry_action_id is None or selected_action_ids is None:
+                raise ValueError("Recovery mode requires an exact selected retry action")
+            if retry_action_id not in selected_action_ids:
+                raise ValueError("Recovery retry action must be selected")
+            if not continuation_action_ids.issubset(selected_action_ids - {retry_action_id}):
+                raise ValueError("Recovery continuation actions must be selected descendants")
+            if selected_action_ids != {retry_action_id, *continuation_action_ids}:
+                raise ValueError("Recovery cannot select unrelated autonomous actions")
+            if not continuation_action_ids.issubset(
+                _autonomy_recovery_descendants(retry_action_id)
+            ):
+                raise ValueError("Recovery continuation actions must follow the dependency graph")
+        elif retry_action_id is not None or continuation_action_ids:
+            raise ValueError("Recovery actions require recovery mode")
         bank_transactions = self._reconciliation_transactions(bank_transactions, limit)
         plan = self.plan(
             limit=limit,
@@ -645,6 +699,27 @@ class LocalAutonomousService:
             include_wave_sync=include_wave_sync,
             include_connector_sync=include_connector_sync,
         )
+        if recovery_mode:
+            plan_actions = {
+                str(action.get("id")): action
+                for action in plan.get("actions") or []
+                if action.get("id")
+            }
+            unsafe_recovery_actions = [
+                action_id
+                for action_id in selected_action_ids or set()
+                if (
+                    str((plan_actions.get(action_id) or {}).get("risk") or "unknown") != "low"
+                    or str((plan_actions.get(action_id) or {}).get("mode") or "unknown")
+                    not in {"safe_auto", "safe_draft", "read_only"}
+                    or action_id == "execute_approved_exports"
+                )
+            ]
+            if unsafe_recovery_actions:
+                raise ValueError(
+                    "Recovery cannot select unsafe autonomous action(s): "
+                    + ", ".join(sorted(unsafe_recovery_actions))
+                )
         if dry_run:
             return {
                 "success": True,
@@ -677,6 +752,8 @@ class LocalAutonomousService:
                 "status": plan["status"],
                 "runnableActionIds": plan["runnableActionIds"],
                 "selectedActionIds": sorted(selected_action_ids) if selected_action_ids is not None else None,
+                "recoveryActionId": retry_action_id,
+                "recoveryContinuationActionIds": sorted(continuation_action_ids),
                 "externalSubmission": "not_executed",
             }
         }
@@ -717,6 +794,13 @@ class LocalAutonomousService:
                 "canRun": action.get("canRun"),
                 "blockedReason": action.get("blockedReason"),
                 "evidence": _bounded_step_value(action.get("evidence") or {}),
+                "recoveryRole": (
+                    "retry"
+                    if action_id == retry_action_id
+                    else "continuation"
+                    if action_id in continuation_action_ids
+                    else None
+                ),
                 "externalSubmission": "not_executed",
             }
             step_metadata[action_id] = metadata
@@ -837,14 +921,16 @@ class LocalAutonomousService:
             processing_should_run = (
                 self._can_run(plan, "process_imported")
                 or _registered_documents(executed)
-                or (recovery_mode and selected_action_ids == {"process_imported"})
+                or (recovery_mode and retry_action_id == "process_imported")
             )
+            if "process_imported" in continuation_action_ids:
+                processing_should_run = _registered_documents(executed)
             execute_step(
                 "process_imported",
                 processing_should_run,
                 lambda: (
                     self._run_processing_recovery(limit)
-                    if recovery_mode and selected_action_ids == {"process_imported"}
+                    if recovery_mode and retry_action_id == "process_imported"
                     else self._run_processing(limit)
                 ),
             )
@@ -873,6 +959,8 @@ class LocalAutonomousService:
                 or _processed_documents(executed)
                 or _refreshed_bank_records(executed)
             )
+            if "prepare_wave_drafts" in continuation_action_ids:
+                routing_should_run = _processed_documents(executed) or _refreshed_bank_records(executed)
             execute_step(
                 "prepare_wave_drafts",
                 routing_should_run,
@@ -880,6 +968,8 @@ class LocalAutonomousService:
             )
 
             export_attempt_should_run = self._can_run(plan, "prepare_export_attempts") or self._has_prepared_routes()
+            if "prepare_export_attempts" in continuation_action_ids:
+                export_attempt_should_run = _prepared_routing_drafts(executed)
             execute_step(
                 "prepare_export_attempts",
                 export_attempt_should_run,
@@ -898,9 +988,15 @@ class LocalAutonomousService:
                 lambda: self._run_export_execution(limit),
             )
 
+            master_ledger_should_run = (
+                self._can_run(plan, "prepare_master_ledger_projection")
+                or _records_or_exports_changed(executed)
+            )
+            if "prepare_master_ledger_projection" in continuation_action_ids:
+                master_ledger_should_run = _records_or_exports_changed(executed)
             execute_step(
                 "prepare_master_ledger_projection",
-                self._can_run(plan, "prepare_master_ledger_projection") or _records_or_exports_changed(executed),
+                master_ledger_should_run,
                 lambda: self._run_master_ledger_projection(limit),
             )
 
@@ -910,9 +1006,15 @@ class LocalAutonomousService:
                 self._run_wave_plan,
             )
 
+            close_pack_should_run = self._can_run(plan, "prepare_period_close_pack")
+            if "prepare_period_close_pack" in continuation_action_ids:
+                close_pack_should_run = close_pack_should_run and _completed_action(
+                    executed,
+                    "prepare_master_ledger_projection",
+                )
             execute_step(
                 "prepare_period_close_pack",
-                self._can_run(plan, "prepare_period_close_pack"),
+                close_pack_should_run,
                 self._run_period_close_pack,
             )
         except AutonomyEmergencyStop:
@@ -980,6 +1082,8 @@ class LocalAutonomousService:
                     "status": plan["status"],
                     "runnableActionIds": plan["runnableActionIds"],
                     "selectedActionIds": sorted(selected_action_ids) if selected_action_ids is not None else None,
+                    "recoveryActionId": retry_action_id,
+                    "recoveryContinuationActionIds": sorted(continuation_action_ids),
                     "externalSubmission": "not_executed",
                 },
                 "steps": {
@@ -1527,6 +1631,19 @@ def _action(
     }
 
 
+def _autonomy_recovery_descendants(action_id: str) -> set[str]:
+    descendants: set[str] = set()
+    frontier = [str(action_id)]
+    while frontier:
+        parent = frontier.pop(0)
+        for child in AUTONOMY_RECOVERY_DEPENDENCIES.get(parent, ()):
+            if child in descendants:
+                continue
+            descendants.add(child)
+            frontier.append(child)
+    return descendants
+
+
 def _workflow_step_status(result: Dict[str, Any]) -> str:
     result_status = str(result.get("status") or "completed").strip().lower()
     if result_status in {"failed", "error", "partial", "completed_with_errors"}:
@@ -1851,11 +1968,30 @@ def _refreshed_bank_records(executed: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _prepared_routing_drafts(executed: List[Dict[str, Any]]) -> bool:
+    for action in executed:
+        if action.get("id") != "prepare_wave_drafts":
+            continue
+        if int((action.get("summary") or {}).get("draftPrepared") or 0) > 0:
+            return True
+    return False
+
+
+def _completed_action(executed: List[Dict[str, Any]], action_id: str) -> bool:
+    return any(
+        action.get("id") == action_id and action.get("status") == "completed"
+        for action in executed
+    )
+
+
 def _records_or_exports_changed(executed: List[Dict[str, Any]]) -> bool:
     for action in executed:
         action_id = action.get("id")
         summary = action.get("summary") or {}
-        if action_id == "process_imported" and summary.get("updatedRecords", 0) > 0:
+        if action_id == "process_imported" and any(
+            int(summary.get(key) or 0) > 0
+            for key in ("updatedRecords", "processed", "needsReview", "retried")
+        ):
             return True
         if action_id == "refresh_bank_records" and summary.get("updated", 0) > 0:
             return True

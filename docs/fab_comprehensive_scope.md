@@ -258,7 +258,7 @@ The repository now has a locally operational SQLite-backed worker, authenticated
 - Source-complete version 2 recovery packages now cover the operations ledger and every checksum-matching original document, fail closed on evidence gaps, run on a due-aware worker schedule, and expose redacted status plus strict creation in the operator dashboard.
 - Generated report/export artifacts and a sanitized configuration snapshot still need explicit package coverage.
 - Ledger restore has confirmation, integrity checks, pre-restore backup, and audit logging; automated relocation/restoration of source-document bytes into a new storage root still needs a separately approved recovery workflow.
-- Durable step evidence now covers autonomous actions and connector sources. Governed recovery can create a linked attempt for failed read-only connector sources or the exact failed low-risk autonomous step. Automatic scheduling, process-level crash continuation, and dependency-aware resume across multiple steps remain open.
+- Durable step evidence now covers autonomous actions and connector sources. Governed recovery creates linked attempts for failed read-only connector sources or the exact failed low-risk autonomous step. Bounded scheduling, stale-process finalization, and dependency-aware continuation are wired: only source-proven `not_run` descendants in the explicit local data-flow graph are selected, each continuation requires output from its recovered predecessor, and approved exports or other external actions are never replayed. Multi-host distributed execution remains a deployment concern.
 
 ## Recommended Delivery Sequence
 

@@ -1116,10 +1116,13 @@ DASHBOARD_TEMPLATE = """
         <div class="empty">
           <strong>Recovery: {{ run.recovery.status }}</strong>
           <span>{{ run.recovery.nextAction }}</span>
+          {% if run.recovery.selectedStepKeys %}
+          <span class="mono">Safe path: {{ run.recovery.selectedStepKeys | join(" -> ") }}</span>
+          {% endif %}
           <div class="inline-actions">
             {% if run.recovery.canRetry %}
             <form method="post" action="{{ url_for('retry_workflow_form', workflow_run_id=run.id) }}">
-              <button class="secondary" type="submit">Retry safe step</button>
+              <button class="secondary" type="submit">Resume safe workflow</button>
             </form>
             {% endif %}
             {% if run.recovery.supersededByWorkflowRunId %}
@@ -8466,6 +8469,7 @@ def _compact_workflow_recovery(result: Dict[str, Any]) -> Dict[str, Any]:
         "sourceWorkflowRunId": result.get("sourceWorkflowRunId"),
         "recoveryType": result.get("recoveryType") or plan.get("recoveryType"),
         "selectedStepKeys": result.get("selectedStepKeys") or plan.get("selectedStepKeys") or [],
+        "continuationStepKeys": result.get("continuationStepKeys") or plan.get("continuationStepKeys") or [],
         "nextAction": plan.get("nextAction"),
         "externalSubmission": "not_executed",
     }

@@ -328,7 +328,7 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Not run", html)
             self.assertIn(f"/api/workflows/{workflow_run_id}", html)
 
-    def test_workflow_recovery_api_and_dashboard_retry_only_safe_step(self):
+    def test_workflow_recovery_api_and_dashboard_resume_only_safe_steps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")
             os.makedirs(intake_dir)
@@ -377,18 +377,32 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(plan_response.status_code, 200)
             self.assertTrue(plan_response.get_json()["canRetry"])
             self.assertEqual(plan_response.get_json()["retryActionId"], "rescan_intake")
+            self.assertEqual(
+                plan_response.get_json()["continuationStepKeys"],
+                [
+                    "process_imported",
+                    "prepare_wave_drafts",
+                    "prepare_export_attempts",
+                    "prepare_master_ledger_projection",
+                    "prepare_period_close_pack",
+                ],
+            )
             self.assertIn(
                 f"/workflows/{failed['workflowRunId']}/retry",
                 before_html,
             )
-            self.assertIn("Retry safe step", before_html)
+            self.assertIn("Resume safe workflow", before_html)
             self.assertEqual(retry_response.status_code, 200)
             self.assertTrue(retry_payload["success"])
             self.assertTrue(retry_payload["runtimeLease"]["released"])
             self.assertEqual(recovered["trigger_source"], "local_autonomous_recovery")
-            self.assertEqual(len(recovered["steps"]), 1)
+            self.assertEqual(len(recovered["steps"]), 6)
             self.assertEqual(recovered["steps"][0]["attempt"], 2)
             self.assertEqual(recovered["steps"][0]["step_key"], "rescan_intake")
+            self.assertNotIn(
+                "execute_approved_exports",
+                {step["step_key"] for step in recovered["steps"]},
+            )
             self.assertEqual(repeated.status_code, 409)
             self.assertEqual(repeated.get_json()["status"], "superseded")
             self.assertEqual(form_result.status_code, 200)

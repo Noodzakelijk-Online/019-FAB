@@ -35,7 +35,7 @@ const commandGroups: Array<{ label: string; labelNl: string; commands: Array<{ i
     labelNl: "Controle en herstel",
     commands: [
       { id: "run_reconciliation", label: "Run reconciliation", labelNl: "Afstemming uitvoeren", description: "Match bank transactions against document-backed records.", descriptionNl: "Koppel banktransacties aan documentonderbouwde records.", icon: ScanSearch },
-      { id: "run_due_recovery", label: "Run due recovery", labelNl: "Gepland herstel uitvoeren", description: "Retry only failed steps classified as safe and due.", descriptionNl: "Herhaal alleen mislukte stappen die veilig en gepland zijn.", icon: RotateCcw },
+      { id: "run_due_recovery", label: "Run due recovery", labelNl: "Gepland herstel uitvoeren", description: "Retry the failed safe step, then resume only its proven local descendants.", descriptionNl: "Herhaal de veilige mislukte stap en hervat alleen bewezen lokale vervolgstappen.", icon: RotateCcw },
       { id: "refresh_notifications", label: "Refresh notifications", labelNl: "Meldingen vernieuwen", description: "Rebuild local exception and notification signals.", descriptionNl: "Bouw lokale uitzonderings- en meldingssignalen opnieuw op.", icon: BellRing },
     ],
   },

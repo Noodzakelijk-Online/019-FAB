@@ -269,7 +269,9 @@ html.fab-operator-active body {
 .fab-recovery-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
 .fab-recovery-row > div:nth-child(2),
 .fab-recovery-row > div:last-child { display: grid; }
+.fab-recovery-row > div:nth-child(2) { min-width: 0; gap: 2px; }
 .fab-recovery-row > div:last-child { justify-items: end; gap: 3px; }
+.fab-recovery-path { min-width: 0; overflow: hidden; color: var(--fab-green); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .fab-recovery-icon { width: 32px; height: 32px; }
 .fab-recovery-icon svg { width: 14px; height: 14px; }
 .fab-workflow-footnote { display: flex; align-items: center; gap: 7px; padding: 10px 14px; background: #f7f9f8; border-top: 1px solid var(--fab-line); color: var(--fab-muted); font-size: 9px; }
@@ -849,7 +851,7 @@ html.fab-operator-active body {
 .fab-hai-note { flex: 0 0 auto; }
 
 .fab-activity-row,
-.fab-recovery-row { min-height: 58px; }
+.fab-recovery-row { min-height: 68px; }
 .fab-connection-row { min-height: 74px; }
 .fab-connection-row > .fab-icon-button,
 .fab-connection-static { width: 44px; height: 44px; }

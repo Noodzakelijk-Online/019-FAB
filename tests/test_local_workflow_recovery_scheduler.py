@@ -3,7 +3,9 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
+from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_connector_intake import (
     CONNECTOR_INTAKE_LEASE_NAME,
     LocalConnectorIntakeService,
@@ -113,6 +115,95 @@ class TestLocalWorkflowRecoveryScheduler(unittest.TestCase):
             self.assertEqual(plan["statusCounts"]["deferred"], 1)
             self.assertEqual(plan["connectorSourcesHeldBack"], ["gmail"])
             self.assertGreater(plan["candidates"][0]["delaySeconds"], 0)
+
+    def test_scheduler_resumes_dependency_safe_autonomy_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "scheduled-recovery-document",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "failed",
+            })
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "local_autonomous_cycle",
+            })
+            for step_order, (step_key, status, mode) in enumerate((
+                ("process_imported", "failed", "safe_auto"),
+                ("prepare_wave_drafts", "not_run", "safe_draft"),
+                ("prepare_export_attempts", "not_run", "safe_auto"),
+            ), start=1):
+                metadata = {"risk": "low", "mode": mode}
+                if status == "not_run":
+                    metadata.update({
+                        "reason": "cycle_aborted_after_step_failure",
+                        "failedAfterStep": "process_imported",
+                    })
+                ledger.create_workflow_step({
+                    "workflowRunId": workflow_run_id,
+                    "stepKey": step_key,
+                    "stage": "test",
+                    "status": status,
+                    "attempt": 1,
+                    "stepOrder": step_order,
+                    "metadata": metadata,
+                })
+            scheduler = LocalWorkflowRecoveryScheduler(ledger, {
+                "fab_autonomy_ignore_health_blocks": True,
+                "fab_workflow_recovery_base_delay_seconds": 0,
+            })
+
+            with (
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_processing_recovery",
+                    return_value={
+                        "id": "process_imported",
+                        "status": "completed",
+                        "summary": {"processed": 1, "failed": 0},
+                    },
+                ),
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_routing",
+                    return_value={
+                        "id": "prepare_wave_drafts",
+                        "status": "completed",
+                        "summary": {"draftPrepared": 1},
+                    },
+                ),
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_export_attempt_preparation",
+                    return_value={
+                        "id": "prepare_export_attempts",
+                        "status": "completed",
+                        "summary": {"prepared": 1},
+                    },
+                ),
+            ):
+                plan = scheduler.plan()
+                result = scheduler.run_due(actor="test")
+
+            recovery_result = result["recoveries"][0]["result"]
+            recovered = ledger.get_workflow_run_with_steps(recovery_result["workflowRunId"])
+
+            self.assertEqual(plan["dueCount"], 1)
+            self.assertEqual(
+                plan["candidates"][0]["selectedStepKeys"],
+                ["process_imported", "prepare_wave_drafts", "prepare_export_attempts"],
+            )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["succeeded"], 1)
+            self.assertEqual(
+                [step["status"] for step in recovered["steps"]],
+                ["completed", "completed", "completed"],
+            )
+            self.assertNotIn(
+                "execute_approved_exports",
+                {step["step_key"] for step in recovered["steps"]},
+            )
 
     def test_retry_depth_cap_stops_an_unbounded_failure_loop(self):
         with tempfile.TemporaryDirectory() as temp_dir:

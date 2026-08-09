@@ -1,5 +1,16 @@
 # Codex Worklog
 
+## 2026-08-09 - Dependency-safe autonomous workflow continuation
+
+- Replaced failed-step-only autonomy recovery with an explicit local dependency graph. A retry can now continue only through descendants that were recorded as not run because the source cycle aborted after that exact failed step.
+- Added independent executor validation for the exact retry action, selected descendants, current low-risk policy, safe local mode, and the permanent exclusion of `execute_approved_exports`.
+- Bound every continuation to output created by the current recovery. Existing unrelated documents, routing drafts, export attempts, or close work cannot make a continuation run.
+- Persisted retry and continuation roles, dependency edges, exact attempts, and source-run linkage in the workflow ledger. A failed continuation stops the path, leaves later steps not run, and becomes the next exact recovery point instead of reporting false completion.
+- Exposed the complete safe path in the API dashboard and React operator queue, with responsive ellipsis behavior and a 68-pixel stable row height.
+- Verification passed 777 backend tests with three optional-runtime skips, 163 dashboard tests, TypeScript checking, production build budgets, dependency and peer audits, Windows API/dashboard/worker/HAI acceptance, and clean desktop/narrow in-app Browser geometry and console checks.
+- Exact-source Compose acceptance passed with healthy non-root API, worker, and web services, matching API/dashboard instance identities, HAI ready with 14 commands, and no fatal log matches. The isolated containers and volumes were removed afterward.
+- No recovery was executed against the live ledger, no provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Authoritative worker and placeholder retirement
 
 - Removed the opt-in checkpoint controller so connector intake, local autonomy, reporting, compliance, export handling, and verified archival have one operations-ledger owner. A stale `worker_run_legacy_workflow=true` setting now fails startup with a clear migration error.

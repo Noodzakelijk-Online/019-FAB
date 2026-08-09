@@ -7,8 +7,8 @@
 | C2 Critical safety gaps | Complete | Persistent emergency stop and sanitized support bundle implemented and tested. |
 | C3 Product truthfulness | Complete | Unsupported public claims and invented testimonials removed in English and Dutch. |
 | C4 Focused verification | Complete | Emergency-stop and support-bundle tests plus Python compilation. |
-| C5 Full verification | Complete | 771 backend tests passed with 3 optional-runtime skips; 163 web tests, type check, build budgets, dependency gates, PowerShell parsing, and Compose configuration passed. Live Windows/HAI acceptance is recorded by the final release evidence. |
-| C6 Browser acceptance | Complete for local release | Current-source in-app Browser desktop and 480-pixel-effective responsive checks passed with no horizontal overflow or console warnings/errors. Connections and a complete document Review action were exercised. Broad cross-browser certification remains external. |
+| C5 Full verification | Complete | 777 backend tests passed with 3 optional-runtime skips; 163 web tests, type check, build budgets, dependency gates, PowerShell parsing, and Compose configuration passed. Dependency-safe recovery, exact continuation failure, scheduler, output-bound, and direct-executor misuse cases are included. Live Windows/HAI acceptance is recorded by the final release evidence. |
+| C6 Browser acceptance | Complete for local release | Current-source in-app Browser desktop and narrow responsive checks passed with no horizontal overflow or console warnings/errors. The live recovery candidate exposed its exact safe path without clipping. Connections and a complete document Review action were exercised in the broader release. Broad cross-browser certification remains external. |
 | C7 Source hygiene | Complete | Temporary extraction/build probes removed; staged snapshot has no runtime paths or high-confidence credential patterns. |
 | C8 Delivery | Complete | Implementation `e58e1b6` is on `origin/main`; GitHub Actions run `31316715894` passed the frontend, Linux backend, and all four Windows backend jobs. The documentation-only evidence commit is recorded by the delivery response. |
 

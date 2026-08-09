@@ -66,13 +66,22 @@ export function FabOperationsPanels({
           </div>
           <div className="fab-recovery-list">
             {recoveryResource?.state === "stale" && <FabPanelStateMessage resource={recoveryResource} title={copy("Recovery queue", "Herstelwachtrij")} />}
-            {(recoveryResource?.state === "live" || recoveryResource?.state === "stale") && candidates.slice(0, 6).map((candidate) => (
-              <div className="fab-recovery-row" key={text(candidate.workflowRunId)}>
-                <div className={`fab-recovery-icon tone-${statusTone(candidate.status)}`}><RotateCcw aria-hidden="true" /></div>
-                <div><strong>Workflow #{text(candidate.workflowRunId)}</strong><span>{compactHumanize(candidate.triggerSource)} - retry {count(candidate.retryDepth)}/{count(candidate.maxRetries)}</span></div>
-                <div><span className={`fab-status-chip tone-${statusTone(candidate.status)}`}>{status(candidate.status)}</span><small>{exactDateTime(candidate.eligibleAt, dateLocale)}</small></div>
-              </div>
-            ))}
+            {(recoveryResource?.state === "live" || recoveryResource?.state === "stale") && candidates.slice(0, 6).map((candidate) => {
+              const recoveryPath = stringList(candidate.selectedStepKeys)
+                .map((step) => compactHumanize(step))
+                .join(" -> ");
+              return (
+                <div className="fab-recovery-row" key={text(candidate.workflowRunId)}>
+                  <div className={`fab-recovery-icon tone-${statusTone(candidate.status)}`}><RotateCcw aria-hidden="true" /></div>
+                  <div>
+                    <strong>Workflow #{text(candidate.workflowRunId)}</strong>
+                    <span>{compactHumanize(candidate.triggerSource)} - retry {count(candidate.retryDepth)}/{count(candidate.maxRetries)}</span>
+                    {recoveryPath && <small className="fab-recovery-path" title={recoveryPath}>{copy("Safe path", "Veilig pad")}: {recoveryPath}</small>}
+                  </div>
+                  <div><span className={`fab-status-chip tone-${statusTone(candidate.status)}`}>{status(candidate.status)}</span><small>{exactDateTime(candidate.eligibleAt, dateLocale)}</small></div>
+                </div>
+              );
+            })}
             {recoveryResource?.state !== "live" && recoveryResource?.state !== "stale" && <FabPanelStateMessage resource={recoveryResource} title={copy("Recovery queue", "Herstelwachtrij")} />}
             {recoveryResource?.state === "live" && !candidates.length && <FabPanelStateMessage resource={{ ...recoveryResource, state: "empty" }} title={copy("Recovery queue", "Herstelwachtrij")} emptyTitle={copy("No recovery work due", "Geen herstelwerk gepland")} emptyMessage={`${count(recovery.candidateCount)} ${copy("candidate workflows are being monitored.", "kandidaatworkflows worden bewaakt.")}`} />}
           </div>
@@ -89,4 +98,10 @@ export function FabOperationsPanels({
       </section>
     </>
   );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }

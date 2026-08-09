@@ -52,6 +52,23 @@ class TestLocalWorkflowRecovery(unittest.TestCase):
                     dry_run=True,
                 )
 
+            with self.assertRaisesRegex(ValueError, "dependency graph"):
+                service.run_cycle(
+                    allowed_action_ids=["rescan_intake", "run_reconciliation"],
+                    recovery_mode=True,
+                    recovery_action_id="rescan_intake",
+                    recovery_continuation_action_ids=["run_reconciliation"],
+                    dry_run=True,
+                )
+
+            with self.assertRaisesRegex(ValueError, "unsafe autonomous action"):
+                service.run_cycle(
+                    allowed_action_ids=["execute_approved_exports"],
+                    recovery_mode=True,
+                    recovery_action_id="execute_approved_exports",
+                    dry_run=True,
+                )
+
     def test_connector_recovery_retries_only_failed_source_as_linked_attempt(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -134,7 +151,7 @@ class TestLocalWorkflowRecovery(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual([step["step_key"] for step in recovered["steps"]], ["source:gmail"])
 
-    def test_autonomy_recovery_runs_only_failed_low_risk_step(self):
+    def test_autonomy_recovery_resumes_only_dependency_safe_not_run_steps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")
             os.makedirs(intake_dir)
@@ -161,20 +178,221 @@ class TestLocalWorkflowRecovery(unittest.TestCase):
             recovered = ledger.get_workflow_run_with_steps(result["workflowRunId"])
 
             self.assertEqual(plan["retryActionId"], "rescan_intake")
+            self.assertEqual(plan["strategy"], "dependency_safe_resume")
+            self.assertEqual(plan["continuationStepKeys"], [
+                "process_imported",
+                "prepare_wave_drafts",
+                "prepare_export_attempts",
+                "prepare_master_ledger_projection",
+                "prepare_period_close_pack",
+            ])
             self.assertTrue(result["success"])
             self.assertEqual(recovered["trigger_source"], "local_autonomous_recovery")
-            self.assertEqual(len(recovered["steps"]), 1)
+            self.assertEqual(len(recovered["steps"]), 6)
             self.assertEqual(recovered["steps"][0]["step_key"], "rescan_intake")
             self.assertEqual(recovered["steps"][0]["status"], "completed")
             self.assertEqual(recovered["steps"][0]["attempt"], 2)
+            self.assertEqual(recovered["steps"][0]["metadata"]["recoveryRole"], "retry")
+            self.assertTrue(all(step["attempt"] == 1 for step in recovered["steps"][1:]))
+            self.assertTrue(all(step["status"] == "skipped" for step in recovered["steps"][1:]))
+            self.assertTrue(all(
+                step["metadata"]["recoveryRole"] == "continuation"
+                for step in recovered["steps"][1:]
+            ))
             self.assertEqual(
                 recovered["metadata"]["plan"]["selectedActionIds"],
-                ["rescan_intake"],
+                sorted(plan["selectedStepKeys"]),
             )
             self.assertNotIn(
                 "execute_approved_exports",
                 {step["step_key"] for step in recovered["steps"]},
             )
+
+    def test_autonomy_recovery_continues_output_bound_local_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "failed-recovery-document",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "failed",
+            })
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "local_autonomous_cycle",
+            })
+            steps = [
+                ("process_imported", "failed", "safe_auto"),
+                ("prepare_wave_drafts", "not_run", "safe_draft"),
+                ("prepare_export_attempts", "not_run", "safe_auto"),
+                ("execute_approved_exports", "not_run", "safe_auto"),
+                ("prepare_master_ledger_projection", "not_run", "read_only"),
+                ("prepare_period_close_pack", "not_run", "read_only"),
+            ]
+            for step_order, (step_key, status, mode) in enumerate(steps, start=1):
+                metadata = {
+                    "risk": "high" if step_key == "execute_approved_exports" else "low",
+                    "mode": mode,
+                }
+                if status == "not_run":
+                    metadata.update({
+                        "reason": "cycle_aborted_after_step_failure",
+                        "failedAfterStep": "process_imported",
+                    })
+                ledger.create_workflow_step({
+                    "workflowRunId": workflow_run_id,
+                    "stepKey": step_key,
+                    "stage": "test",
+                    "status": status,
+                    "attempt": 1,
+                    "stepOrder": step_order,
+                    "metadata": metadata,
+                })
+            service = LocalWorkflowRecoveryService(
+                ledger,
+                {"fab_autonomy_ignore_health_blocks": True},
+            )
+
+            with (
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_processing_recovery",
+                    return_value={
+                        "id": "process_imported",
+                        "status": "completed",
+                        "summary": {"processed": 1, "updatedRecords": 1, "failed": 0},
+                    },
+                ) as process,
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_routing",
+                    return_value={
+                        "id": "prepare_wave_drafts",
+                        "status": "completed",
+                        "summary": {"draftPrepared": 1},
+                    },
+                ) as route,
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_export_attempt_preparation",
+                    return_value={
+                        "id": "prepare_export_attempts",
+                        "status": "completed",
+                        "summary": {"prepared": 1},
+                    },
+                ) as prepare_export,
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_master_ledger_projection",
+                    return_value={
+                        "id": "prepare_master_ledger_projection",
+                        "status": "completed",
+                        "summary": {},
+                    },
+                ) as project,
+            ):
+                plan = service.plan(workflow_run_id)
+                result = service.retry(workflow_run_id, actor="test")
+
+            recovered = ledger.get_workflow_run_with_steps(result["workflowRunId"])
+            recovered_keys = [step["step_key"] for step in recovered["steps"]]
+            executed_keys = [action["id"] for action in result["execution"]["executedActions"]]
+
+            self.assertEqual(plan["selectedStepKeys"], [
+                "process_imported",
+                "prepare_wave_drafts",
+                "prepare_export_attempts",
+                "prepare_master_ledger_projection",
+                "prepare_period_close_pack",
+            ])
+            self.assertNotIn("execute_approved_exports", plan["selectedStepKeys"])
+            self.assertNotIn("execute_approved_exports", recovered_keys)
+            self.assertEqual(executed_keys, [
+                "process_imported",
+                "prepare_wave_drafts",
+                "prepare_export_attempts",
+                "prepare_master_ledger_projection",
+            ])
+            self.assertTrue(result["success"])
+            self.assertEqual(recovered["steps"][0]["attempt"], 2)
+            self.assertTrue(all(step["attempt"] == 1 for step in recovered["steps"][1:]))
+            process.assert_called_once()
+            route.assert_called_once()
+            prepare_export.assert_called_once()
+            project.assert_called_once()
+
+    def test_autonomy_recovery_stops_after_continuation_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "failed-continuation-document",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "failed",
+            })
+            workflow_run_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "local_autonomous_cycle",
+            })
+            for step_order, (step_key, status, mode) in enumerate((
+                ("process_imported", "failed", "safe_auto"),
+                ("prepare_wave_drafts", "not_run", "safe_draft"),
+                ("prepare_export_attempts", "not_run", "safe_auto"),
+                ("prepare_master_ledger_projection", "not_run", "read_only"),
+            ), start=1):
+                metadata = {"risk": "low", "mode": mode}
+                if status == "not_run":
+                    metadata.update({
+                        "reason": "cycle_aborted_after_step_failure",
+                        "failedAfterStep": "process_imported",
+                    })
+                ledger.create_workflow_step({
+                    "workflowRunId": workflow_run_id,
+                    "stepKey": step_key,
+                    "stage": "test",
+                    "status": status,
+                    "attempt": 1,
+                    "stepOrder": step_order,
+                    "metadata": metadata,
+                })
+            service = LocalWorkflowRecoveryService(
+                ledger,
+                {"fab_autonomy_ignore_health_blocks": True},
+            )
+
+            with (
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_processing_recovery",
+                    return_value={
+                        "id": "process_imported",
+                        "status": "completed",
+                        "summary": {"processed": 1, "failed": 0},
+                    },
+                ),
+                patch.object(
+                    LocalAutonomousService,
+                    "_run_routing",
+                    side_effect=RuntimeError("routing continuation failed"),
+                ),
+            ):
+                result = service.retry(workflow_run_id, actor="test")
+
+            recovered = ledger.get_workflow_run_with_steps(result["workflowRunId"])
+            statuses = {step["step_key"]: step["status"] for step in recovered["steps"]}
+            next_plan = service.plan(result["workflowRunId"])
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(statuses["process_imported"], "completed")
+            self.assertEqual(statuses["prepare_wave_drafts"], "failed")
+            self.assertEqual(statuses["prepare_export_attempts"], "not_run")
+            self.assertEqual(statuses["prepare_master_ledger_projection"], "not_run")
+            self.assertEqual(next_plan["retryActionId"], "prepare_wave_drafts")
+            self.assertEqual(next_plan["continuationStepKeys"], [
+                "prepare_export_attempts",
+                "prepare_master_ledger_projection",
+            ])
 
     def test_high_risk_autonomy_step_requires_action_specific_approval(self):
         with tempfile.TemporaryDirectory() as temp_dir:

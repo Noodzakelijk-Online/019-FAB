@@ -6,6 +6,7 @@ from uuid import uuid4
 from src.operations.local_autonomy import (
     AUTONOMY_EXECUTION_ORDER,
     AUTONOMY_LEASE_NAME,
+    AUTONOMY_RECOVERY_DEPENDENCIES,
     LocalAutonomousService,
 )
 from src.operations.local_connector_intake import (
@@ -119,6 +120,7 @@ class LocalWorkflowRecoveryService:
                         "actor": actor,
                         "recoveryType": recovery_plan.get("recoveryType"),
                         "selectedStepKeys": recovery_plan.get("selectedStepKeys") or [],
+                        "continuationStepKeys": recovery_plan.get("continuationStepKeys") or [],
                         "nextAttempt": recovery_plan.get("nextAttempt"),
                         "externalSubmission": "not_executed",
                     },
@@ -139,6 +141,7 @@ class LocalWorkflowRecoveryService:
                         "sourceWorkflowRunId": int(workflow_run_id),
                         "recoveryType": recovery_plan.get("recoveryType"),
                         "selectedStepKeys": recovery_plan.get("selectedStepKeys") or [],
+                        "continuationStepKeys": recovery_plan.get("continuationStepKeys") or [],
                         "externalSubmission": "not_executed",
                     },
                 })
@@ -257,23 +260,60 @@ class LocalWorkflowRecoveryService:
 
         autonomy = self._autonomy_service()
         current_plan = autonomy.plan(include_wave_plan=True, include_wave_sync=True)
+        current_actions = {
+            str(action.get("id")): action
+            for action in current_plan.get("actions") or []
+            if action.get("id")
+        }
         current_action = next(
             (action for action in current_plan.get("actions") or [] if action.get("id") == action_id),
             {},
         )
+        current_risk = str(current_action.get("risk") or "unknown")
+        current_mode = str(current_action.get("mode") or "unknown")
+        if current_risk != "low" or current_mode not in SAFE_AUTONOMY_MODES:
+            return {
+                **self._base_plan(workflow_run),
+                "status": "approval_required",
+                "canRetry": False,
+                "recoveryType": "local_autonomy",
+                "retryActionId": action_id,
+                "selectedStepKeys": [action_id],
+                "excludedActions": [{
+                    "id": action_id,
+                    "risk": current_risk,
+                    "mode": current_mode,
+                    "reason": "The current autonomy policy no longer classifies this step as low risk.",
+                }],
+                "nextAction": "Open the original evidence and use the action-specific approval workflow.",
+            }
         can_run = bool(current_action.get("canRun"))
         if action_id == "process_imported":
             can_run = can_run or bool(self.ledger.list_documents(status="failed", limit=1))
         attempt = max(int(failed_step.get("attempt") or 1) + 1, 2)
+        continuation_steps, dependency_edges, excluded_continuations = self._autonomy_continuation_steps(
+            workflow_run,
+            failed_step,
+            current_actions,
+        )
+        continuation_keys = [str(step["step_key"]) for step in continuation_steps]
+        selected_step_keys = [action_id, *continuation_keys]
+        step_attempts = {action_id: attempt}
+        step_attempts.update({
+            str(step["step_key"]): max(1, int(step.get("attempt") or 1))
+            for step in continuation_steps
+        })
         return {
             **self._base_plan(workflow_run),
             "status": "ready" if can_run else "waiting_for_precondition",
             "canRetry": can_run,
             "recoveryType": "local_autonomy",
-            "strategy": "failed_step_only",
+            "strategy": "dependency_safe_resume",
             "retryActionId": action_id,
-            "selectedStepKeys": [action_id],
-            "stepAttempts": {action_id: attempt},
+            "continuationStepKeys": continuation_keys,
+            "selectedStepKeys": selected_step_keys,
+            "dependencyEdges": dependency_edges,
+            "stepAttempts": step_attempts,
             "nextAttempt": attempt,
             "currentAction": {
                 "id": action_id,
@@ -287,14 +327,85 @@ class LocalWorkflowRecoveryService:
                     "id": "execute_approved_exports",
                     "risk": "high",
                     "reason": "External execution is never replayed by workflow recovery.",
-                }
+                },
+                *excluded_continuations,
             ],
             "nextAction": (
-                f"Retry autonomous step {action_id} without running downstream actions."
+                (
+                    f"Retry {action_id}, then resume {len(continuation_keys)} dependency-safe local step(s)."
+                    if continuation_keys
+                    else f"Retry autonomous step {action_id}; no dependency-safe continuation is pending."
+                )
                 if can_run
                 else current_action.get("blockedReason") or "Resolve the failed step precondition before retrying."
             ),
         }
+
+    def _autonomy_continuation_steps(
+        self,
+        workflow_run: Dict[str, Any],
+        failed_step: Dict[str, Any],
+        current_actions: Dict[str, Dict[str, Any]],
+    ) -> tuple[list[Dict[str, Any]], list[Dict[str, str]], list[Dict[str, str]]]:
+        failed_action_id = str(failed_step.get("step_key") or "")
+        source_steps = {
+            str(step.get("step_key")): step
+            for step in workflow_run.get("steps") or []
+            if step.get("step_key") in AUTONOMY_EXECUTION_ORDER
+        }
+        selected = {failed_action_id}
+        frontier = [failed_action_id]
+        edges: list[Dict[str, str]] = []
+        excluded: list[Dict[str, str]] = []
+        while frontier:
+            parent = frontier.pop(0)
+            for child in AUTONOMY_RECOVERY_DEPENDENCIES.get(parent, ()):
+                if child in selected:
+                    continue
+                source_step = source_steps.get(child)
+                source_metadata = (
+                    source_step.get("metadata")
+                    if isinstance((source_step or {}).get("metadata"), dict)
+                    else {}
+                )
+                if (
+                    not source_step
+                    or source_step.get("status") != "not_run"
+                    or source_metadata.get("reason") != "cycle_aborted_after_step_failure"
+                    or str(source_metadata.get("failedAfterStep") or "") != failed_action_id
+                ):
+                    continue
+                current_action = current_actions.get(child) or {}
+                source_risk = str(source_metadata.get("risk") or "unknown")
+                source_mode = str(source_metadata.get("mode") or "unknown")
+                current_risk = str(current_action.get("risk") or "unknown")
+                current_mode = str(current_action.get("mode") or "unknown")
+                safe = (
+                    child != "execute_approved_exports"
+                    and source_risk == "low"
+                    and source_mode in SAFE_AUTONOMY_MODES
+                    and current_risk == "low"
+                    and current_mode in SAFE_AUTONOMY_MODES
+                )
+                if not safe:
+                    excluded.append({
+                        "id": child,
+                        "risk": current_risk,
+                        "mode": current_mode,
+                        "reason": "Continuation is not low-risk under both source and current policy.",
+                    })
+                    continue
+                selected.add(child)
+                frontier.append(child)
+                edges.append({"from": parent, "to": child})
+
+        ordered_steps = [
+            source_steps[action_id]
+            for action_id in AUTONOMY_EXECUTION_ORDER
+            if action_id in selected and action_id != failed_action_id
+        ]
+        edges.sort(key=lambda edge: AUTONOMY_EXECUTION_ORDER.index(edge["to"]))
+        return ordered_steps, edges, excluded
 
     def _retry_connector(self, recovery_plan: Dict[str, Any], actor: str) -> Dict[str, Any]:
         source_workflow_run_id = int(recovery_plan["workflowRunId"])
@@ -335,31 +446,51 @@ class LocalWorkflowRecoveryService:
     ) -> Dict[str, Any]:
         source_workflow_run_id = int(recovery_plan["workflowRunId"])
         action_id = str(recovery_plan["retryActionId"])
+        continuation_action_ids = list(recovery_plan.get("continuationStepKeys") or [])
         recovery_metadata = self._recovery_metadata(recovery_plan)
         recovery_metadata["actor"] = actor
         execution = self._autonomy_service().run_cycle(
             limit=limit,
             include_wave_plan=action_id == "plan_wave_daily_reconciliation",
             include_wave_sync=action_id == "refresh_wave_entity_mirror",
-            allowed_action_ids=[action_id],
+            allowed_action_ids=list(recovery_plan["selectedStepKeys"]),
             trigger_source=AUTONOMY_RECOVERY_TRIGGER,
             workflow_metadata={"recovery": recovery_metadata},
             step_attempts=recovery_plan["stepAttempts"],
             recovery_mode=True,
+            recovery_action_id=action_id,
+            recovery_continuation_action_ids=continuation_action_ids,
         )
         new_run_id = execution.get("workflowRunId")
         detail = self.ledger.get_workflow_run_with_steps(int(new_run_id)) if new_run_id else None
-        retried_step = (detail.get("steps") or [None])[0] if detail else None
-        completed = bool(retried_step and retried_step.get("status") == "completed")
+        steps_by_key = {
+            str(step.get("step_key")): step
+            for step in (detail or {}).get("steps") or []
+        }
+        retried_step = steps_by_key.get(action_id)
+        blocking_steps = [
+            step
+            for step in steps_by_key.values()
+            if step.get("status") in {"failed", "blocked", "not_run"}
+        ]
+        completed = bool(
+            detail
+            and retried_step
+            and retried_step.get("status") == "completed"
+            and not blocking_steps
+            and detail.get("status") == "completed"
+        )
         if detail and not completed and detail.get("status") == "completed":
             self.ledger.update_workflow_run(int(new_run_id), {"status": "completed_with_errors"})
+            detail["status"] = "completed_with_errors"
         return {
             "success": completed,
-            "status": "completed" if completed else execution.get("status"),
+            "status": "completed" if completed else (detail or {}).get("status") or execution.get("status"),
             "workflowRunId": new_run_id,
             "sourceWorkflowRunId": source_workflow_run_id,
             "recoveryType": "local_autonomy",
             "selectedStepKeys": recovery_plan["selectedStepKeys"],
+            "continuationStepKeys": continuation_action_ids,
             "execution": execution,
             "externalSubmission": "not_executed",
         }
@@ -392,6 +523,9 @@ class LocalWorkflowRecoveryService:
             "retryDepth": int(prior_recovery.get("retryDepth") or 0) + 1,
             "strategy": recovery_plan.get("strategy"),
             "selectedStepKeys": recovery_plan.get("selectedStepKeys") or [],
+            "retryActionId": recovery_plan.get("retryActionId"),
+            "continuationStepKeys": recovery_plan.get("continuationStepKeys") or [],
+            "dependencyEdges": recovery_plan.get("dependencyEdges") or [],
             "externalSubmission": "not_executed",
         }
 

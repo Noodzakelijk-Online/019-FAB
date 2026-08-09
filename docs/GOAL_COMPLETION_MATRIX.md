@@ -114,7 +114,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 107 Quality scoring and confidence display | Implemented | Confidence, evidence, extraction and review status are retained/displayed. |
 | 108 Human decision minimization | Implemented | Eligible local repair and processing automate; queue focuses exceptions. |
 | 109 Exception-based workflow dashboard | Implemented | Exceptions, reviews, blockers, recovery, and next actions are first-class. |
-| 110 Safe retries and recovery strategy | Implemented | Backoff, leases, idempotency, recovery candidates, backup/restore. |
+| 110 Safe retries and recovery strategy | Implemented | Backoff, leases, idempotency, stale-run finalization, source-proven dependency continuation, and backup/restore. Recovery cannot replay approved exports or unrelated queued work. |
 | 111 Ambiguous external action resolution | Implemented | Ambiguous/supervised/export/attachment states fail closed. |
 | 112 Versioning and changelog discipline | Partial | Git history and worklog exist; formal release changelog/version automation remains. |
 | 113 Regression baseline | Implemented | CI and local backend/web suites. |
