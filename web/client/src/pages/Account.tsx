@@ -179,6 +179,7 @@ export default function Account() {
   }
 
   const hasSubscription = subData?.hasSubscription ?? false;
+  const billingAvailable = subData?.billingAvailable ?? false;
   const billingReady = subData?.billingReady ?? hasSubscription;
   const subscriptionStatus = subData?.status ?? "none";
   const invoices = invoiceData?.invoices ?? [];
@@ -302,6 +303,18 @@ export default function Account() {
               {subLoading ? (
                 <div className="flex justify-center py-8">
                   <Loader2 className="w-6 h-6 animate-spin text-teal" />
+                </div>
+              ) : !billingAvailable ? (
+                <div className="text-center py-6">
+                  <div className="w-14 h-14 rounded-2xl bg-sand flex items-center justify-center mx-auto mb-4">
+                    <Shield className="w-7 h-7 text-charcoal-light" />
+                  </div>
+                  <h3 className="text-lg text-charcoal font-sans font-semibold mb-2">
+                    {t("account.billingDisabledTitle")}
+                  </h3>
+                  <p className="text-charcoal-light text-sm max-w-md mx-auto">
+                    {t("account.billingDisabledDesc")}
+                  </p>
                 </div>
               ) : billingReady ? (
                 <div className="space-y-4">

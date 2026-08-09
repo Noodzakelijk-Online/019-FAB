@@ -1,5 +1,21 @@
 # Codex Worklog
 
+## 2026-08-09 - Production runtime, security, and truthful product follow-up
+
+- Removed production Manus instrumentation and its dependency; the generated HTML shell fell from roughly 369 KB to 2,031 bytes.
+- Added enforceable production budgets for the HTML shell and JavaScript assets. The largest JavaScript asset is 480,764 bytes and the build rejects regressions above 512 KiB.
+- Added a restrictive production CSP, conditional HTTPS-only HSTS, immutable hashed-asset caching, no-cache SPA delivery, and real TCP header tests.
+- Made optional Stripe billing disabled by default, removed active public checkout behavior from the local deployment shell, and derived account/admin billing state from the backend capability gate.
+- Rewrote unsupported public security, provider, automation, pricing, SLA, mobile, compliance, and outcome claims in the English/Dutch product content.
+- Added request correlation and generic secret-safe unexpected-error handling to the authenticated server operations bridge.
+- Wired the operations service token into the Windows and Compose runtimes so the local API, dashboard, worker telemetry boundary, and future HAI control plane use the same server-only local trust boundary.
+- Fixed Windows worker restart/test cleanup with a project-scoped named mutex instead of a lock file that survived forced process termination.
+- Updated the Windows launcher to create and use a project-local Python 3.13 `.venv` without modifying global Python packages.
+- Added web dependency vulnerability and peer-contract checks to CI.
+- Verification passed 780 backend tests plus 38 subtests, 161 web tests across 16 files, TypeScript checking, production build budgets, dependency/peer audits, live Windows startup, HAI read-only command planning, desktop/narrow browser interaction and console checks, and exact-source non-root Compose acceptance.
+- The isolated ngrok verifier again failed closed with `ERR_NGROK_334`; it did not modify the unrelated endpoint already online.
+- No provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Control-center data path and dependency hardening
 
 - Added compact Drive-to-Wave queue projections that preserve exact stage, review, retention, archive, and external-submission decisions while leaving complete evidence available from the default and per-document work-order endpoints.

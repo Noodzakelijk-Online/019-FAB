@@ -14,14 +14,16 @@ afterEach(() => {
 });
 
 describe("production static fallback", () => {
-  it("serves the SPA entry point for nested routes under Express 5", async () => {
+  it("serves nested SPA routes without caching the entry point", async () => {
     const distPath = fs.mkdtempSync(path.join(os.tmpdir(), "fab-static-"));
     testDirectories.push(distPath);
+    fs.mkdirSync(path.join(distPath, "assets"));
     fs.writeFileSync(
       path.join(distPath, "index.html"),
       "<!doctype html><title>FAB static acceptance</title>",
       "utf8",
     );
+    fs.writeFileSync(path.join(distPath, "assets", "app-abc123.js"), "export {};", "utf8");
     const app = express();
     serveStatic(app, distPath);
     const server = app.listen(0);
@@ -36,7 +38,16 @@ describe("production static fallback", () => {
       );
 
       expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-cache");
       expect(await response.text()).toContain("FAB static acceptance");
+
+      const asset = await fetch(
+        `http://127.0.0.1:${address.port}/assets/app-abc123.js`,
+      );
+      expect(asset.status).toBe(200);
+      expect(asset.headers.get("cache-control")).toBe(
+        "public, max-age=31536000, immutable",
+      );
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {

@@ -41,13 +41,20 @@ Audit date: 2026-08-09
 - Removed the obsolete JSX-location plugin and migrated the shared chart wrapper to the current Recharts tooltip and legend contracts, including the full-payload formatter contract.
 - Found and fixed an Express 5 production-only SPA fallback incompatibility. A real TCP regression test now proves nested routes such as `/admin/operations` resolve to the built application.
 - Vite 8 reduced the production client graph from 6,221 to 2,426 transformed modules. The Operations chunk fell from about 285 KB to 192.70 KB (50.26 KB gzip), the largest public chunk is 480.76 KB, and the former greater-than-500-KB chunk warning is gone.
+- Removed the Manus development/session instrumentation from the production dependency graph and HTML. A build gate now rejects developer markers, an HTML shell above 32 KiB, or any JavaScript asset above 512 KiB; the verified shell is 2,031 bytes and the largest JavaScript asset is 480,764 bytes.
+- Added production CSP, clickjacking/MIME/referrer protections, conditional HTTPS-only HSTS, immutable caching for hashed assets, and no-cache delivery for the application shell. Real TCP tests and live native/container checks cover the header contract without breaking loopback HTTP.
+- Made optional Stripe billing fail closed behind `FAB_BILLING_ENABLED`, removed public checkout claims/actions from the local product shell, and exposed the deployment-controlled disabled state to account/admin screens.
+- Added a bounded request identifier and sanitized stable error envelope to the authenticated server operations bridge, then wired its server-only token through both the Windows launcher and Compose.
+- Replaced the Windows worker lock file with a project-scoped named mutex. Forced worker termination can no longer leave a file handle that blocks cleanup or the next isolated test run; Unix deployments retain `flock`.
+- Made the Windows launcher provision and validate a project-local Python 3.13 `.venv`, preserving the system Python and installing only FAB's local requirements into the isolated runtime.
+- Added dependency vulnerability and peer-contract checks to the web CI gate.
 
 ## Remaining risks
 
 - Live Google and Wave acceptance depends on owner authorization and current provider state.
 - MijnGeldzaken remains a supervised master-ledger export, not an authenticated write connector.
 - Direct PSD2 bank feeds and SVB submissions are not implemented.
-- Compose configuration, both images, authenticated service health, dashboard access, local-operator authorization, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
+- Compose configuration, both images, authenticated service health, dashboard access, a complete 24-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
 - SQLite rollback is restore-based by design. Operational recovery still requires a rehearsed restore using the prior compatible FAB release.
 - Formal penetration testing, DPIA approval, accountant validation, and production disaster-recovery exercises remain external work.
 
@@ -60,4 +67,4 @@ Audit date: 2026-08-09
 | Medium | Performance baseline | Run sustained idle-host and concurrent-refresh tests, and track cold backup-integrity scan time separately from warm bounded-health latency and payload size. |
 | Medium | Recovery rehearsal | Exercise the documented schema rollback and full source-evidence recovery process on a production-sized copy before unattended upgrades. |
 | Medium | Privacy governance | Complete a signed DPIA and data-processing inventory before multi-user production use. |
-| Low | Public product shell | Remove or hide pricing and roadmap surfaces that are not part of the local operator product before public release. |
+| Low | Public product shell | Keep public deployment, capability, and billing text synchronized with the operator product before each release. |

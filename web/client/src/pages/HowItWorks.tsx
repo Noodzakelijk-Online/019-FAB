@@ -6,7 +6,6 @@ import {
   CheckCircle,
   Mail,
   FileText,
-  MessageSquare,
   HardDrive,
   RefreshCw,
   Shield,
@@ -125,7 +124,7 @@ export default function HowItWorks() {
           >
             {[
               { icon: Mail, title: "Gmail", descKey: "hiwPage.step1.gmail", color: "bg-red-50 text-red-500" },
-              { icon: MessageSquare, title: "WhatsApp", descKey: "hiwPage.step1.whatsapp", color: "bg-green-50 text-green-600" },
+              { icon: FileText, title: "Local & Scanner", descKey: "hiwPage.step1.local", color: "bg-green-50 text-green-600" },
               { icon: HardDrive, title: "Google Drive", descKey: "hiwPage.step1.drive", color: "bg-blue-50 text-blue-500" },
               { icon: Landmark, title: "Bank Accounts", descKey: "hiwPage.step1.bank", color: "bg-amber-50 text-amber-600" },
               { icon: Globe, title: "mijngeldzaken.nl", descKey: "hiwPage.step1.mgz", color: "bg-purple-50 text-purple-500" },
@@ -579,7 +578,7 @@ export default function HowItWorks() {
               <motion.div variants={fadeUp} className="bg-white rounded-2xl p-6 border border-sand-dark/10">
                 <p className="text-xs text-teal font-sans font-semibold uppercase tracking-wide mb-4">{t("hiwPage.flow.sources")}</p>
                 <div className="flex flex-wrap justify-center gap-3">
-                  {["Gmail", "WhatsApp", "Drive", "Banks", "Cash Receipts"].map((s) => (
+                  {["Local files", "Scanner", "Gmail", "Drive", "Bank statements", "Receipt photos"].map((s) => (
                     <span key={s} className="bg-teal/10 text-teal text-xs font-sans font-medium px-4 py-2 rounded-full">
                       {s}
                     </span>

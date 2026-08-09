@@ -21,6 +21,8 @@ The final verification report records actual results. This file defines the rele
 | A15 | Inspect Git status and tracked files | No credentials, tokens, uploaded files, runtime databases, logs, or generated support ZIPs are tracked. |
 | A16 | Request bounded health detail with more open issues than `issueLimit` | Returned details are prioritized and truncated, while status, exact issue/severity/type counts, metrics, next actions, and internal safety decisions still reflect every issue. |
 | A17 | Request the same health projection concurrently | One request computes the read-only snapshot and near-simultaneous requests reuse it for at most the configured short TTL; responses remain `no-store`, projection keys stay isolated, and internal safety paths remain uncached. |
+| A18 | Build and serve the production dashboard | The build rejects developer instrumentation and oversized bundles; the live shell is no-cache, hashed assets are immutable, CSP is restrictive, HTTP does not emit HSTS, trusted HTTPS does, and compressed responses use gzip. |
+| A19 | Start the isolated Compose stack | API/web become healthy, worker remains running, all processes are non-root, local tRPC returns a complete control-center payload, and unauthenticated or invalid operations-bridge requests fail closed. |
 
 ## Live provider acceptance
 

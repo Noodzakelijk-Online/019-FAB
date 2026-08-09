@@ -33,9 +33,9 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 026 Human review queue and approval gates | Implemented | Review workspace, corrections, routing/export approvals. |
 | 027 Notifications and reminders | Implemented | Preferences, refresh, due/exception notifications. |
 | 028 Privacy controls and data deletion | Partial | Retention/export controls exist; end-user erasure workflow needs governance validation. |
-| 029 Security headers and web security | Partial | Helmet/auth/sanitization exist; independent web-security test remains. |
+| 029 Security headers and web security | Implemented | Restrictive production CSP, conditional HTTPS HSTS, standard browser protections, request tracing, auth/sanitization, and real TCP/live header tests are wired; independent penetration testing remains a separate external gate. |
 | 030 Secrets management and credential rotation | Partial | Local encrypted Wave store and OAuth reauthorization state; full rotation drill remains. |
-| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` and `Stop-FAB.ps1/.cmd`. |
+| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. |
 | 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, and local-operator acceptance passed. |
 | 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |
@@ -54,7 +54,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 047 File safety and path traversal tests | Implemented | Upload/intake/backup/provider credential path tests. |
 | 048 Provider failure simulation | Implemented | OAuth, API, rate, retry, ambiguous, and attachment failure tests. |
 | 049 Accessibility review | Partial | Semantic states and keyboard-native controls; full WCAG audit remains. |
-| 050 Responsive and browser compatibility | Partial | Responsive CSS and local browser QA; broad browser matrix remains. |
+| 050 Responsive and browser compatibility | Partial | Connected Chrome desktop/narrow screenshots, navigation, console, overflow, and delivery-control checks passed; a broad browser/device matrix remains. |
 | 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, bulk recovery lookup, paginated queues, bounded health/support payloads, and short single-flight coalescing with uncached safety paths are verified; sustained idle-host load testing remains. |
 | 052 Large dataset and pagination testing | Partial | Bounded batch/limit tests exist; sustained production-scale test remains. |
 | 053 Backup and restore procedures | Implemented | Source-complete recovery packages and confirmation-gated restore. |
@@ -70,9 +70,9 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 063 Provider credential verification checklist | Implemented | Gmail/Drive authorization and Wave setup/readiness drawers. |
 | 064 Threat model and security design review | Implemented | `SECURITY.md` plus existing `security_approach.md`. |
 | 065 Privacy impact assessment | Partial | Data boundaries documented; signed DPIA remains external. |
-| 066 Supply chain and dependency review | Partial | Locked web dependencies and pinned CI actions; final vulnerability scan is required per release. |
+| 066 Supply chain and dependency review | Implemented | Frozen web lockfile, pinned CI actions, production bundle budgets, high-severity dependency audit, and peer-contract checks run locally and in CI; license/legal review remains phase 067. |
 | 067 License and third-party service review | Partial | License/dependency docs exist; legal review remains external. |
-| 068 CI/CD quality gates | Implemented | Linux/Windows backend plus web check/test/build workflow. |
+| 068 CI/CD quality gates | Implemented | Linux/Windows backend plus web audit, peer check, type check, test, and production build-budget workflow. |
 | 069 Release process, canary, and rollback | Partial | Verification/backup rollback exists; production canary environment does not. |
 | 070 Operator runbook | Implemented | `OPERATOR_RUNBOOK.md`. |
 | 071 User guide and help system | Implemented | `user_guide.md`, dashboard next actions, setup drawers. |
@@ -97,7 +97,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 090 No vanity work rule | Implemented | Changes address safety, diagnostics, truthfulness, and operations. |
 | 091 Feature-level definition of done | Implemented | Status definition and acceptance contract in this matrix. |
 | 092 Fresh-clone dry run | Implemented | Clean clone of `c5e42aa` passed status, compilation, Compose config, and 123 focused tests. |
-| 093 Manual verification evidence | Partial | Browser evidence is a final gate; live providers remain blocked. |
+| 093 Manual verification evidence | Partial | Local browser, Windows, HAI, and container evidence passed; live provider acceptance remains blocked. |
 | 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, and `git diff --check` passed. |
 | 095 Completion matrix | Implemented | This document includes every phase. |
 | 096 Final verification report | Implemented | `FINAL_VERIFICATION_REPORT.md` records local, browser, container, fresh-clone, safety, and provider-boundary results. |

@@ -25,8 +25,18 @@ import { getDb } from "../db";
 import { users } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { createLogger } from "../lib/logger";
+import { ENV } from "../_core/env";
 
 const log = createLogger("Stripe");
+
+function assertBillingEnabled() {
+  if (!ENV.fabBillingEnabled) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "FAB commercial billing is not enabled for this deployment.",
+    });
+  }
+}
 
 export const stripeRouter = router({
   /**
@@ -36,6 +46,7 @@ export const stripeRouter = router({
   createCheckout: protectedProcedure
     .input(stripeCheckoutSchema)
     .mutation(async ({ ctx, input }) => {
+      assertBillingEnabled();
       const user = ctx.user;
       const product = FAB_PRODUCTS[input.productKey];
 
@@ -100,6 +111,7 @@ export const stripeRouter = router({
   createPortalSession: protectedProcedure
     .input(stripePortalSchema)
     .mutation(async ({ ctx, input }) => {
+      assertBillingEnabled();
       const user = ctx.user;
 
       if (!user.stripeCustomerId) {
@@ -137,11 +149,16 @@ export const stripeRouter = router({
   subscriptionStatus: protectedProcedure.query(async ({ ctx }) => {
     const user = ctx.user;
     const noSub = {
+      billingAvailable: ENV.fabBillingEnabled,
       hasSubscription: false,
       billingReady: false,
       status: "none" as const,
       subscription: null,
     };
+
+    if (!ENV.fabBillingEnabled) {
+      return noSub;
+    }
 
     if (!user.stripeCustomerId) {
       return noSub;
@@ -155,6 +172,7 @@ export const stripeRouter = router({
 
       if (paymentMethods.data.length > 0) {
         return {
+          billingAvailable: true,
           hasSubscription: false,
           billingReady: true,
           status: "ready" as const,
@@ -170,6 +188,7 @@ export const stripeRouter = router({
       const subAny = sub as any;
 
       return {
+        billingAvailable: true,
         hasSubscription: true,
         billingReady: true,
         status: sub.status as string,
@@ -199,7 +218,7 @@ export const stripeRouter = router({
   invoices: protectedProcedure.query(async ({ ctx }) => {
     const user = ctx.user;
 
-    if (!user.stripeCustomerId) {
+    if (!ENV.fabBillingEnabled || !user.stripeCustomerId) {
       return { invoices: [] };
     }
 
@@ -234,6 +253,13 @@ export const stripeRouter = router({
   verifySession: publicProcedure
     .input(stripeVerifySessionSchema)
     .query(async ({ input }) => {
+      if (!ENV.fabBillingEnabled) {
+        return {
+          success: false,
+          status: "disabled",
+          customerEmail: null,
+        };
+      }
       try {
         const session = await retrieveCheckoutSession(input.sessionId);
         return {
@@ -274,6 +300,7 @@ export const stripeRouter = router({
       features: product.features,
       featuresNl: product.featuresNl,
       popular: product.popular,
+      billingAvailable: ENV.fabBillingEnabled,
     }));
   }),
 });

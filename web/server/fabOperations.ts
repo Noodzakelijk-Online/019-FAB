@@ -12,6 +12,7 @@ import {
   auditEventCreateSchema,
 } from "../shared/validation";
 import { ENV } from "./_core/env";
+import { createLogger } from "./lib/logger";
 import { sanitizeText } from "./lib/sanitize";
 import {
   addReviewItem,
@@ -23,6 +24,42 @@ import {
   updateBookkeepingDocument,
   updateWorkflowRun,
 } from "./db";
+
+const log = createLogger("FabOperations");
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function getRequestId(res: Response): string {
+  return typeof res.locals.fabRequestId === "string"
+    ? res.locals.fabRequestId
+    : "unknown";
+}
+
+function respondServiceError(
+  res: Response,
+  status: number,
+  errorCode: string,
+  message: string,
+  details?: Record<string, unknown>,
+) {
+  res.status(status).json({
+    success: false,
+    status: "error",
+    errorCode,
+    message,
+    requestId: getRequestId(res),
+    ...details,
+  });
+}
+
+function assignFabRequestId(req: Request, res: Response, next: NextFunction) {
+  const candidate = req.header("x-request-id")?.trim() || "";
+  const requestId = REQUEST_ID_PATTERN.test(candidate)
+    ? candidate
+    : crypto.randomUUID();
+  res.locals.fabRequestId = requestId;
+  res.setHeader("X-Request-ID", requestId);
+  next();
+}
 
 function readToken(req: Request): string {
   const bearer = req.header("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -41,12 +78,22 @@ export function isValidOperationsToken(candidate: string, expected: string): boo
 
 export function requireFabOperationsToken(req: Request, res: Response, next: NextFunction) {
   if (!ENV.fabOperationsServiceToken) {
-    res.status(503).json({ error: "FAB operations service token is not configured" });
+    respondServiceError(
+      res,
+      503,
+      "service_not_configured",
+      "FAB operations service authentication is not configured.",
+    );
     return;
   }
 
   if (!isValidOperationsToken(readToken(req), ENV.fabOperationsServiceToken)) {
-    res.status(401).json({ error: "Invalid FAB operations token" });
+    respondServiceError(
+      res,
+      401,
+      "authentication_failed",
+      "FAB operations authentication failed.",
+    );
     return;
   }
 
@@ -55,11 +102,30 @@ export function requireFabOperationsToken(req: Request, res: Response, next: Nex
 
 function handleServiceError(res: Response, err: unknown) {
   if (err instanceof ZodError) {
-    res.status(400).json({ error: "Invalid request body", issues: err.issues });
+    respondServiceError(
+      res,
+      400,
+      "validation_failed",
+      "The FAB operations request is invalid.",
+      { issues: err.issues },
+    );
     return;
   }
 
-  res.status(500).json({ error: err instanceof Error ? err.message : "FAB operations request failed" });
+  log.error("Operations request failed", {
+    requestId: getRequestId(res),
+    errorName: err instanceof Error ? err.name : "UnknownError",
+    errorCode:
+      err && typeof err === "object" && "code" in err
+        ? String(err.code).slice(0, 80)
+        : undefined,
+  });
+  respondServiceError(
+    res,
+    500,
+    "operation_failed",
+    "The FAB operations request failed.",
+  );
 }
 
 const serviceWorkflowRunUpdateSchema = workflowRunUpdateSchema.extend({
@@ -68,7 +134,9 @@ const serviceWorkflowRunUpdateSchema = workflowRunUpdateSchema.extend({
 });
 
 export function registerFabOperationsRoutes(app: Application, limiter?: RequestHandler) {
-  const middleware = limiter ? [limiter, requireFabOperationsToken] : [requireFabOperationsToken];
+  const middleware = limiter
+    ? [assignFabRequestId, limiter, requireFabOperationsToken]
+    : [assignFabRequestId, requireFabOperationsToken];
   app.use("/api/fab/operations", ...middleware);
 
   app.post("/api/fab/operations/workflow-runs", async (req, res) => {

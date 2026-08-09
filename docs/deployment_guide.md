@@ -146,7 +146,7 @@ Local deployment is suitable for development, testing, and running the solution 
 
 The supported container deployment is the repository's three-service Compose stack: authenticated API, worker, and production dashboard. It uses named data/output volumes, mounts intake read-only, runs both images as non-root users, and publishes only to host loopback.
 
-1. Generate separate long random values for `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` in your secret manager or shell environment. Do not put them in Compose, `.env`, logs, URLs, or Git.
+1. Generate separate long random values for `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` in your secret manager or shell environment. Compose also applies the local API token to the server-only operations bridge so the Python services, dashboard, and bounded HAI integration share one authenticated local trust boundary without exposing the token to browser code. Do not put either secret in Compose, `.env`, logs, URLs, or Git.
 2. If ports `5001` or `3000` are already occupied, set `FAB_API_HOST_PORT` and `FAB_WEB_HOST_PORT` to free loopback ports.
 3. Build and start the stack:
 

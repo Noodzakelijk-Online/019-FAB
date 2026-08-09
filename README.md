@@ -297,10 +297,11 @@ For manual startup or development:
    **Detailed ledger** opens the complete local document, review,
    reconciliation, reporting, backup, and approval interface.
 
-`Start-FAB.cmd` passes `operations.api_token` to the dashboard server without
-printing it. For manual startup, set `FAB_LOCAL_API_TOKEN` in `web/.env` to the
-same value. The token is used only by the web server and is never sent to the
-browser. Local operator access accepts direct loopback requests in development;
+`Start-FAB.cmd` passes `operations.api_token` to both authenticated dashboard
+server bridges without printing it. Compose wires the same server-only trust
+boundary. For manual startup, set `FAB_LOCAL_API_TOKEN` and
+`FAB_OPERATIONS_SERVICE_TOKEN` in `web/.env` to the same long random value. The
+token is used only by the web server and is never sent to the browser. Local operator access accepts direct loopback requests in development;
 deployed environments require an authenticated administrator unless
 `FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
+import { ENV } from "./_core/env";
 
 // Mock the Stripe module
 vi.mock("./stripe/stripe", () => ({
@@ -386,5 +387,29 @@ describe("stripe.invoices", () => {
     expect(result.invoices[0].id).toBe("in_test_123");
     expect(result.invoices[0].amountPaid).toBe(499);
     expect(result.invoices[0].currency).toBe("eur");
+  });
+});
+
+describe("stripe deployment gate", () => {
+  it("does not contact Stripe when commercial billing is disabled", async () => {
+    const previous = ENV.fabBillingEnabled;
+    ENV.fabBillingEnabled = false;
+    vi.clearAllMocks();
+    try {
+      const caller = appRouter.createCaller(createAuthContext());
+      const products = await caller.stripe.products();
+      const status = await caller.stripe.subscriptionStatus();
+
+      expect(products.every((product) => product.billingAvailable === false)).toBe(true);
+      expect(status.billingAvailable).toBe(false);
+      await expect(caller.stripe.createCheckout({
+        origin: "https://example.com",
+        productKey: "payAsYouGo",
+      })).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+      expect(getOrCreateStripeCustomer).not.toHaveBeenCalled();
+      expect(createCheckoutSession).not.toHaveBeenCalled();
+    } finally {
+      ENV.fabBillingEnabled = previous;
+    }
   });
 });

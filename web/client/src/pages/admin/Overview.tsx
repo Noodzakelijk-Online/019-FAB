@@ -9,8 +9,10 @@ export default function AdminOverview() {
   const contactMessages = trpc.contact.list.useQuery({});
   const blogCount = trpc.blog.count.useQuery();
   const bookkeepingOverview = trpc.bookkeeping.overview.useQuery();
+  const billingCatalog = trpc.stripe.products.useQuery();
 
   const newMessages = contactMessages.data?.filter((m) => m.status === "new").length ?? 0;
+  const billingAvailable = billingCatalog.data?.some((product) => product.billingAvailable) ?? false;
 
   const stats = [
     {
@@ -45,10 +47,10 @@ export default function AdminOverview() {
     },
     {
       label: "Stripe Integration",
-      value: "Active",
+      value: billingAvailable ? "Enabled" : "Disabled",
       icon: CreditCard,
       color: "bg-teal/10 text-teal",
-      change: "Test mode",
+      change: "Deployment controlled",
     },
   ];
 
@@ -159,34 +161,25 @@ export default function AdminOverview() {
             </div>
             <div>
               <h2 className="text-lg font-semibold text-charcoal">Stripe Payments</h2>
-              <p className="text-xs text-charcoal-light">Usage billing and invoice management</p>
+              <p className="text-xs text-charcoal-light">Optional commercial billing capability</p>
             </div>
           </div>
           <div className="grid sm:grid-cols-3 gap-4">
             <div className="p-4 rounded-xl bg-sand/30">
               <div className="text-sm text-charcoal-light mb-1">Mode</div>
-              <div className="text-sm font-medium text-charcoal">Test Sandbox</div>
+              <div className="text-sm font-medium text-charcoal">{billingAvailable ? "Enabled" : "Disabled by default"}</div>
             </div>
             <div className="p-4 rounded-xl bg-sand/30">
               <div className="text-sm text-charcoal-light mb-1">Billing model</div>
-              <div className="text-sm font-medium text-charcoal">Resource cost x 2.5; no fixed fee</div>
+              <div className="text-sm font-medium text-charcoal">{billingAvailable ? "Deployment-defined" : "Not active"}</div>
             </div>
             <div className="p-4 rounded-xl bg-sand/30">
               <div className="text-sm text-charcoal-light mb-1">Webhook</div>
-              <div className="text-sm font-medium text-charcoal">Configured</div>
+              <div className="text-sm font-medium text-charcoal">Not exposed by readiness API</div>
             </div>
           </div>
           <p className="text-xs text-charcoal-light mt-4">
-            Manage your Stripe account, view transactions, and configure webhooks in the{" "}
-            <a
-              href="https://dashboard.stripe.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-teal hover:underline"
-            >
-              Stripe Dashboard
-            </a>
-            .
+            FAB does not collect a payment method while commercial billing is disabled. Enabling the switch does not replace a metering, invoicing, privacy, or operator-acceptance review.
           </p>
         </div>
       </div>

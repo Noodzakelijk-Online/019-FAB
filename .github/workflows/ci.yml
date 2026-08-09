@@ -87,6 +87,12 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Install frontend dependencies
         run: pnpm --dir web install --frozen-lockfile
+      - name: Audit frontend dependencies
+        working-directory: web
+        run: pnpm audit --audit-level=high
+      - name: Check frontend peer dependencies
+        working-directory: web
+        run: pnpm peers check
       - name: Type-check frontend
         run: pnpm --dir web check
       - name: Run frontend suite

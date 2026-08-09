@@ -67,8 +67,8 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "What is FAB?", nl: "Wat is FAB?" },
         answer: {
-          en: "FAB (Fully Automated Bookkeeping) is a financial orchestration platform that brings structure and clarity to your finances. It connects all your existing financial tools — mijngeldzaken.nl, WaveApps, SVB, and your bank accounts — into one unified, synchronized system. FAB automatically extracts financial data from scattered sources like WhatsApp, Gmail, and Google Drive, categorizes it, and routes it to the correct platform. It is specifically designed for individuals in the Netherlands managing disability and chronic illness-related finances.",
-          nl: "FAB (Fully Automated Bookkeeping) is een financieel orkestratieplatform dat structuur en helderheid brengt in je financiën. Het verbindt al je bestaande financiële tools — mijngeldzaken.nl, WaveApps, SVB en je bankrekeningen — in één uniform, gesynchroniseerd systeem. FAB extraheert automatisch financiële gegevens uit verspreide bronnen zoals WhatsApp, Gmail en Google Drive, categoriseert ze en routeert ze naar het juiste platform. Het is specifiek ontworpen voor mensen in Nederland die financiën beheren gerelateerd aan een beperking of chronische ziekte.",
+          en: "FAB (Fully Automated Bookkeeping) is a local-first financial operations platform. It accepts supported local, scanner, Gmail, Google Drive, and selected photo documents, extracts and validates bookkeeping data, and records every decision in an auditable local ledger. Wave delivery is capability and approval gated, while MijnGeldzaken uses a supervised master-ledger export.",
+          nl: "FAB (Fully Automated Bookkeeping) is een lokaal financieel werkplatform. Het verwerkt ondersteunde lokale, scanner-, Gmail-, Google Drive- en geselecteerde fotodocumenten, extraheert en valideert boekhoudgegevens en legt elke beslissing vast in een controleerbaar lokaal grootboek. Wave-verwerking is afhankelijk van mogelijkheden en goedkeuring; MijnGeldzaken gebruikt een begeleide master-ledgerexport.",
         },
       },
       {
@@ -81,29 +81,29 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "Does FAB replace my existing financial tools?", nl: "Vervangt FAB mijn bestaande financiële tools?" },
         answer: {
-          en: "No. FAB does not replace tools like mijngeldzaken.nl, WaveApps, or the SVB portal. Instead, it acts as an intelligent orchestration layer that sits above these platforms. It connects them, synchronizes data between them, and provides you with a single unified view of your complete financial picture.",
-          nl: "Nee. FAB vervangt tools zoals mijngeldzaken.nl, WaveApps of het SVB-portaal niet. In plaats daarvan fungeert het als een intelligente orkestratielaag die boven deze platforms zit. Het verbindt ze, synchroniseert gegevens ertussen en biedt je één uniform overzicht van je volledige financiële beeld.",
+          en: "No. FAB keeps its own auditable master ledger and uses capability-specific connectors. Wave supports verified reads and guarded delivery where the configured API or supervised executor allows it. MijnGeldzaken remains a supervised export, and direct SVB or PSD2 account changes are not currently available.",
+          nl: "Nee. FAB houdt een eigen controleerbaar master ledger bij en gebruikt koppelingen op basis van hun werkelijke mogelijkheden. Wave ondersteunt geverifieerde leesacties en beveiligde verwerking waar de ingestelde API of begeleide executor dat toestaat. MijnGeldzaken blijft een begeleide export; directe SVB- of PSD2-accountwijzigingen zijn momenteel niet beschikbaar.",
         },
       },
       {
         question: { en: "How much time does FAB require from me each week?", nl: "Hoeveel tijd kost FAB me per week?" },
         answer: {
-          en: "Less than 10 minutes per week. FAB's AI handles the heavy lifting — scanning, categorizing, routing, and even requesting missing information from vendors. You only review transactions where the AI is uncertain.",
-          nl: "Minder dan 10 minuten per week. FAB's AI doet het zware werk — scannen, categoriseren, routeren en zelfs ontbrekende informatie opvragen bij leveranciers. Je beoordeelt alleen transacties waar de AI onzeker over is.",
+          en: "The required time depends on document quality, connector readiness, and the number of exceptions. FAB automates eligible local work and concentrates unresolved evidence, duplicates, and external approvals in review queues; it does not promise a fixed weekly time saving.",
+          nl: "De benodigde tijd hangt af van de documentkwaliteit, gereedheid van koppelingen en het aantal uitzonderingen. FAB automatiseert geschikt lokaal werk en bundelt onopgelost bewijs, duplicaten en externe goedkeuringen in beoordelingswachtrijen; het belooft geen vaste wekelijkse tijdsbesparing.",
         },
       },
       {
         question: { en: "Is FAB available on mobile devices?", nl: "Is FAB beschikbaar op mobiele apparaten?" },
         answer: {
-          en: "Yes. FAB is available on both desktop and mobile with full feature parity. The mobile app provides the same complete functionality as the desktop version.",
-          nl: "Ja. FAB is beschikbaar op zowel desktop als mobiel met volledige functionaliteit. De mobiele app biedt dezelfde complete functionaliteit als de desktopversie.",
+          en: "The operator dashboard is responsive and can be opened in a modern mobile browser when FAB is deployed through a secure authenticated endpoint. There is no separate native mobile app, and credential installation or provider setup is best completed on the Windows host.",
+          nl: "Het operator-dashboard is responsief en kan in een moderne mobiele browser worden geopend wanneer FAB via een beveiligd en geauthenticeerd endpoint is geïmplementeerd. Er is geen aparte mobiele app; installatie van inloggegevens en providerinstellingen doe je het beste op de Windows-host.",
         },
       },
       {
         question: { en: "Can FAB work offline?", nl: "Kan FAB offline werken?" },
         answer: {
-          en: "Yes. FAB is built with an offline-first architecture. Core features like document scanning, OCR processing, and transaction categorization work without an internet connection. Actions requiring connectivity are queued and executed when you reconnect.",
-          nl: "Ja. FAB is gebouwd met een offline-first architectuur. Kernfuncties zoals documentscannen, OCR-verwerking en transactiecategorisatie werken zonder internetverbinding. Acties die connectiviteit vereisen worden in de wachtrij geplaatst en uitgevoerd wanneer je weer verbinding maakt.",
+          en: "Local intake, OCR, validation, review, reporting, and ledger operations can run without internet after installation. Gmail, Drive, Wave, and other provider actions require connectivity and current authorization. FAB does not silently replay an external financial mutation merely because connectivity returns.",
+          nl: "Lokale inname, OCR, validatie, beoordeling, rapportage en grootboekbewerkingen kunnen na installatie zonder internet werken. Gmail, Drive, Wave en andere provideracties vereisen verbinding en actuele autorisatie. FAB voert een externe financiële wijziging niet stilzwijgend opnieuw uit zodra de verbinding terugkeert.",
         },
       },
     ],
@@ -117,50 +117,50 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "Where is my data stored?", nl: "Waar worden mijn gegevens opgeslagen?" },
         answer: {
-          en: "Your data is stored locally on your own device. FAB is a locally-installed, privacy-first application, which means your financial records, personal information, and documents never leave your computer or phone unless you explicitly choose to sync.",
-          nl: "Je gegevens worden lokaal op je eigen apparaat opgeslagen. FAB is een lokaal geïnstalleerde, privacy-first applicatie, wat betekent dat je financiële gegevens, persoonlijke informatie en documenten nooit je computer of telefoon verlaten tenzij je expliciet kiest voor synchronisatie.",
+          en: "The authoritative operations ledger, diagnostics, and recovery metadata are stored on the configured FAB host. Source documents remain in their configured folders or provider sources unless an explicit, evidence-gated move is approved. Supported provider delivery transmits only the data required for that approved operation.",
+          nl: "Het gezaghebbende operationele grootboek, diagnostiek en herstelmetadata staan op de ingestelde FAB-host. Brondocumenten blijven in hun ingestelde mappen of providerbronnen tenzij een expliciete, bewijsgebonden verplaatsing is goedgekeurd. Ondersteunde providerverwerking verstuurt alleen de gegevens die voor die goedgekeurde handeling nodig zijn.",
         },
       },
       {
         question: { en: "Is my data encrypted?", nl: "Zijn mijn gegevens versleuteld?" },
         answer: {
-          en: "Yes. FAB uses end-to-end encryption for all data, both at rest (stored on your device) and in transit (when syncing with platforms). We use industry-standard AES-256 encryption protocols.",
-          nl: "Ja. FAB gebruikt end-to-end encryptie voor alle gegevens, zowel in rust (opgeslagen op je apparaat) als tijdens transport (bij synchronisatie met platforms). We gebruiken industriestandaard AES-256 encryptieprotocollen.",
+          en: "Supported provider credentials are protected locally, including Windows current-user protection for the Wave credential store, and provider traffic uses HTTPS. The financial ledger and source folders must also be protected with Windows account controls, BitLocker or equivalent disk encryption, and secured backups. FAB does not claim blanket end-to-end encryption for every local file.",
+          nl: "Ondersteunde providerinloggegevens worden lokaal beschermd, waaronder Windows-beveiliging voor de huidige gebruiker bij Wave, en providerverkeer gebruikt HTTPS. Bescherm ook het financiële grootboek en de bronmappen met Windows-accountbeheer, BitLocker of gelijkwaardige schijfversleuteling en beveiligde back-ups. FAB claimt geen algemene end-to-endversleuteling voor elk lokaal bestand.",
         },
       },
       {
         question: { en: "Does FAB comply with GDPR?", nl: "Voldoet FAB aan de AVG?" },
         answer: {
-          en: "Absolutely. FAB is fully GDPR-compliant. You have complete control over your data, including the right to access, export, and permanently delete all your information at any time.",
-          nl: "Absoluut. FAB is volledig AVG-conform. Je hebt volledige controle over je gegevens, inclusief het recht om al je informatie op elk moment in te zien, te exporteren en permanent te verwijderen.",
+          en: "FAB is designed for data minimization, local control, auditable processing, export, and explicit provider consent. Legal compliance still depends on how the operator configures retention, access, backups, provider agreements, and deletion procedures; the software alone cannot certify an organization as GDPR compliant.",
+          nl: "FAB is ontworpen voor dataminimalisatie, lokale controle, controleerbare verwerking, export en expliciete providertoestemming. Juridische naleving hangt ook af van de ingestelde bewaartermijnen, toegang, back-ups, verwerkersafspraken en verwijderprocedures; de software alleen kan een organisatie niet AVG-conform verklaren.",
         },
       },
       {
         question: { en: "What authentication methods does FAB support?", nl: "Welke authenticatiemethoden ondersteunt FAB?" },
         answer: {
-          en: "FAB supports biometric login (fingerprint and face recognition), two-factor authentication (2FA), and traditional password-based login. We strongly recommend enabling both biometric login and 2FA for maximum security.",
-          nl: "FAB ondersteunt biometrische login (vingerafdruk en gezichtsherkenning), tweefactorauthenticatie (2FA) en traditionele wachtwoordgebaseerde login. We raden sterk aan om zowel biometrische login als 2FA in te schakelen voor maximale beveiliging.",
+          en: "The local dashboard uses FAB session authentication, while the HAI operations interface requires a separate service token. Remote access must be placed behind an authenticated HTTPS gateway. Native biometric login and a built-in 2FA enrollment flow are not part of the current release.",
+          nl: "Het lokale dashboard gebruikt FAB-sessieauthenticatie; de HAI-operationsinterface vereist een apart servicetoken. Plaats externe toegang achter een geauthenticeerde HTTPS-gateway. Eigen biometrisch inloggen en een ingebouwde 2FA-inschrijving maken geen deel uit van de huidige release.",
         },
       },
       {
         question: { en: "Can someone else access my FAB account?", nl: "Kan iemand anders toegang krijgen tot mijn FAB-account?" },
         answer: {
-          en: "Only if you explicitly grant them access. FAB includes a trusted person feature that allows you to give a family member or caregiver read-only access to your dashboard. You can revoke this access at any time.",
-          nl: "Alleen als je hen expliciet toegang verleent. FAB bevat een vertrouwenspersoon-functie waarmee je een familielid of mantelzorger alleen-lezen toegang kunt geven tot je dashboard. Je kunt deze toegang op elk moment intrekken.",
+          en: "Do not share the Windows account, FAB session, provider credentials, or HAI service token. A dedicated trusted-person read-only role is not currently available; use operating-system access controls and an authenticated remote gateway if another person must be granted access.",
+          nl: "Deel het Windows-account, de FAB-sessie, providerinloggegevens of het HAI-servicetoken niet. Een aparte alleen-lezenrol voor een vertrouwenspersoon is momenteel niet beschikbaar; gebruik besturingssysteemtoegang en een geauthenticeerde externe gateway als iemand anders toegang nodig heeft.",
         },
       },
       {
         question: { en: "Which Dutch regulations does FAB comply with?", nl: "Aan welke Nederlandse regelgeving voldoet FAB?" },
         answer: {
-          en: "FAB complies with AFM financial services regulations, AP data protection regulations (Dutch GDPR), SVB-specific PGB administration rules, and Dutch tax regulations for deductible healthcare expenses.",
-          nl: "FAB voldoet aan AFM-regelgeving voor financiële diensten, AP-regelgeving voor gegevensbescherming (Nederlandse AVG), SVB-specifieke PGB-administratieregels en Nederlandse belastingregels voor aftrekbare zorgkosten.",
+          en: "FAB provides evidence retention, audit trails, VAT-oriented fields, review gates, and export controls that can support Dutch administration. It does not provide legal, tax, AFM, AP, or SVB certification. A qualified adviser remains responsible for validating the configured workflow and every filing or declaration.",
+          nl: "FAB biedt bewijsbewaring, auditlogs, btw-gerichte velden, beoordelingspoorten en exportcontroles die de Nederlandse administratie kunnen ondersteunen. Het levert geen juridische, fiscale, AFM-, AP- of SVB-certificering. Een bevoegde adviseur blijft verantwoordelijk voor validatie van de werkwijze en iedere aangifte of declaratie.",
         },
       },
       {
         question: { en: "Does FAB use my data for anything other than my financial management?", nl: "Gebruikt FAB mijn gegevens voor iets anders dan mijn financieel beheer?" },
         answer: {
-          en: "FAB may use anonymized, aggregated data — with no personally identifiable information — to publish reports on the true cost of disability. You can opt out at any time. Your individual data is never sold or used for advertising.",
-          nl: "FAB kan geanonimiseerde, geaggregeerde gegevens — zonder persoonlijk identificeerbare informatie — gebruiken om rapporten te publiceren over de werkelijke kosten van een beperking. Je kunt je op elk moment afmelden. Je individuele gegevens worden nooit verkocht of gebruikt voor reclame.",
+          en: "The current local release does not aggregate or transmit population analytics and does not contain an advertising-data pipeline. Any future research use would require a separately documented purpose, explicit consent, governance, and a verified anonymization process.",
+          nl: "De huidige lokale release verzamelt of verstuurt geen populatie-analyses en bevat geen advertentiedatapijplijn. Toekomstig onderzoeksgebruik vereist een apart vastgelegd doel, expliciete toestemming, governance en een geverifieerd anonimiseringsproces.",
         },
       },
     ],
@@ -174,43 +174,43 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "What is PGB and how does FAB help manage it?", nl: "Wat is PGB en hoe helpt FAB bij het beheer ervan?" },
         answer: {
-          en: "PGB (Persoonsgebonden Budget) is a personal healthcare budget provided by the Dutch government. FAB automates the entire PGB management process — tracking funds, ensuring correct categorization, and maintaining SVB documentation.",
-          nl: "PGB (Persoonsgebonden Budget) is een persoonlijk zorgbudget van de Nederlandse overheid. FAB automatiseert het volledige PGB-beheerproces — fondsen bijhouden, correcte categorisatie waarborgen en SVB-documentatie onderhouden.",
+          en: "PGB (Persoonsgebonden Budget) is a Dutch personal care budget. FAB can classify PGB-related documents and transactions, preserve evidence, and include them in local reports and exports. It does not currently submit declarations, contracts, or payments to SVB.",
+          nl: "PGB (Persoonsgebonden Budget) is een Nederlands persoonsgebonden zorgbudget. FAB kan PGB-gerelateerde documenten en transacties classificeren, bewijs bewaren en opnemen in lokale rapporten en exports. Het dient momenteel geen declaraties, contracten of betalingen in bij de SVB.",
         },
       },
       {
         question: { en: "Does FAB integrate directly with the SVB?", nl: "Integreert FAB direct met de SVB?" },
         answer: {
-          en: "Yes. FAB integrates with the SVB PGB portal to synchronize your budget data, payment records, and care worker contracts. This allows complete tracking of every euro in your PGB.",
-          nl: "Ja. FAB integreert met het SVB PGB-portaal om je budgetgegevens, betalingsoverzichten en zorgverlenercontracten te synchroniseren. Dit maakt volledige tracking van elke euro in je PGB mogelijk.",
+          en: "No. The current release has no direct SVB portal connector. Supported SVB and PGB evidence can be imported into the local ledger for classification, reconciliation, and reporting, but portal data and contracts are not synchronized automatically.",
+          nl: "Nee. De huidige release heeft geen directe koppeling met het SVB-portaal. Ondersteund SVB- en PGB-bewijs kan in het lokale grootboek worden geïmporteerd voor classificatie, afstemming en rapportage, maar portaalgegevens en contracten worden niet automatisch gesynchroniseerd.",
         },
       },
       {
         question: { en: "How does FAB handle earmarked healthcare funds?", nl: "Hoe gaat FAB om met geoormerkte zorgfondsen?" },
         answer: {
-          en: "FAB includes a sophisticated source mapping system for earmarked funds. You define which income sources connect to which platforms and categories, and FAB automatically enforces these mappings to prevent mixing earmarked and general funds.",
-          nl: "FAB bevat een geavanceerd bronmappingsysteem voor geoormerkte fondsen. Je definieert welke inkomstenbronnen verbonden zijn met welke platforms en categorieën, en FAB handhaaft deze mappings automatisch om vermenging van geoormerkte en algemene fondsen te voorkomen.",
+          en: "FAB preserves source, category, account, and evidence metadata so earmarked activity can be kept distinguishable in the local ledger. Operators must validate the mappings and review exceptions; FAB does not guarantee that configured rules prevent every form of fund mixing.",
+          nl: "FAB bewaart bron-, categorie-, rekening- en bewijsmetadata zodat geoormerkte activiteiten in het lokale grootboek te onderscheiden blijven. Gebruikers moeten mappings valideren en uitzonderingen beoordelen; FAB garandeert niet dat ingestelde regels iedere vermenging voorkomen.",
         },
       },
       {
         question: { en: "Can FAB help with WLZ and WMO care arrangements?", nl: "Kan FAB helpen met WLZ- en WMO-zorgregelingen?" },
         answer: {
-          en: "Yes. FAB supports the full spectrum of Dutch long-term care arrangements, including WLZ (Wet langdurige zorg) and WMO (Wet maatschappelijke ondersteuning), tracking the specific rules for each funding stream.",
-          nl: "Ja. FAB ondersteunt het volledige spectrum van Nederlandse langdurige zorgregelingen, inclusief WLZ (Wet langdurige zorg) en WMO (Wet maatschappelijke ondersteuning), en volgt de specifieke regels voor elke financieringsstroom.",
+          en: "WLZ- and WMO-related documents can be retained, tagged, reviewed, and reported through the local ledger. FAB does not encode or validate the complete current rule set for either scheme, so eligibility and reporting decisions require professional review.",
+          nl: "WLZ- en WMO-gerelateerde documenten kunnen via het lokale grootboek worden bewaard, gelabeld, beoordeeld en gerapporteerd. FAB bevat of valideert niet het volledige actuele regelstelsel van beide regelingen; aanspraken en verantwoording vereisen professionele beoordeling.",
         },
       },
       {
         question: { en: "Does FAB support Wajong and WIA benefits?", nl: "Ondersteunt FAB Wajong- en WIA-uitkeringen?" },
         answer: {
-          en: "Yes. FAB tracks and manages Wajong benefits (for young people with long-term illness or disability) and WIA benefits (work disability insurance). Each benefit type is tracked separately with its own rules.",
-          nl: "Ja. FAB volgt en beheert Wajong-uitkeringen (voor jongeren met langdurige ziekte of beperking) en WIA-uitkeringen (arbeidsongeschiktheidsverzekering). Elk uitkeringstype wordt apart gevolgd met eigen regels.",
+          en: "Wajong- and WIA-related records can be assigned distinct categories and evidence in the local ledger. FAB does not manage benefit entitlement or automatically apply UWV rules.",
+          nl: "Wajong- en WIA-gerelateerde gegevens kunnen aparte categorieën en bewijs krijgen in het lokale grootboek. FAB beheert geen uitkeringsrechten en past UWV-regels niet automatisch toe.",
         },
       },
       {
         question: { en: "Can FAB generate reports for SVB accountability?", nl: "Kan FAB rapporten genereren voor SVB-verantwoording?" },
         answer: {
-          en: "Yes. FAB generates comprehensive annual summary reports suitable for SVB accountability and tax filing, with detailed breakdowns of all PGB-related income and expenditures in universally accepted export formats.",
-          nl: "Ja. FAB genereert uitgebreide jaarlijkse samenvattingsrapporten geschikt voor SVB-verantwoording en belastingaangifte, met gedetailleerde overzichten van alle PGB-gerelateerde inkomsten en uitgaven in universeel geaccepteerde exportformaten.",
+          en: "FAB can produce local ledger, evidence, and financial-report exports that help prepare an SVB or tax review. No export is universally accepted or submitted automatically; validate the selected period, classifications, evidence, and target format before filing.",
+          nl: "FAB kan lokale grootboek-, bewijs- en financiële exports maken ter voorbereiding van SVB- of belastingcontrole. Geen export is universeel geaccepteerd of wordt automatisch ingediend; valideer periode, classificaties, bewijs en doelformaat vóór indiening.",
         },
       },
     ],
@@ -224,43 +224,43 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "How does FAB's pricing work?", nl: "Hoe werkt de prijsstelling van FAB?" },
         answer: {
-          en: "FAB uses a transparent, resource-usage based pricing model. Your cost equals the resources you use, multiplied by 2.5. You only pay for what you actually use — no fixed monthly fees or hidden charges.",
-          nl: "FAB gebruikt een transparant, op gebruik gebaseerd prijsmodel. Je kosten zijn gelijk aan de resources die je gebruikt, vermenigvuldigd met 2,5. Je betaalt alleen voor wat je daadwerkelijk gebruikt — geen vaste maandelijkse kosten of verborgen kosten.",
+          en: "Commercial billing is not enabled in this local FAB release. The operator remains responsible for Windows hosting, backups, OCR or AI services, secure remote access, and any provider fees configured outside FAB.",
+          nl: "Commerciële facturering is niet ingeschakeld in deze lokale FAB-release. De gebruiker blijft verantwoordelijk voor Windows-hosting, back-ups, OCR- of AI-diensten, beveiligde externe toegang en eventuele providerkosten buiten FAB.",
         },
       },
       {
         question: { en: "Is there a free tier?", nl: "Is er een gratis versie?" },
         answer: {
-          en: "Yes. FAB offers a generous free tier that allows you to process up to 3 transactions per week at no cost. This lets you experience FAB's core value without any financial commitment.",
-          nl: "Ja. FAB biedt een ruime gratis versie waarmee je tot 3 transacties per week kunt verwerken zonder kosten. Zo kun je de kernwaarde van FAB ervaren zonder financiële verplichting.",
+          en: "There is no metered free tier or transaction allowance in this release. Local use is not billed by FAB itself, although configured infrastructure and third-party providers may have their own costs and quotas.",
+          nl: "Deze release heeft geen gemeten gratis versie of transactietegoed. FAB zelf factureert lokaal gebruik niet, maar ingestelde infrastructuur en externe providers kunnen eigen kosten en quota hebben.",
         },
       },
       {
         question: { en: "Can I set a spending cap?", nl: "Kan ik een bestedingslimiet instellen?" },
         answer: {
-          en: "Yes. FAB includes a configurable spending cap. You set your own monthly limit, and when reached, FAB stops processing new transactions until the next billing period.",
-          nl: "Ja. FAB bevat een instelbare bestedingslimiet. Je stelt je eigen maandelijkse limiet in, en wanneer deze bereikt is, stopt FAB met het verwerken van nieuwe transacties tot de volgende factureringsperiode.",
+          en: "No FAB billing cap exists because the application does not meter or invoice local use. Operational safety limits, provider rate limits, and service quotas are separate controls and should be configured at the relevant provider.",
+          nl: "Er is geen FAB-factureringslimiet omdat de toepassing lokaal gebruik niet meet of factureert. Operationele veiligheidslimieten, providerlimieten en servicequota zijn aparte controles die bij de betreffende provider moeten worden ingesteld.",
         },
       },
       {
         question: { en: "Can I see my current usage in real time?", nl: "Kan ik mijn huidige gebruik in real-time zien?" },
         answer: {
-          en: "Yes. FAB includes a real-time cost dashboard showing your current resource usage, associated cost, and proximity to your spending cap.",
-          nl: "Ja. FAB bevat een real-time kostendashboard dat je huidige resourcegebruik, bijbehorende kosten en nabijheid tot je bestedingslimiet toont.",
+          en: "The operations dashboard shows intake, review, connector, worker, export, and recovery status. It does not calculate infrastructure or third-party billing costs.",
+          nl: "Het operations-dashboard toont inname-, beoordeling-, koppeling-, worker-, export- en herstelstatus. Het berekent geen infrastructuur- of externe providerkosten.",
         },
       },
       {
         question: { en: "How am I billed?", nl: "Hoe word ik gefactureerd?" },
         answer: {
-          en: "FAB generates a monthly invoice based on your resource usage with a detailed breakdown. Payment is processed via iDEAL, the standard Dutch payment method.",
-          nl: "FAB genereert een maandelijkse factuur op basis van je resourcegebruik met een gedetailleerd overzicht. Betaling wordt verwerkt via iDEAL, de standaard Nederlandse betaalmethode.",
+          en: "FAB does not generate subscription invoices or collect iDEAL payments. Any supplier invoice for hosting or connected services is managed directly with that supplier.",
+          nl: "FAB maakt geen abonnementsfacturen en incasseert geen iDEAL-betalingen. Facturen voor hosting of gekoppelde diensten worden rechtstreeks met die leverancier afgehandeld.",
         },
       },
       {
         question: { en: "What happens if I stop using FAB?", nl: "Wat gebeurt er als ik stop met FAB?" },
         answer: {
-          en: "You simply stop incurring charges — no cancellation fees or lock-in periods. Your data remains on your local device and you can export everything at any time.",
-          nl: "Je stopt simpelweg met kosten maken — geen annuleringskosten of lock-in periodes. Je gegevens blijven op je lokale apparaat en je kunt alles op elk moment exporteren.",
+          en: "Stop the FAB services only after confirming that the ledger, source documents, recovery snapshot, encryption recovery material, and required exports are intact. FAB itself adds no application cancellation fee; separately contracted providers keep their own terms.",
+          nl: "Stop de FAB-diensten pas nadat het grootboek, de brondocumenten, herstelsnapshot, encryptieherstelmateriaal en vereiste exports intact zijn gecontroleerd. FAB zelf rekent geen annuleringskosten; apart afgesloten providers behouden hun eigen voorwaarden.",
         },
       },
     ],
@@ -274,43 +274,43 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "What does 'autonomous data completion' mean?", nl: "Wat betekent 'autonome gegevensaanvulling'?" },
         answer: {
-          en: "Autonomous data completion is FAB's ability to identify missing information in your financial records and proactively fix it by crafting professional email requests to the relevant party. Once the response arrives, FAB parses it and updates the entry automatically.",
-          nl: "Autonome gegevensaanvulling is FAB's vermogen om ontbrekende informatie in je financiële administratie te identificeren en proactief op te lossen door professionele e-mailverzoeken op te stellen naar de relevante partij. Wanneer het antwoord binnenkomt, parseert FAB het en werkt de vermelding automatisch bij.",
+          en: "FAB detects missing or conflicting fields, records a review blocker, and can prepare a suggested follow-up. The current bookkeeping release does not autonomously send that message or apply a reply to the ledger without review.",
+          nl: "FAB detecteert ontbrekende of tegenstrijdige velden, legt een beoordelingsblokkade vast en kan een voorgestelde opvolging voorbereiden. De huidige boekhoudrelease verstuurt die boodschap niet autonoom en past een antwoord niet zonder beoordeling toe op het grootboek.",
         },
       },
       {
         question: { en: "Does FAB send emails without my permission?", nl: "Verstuurt FAB e-mails zonder mijn toestemming?" },
         answer: {
-          en: "No. FAB always requires your approval before sending any email on your behalf. Drafts are placed in your review queue for you to approve, edit, or reject.",
-          nl: "Nee. FAB vereist altijd je goedkeuring voordat het een e-mail namens jou verstuurt. Concepten worden in je beoordelingswachtrij geplaatst zodat je ze kunt goedkeuren, bewerken of afwijzen.",
+          en: "External email sending is not enabled in the current bookkeeping workflow. Suggested follow-up text remains local and review blocked; the user sends it through an approved communication channel.",
+          nl: "Externe e-mailverzending is niet ingeschakeld in de huidige boekhoudworkflow. Voorgestelde opvolgtekst blijft lokaal en geblokkeerd voor beoordeling; de gebruiker verstuurt deze via een goedgekeurd communicatiekanaal.",
         },
       },
       {
         question: { en: "What happens if a vendor does not respond?", nl: "Wat gebeurt er als een leverancier niet reageert?" },
         answer: {
-          en: "FAB includes a configurable follow-up system with a waiting period and maximum attempts. Once the limit is reached, FAB flags the entry for your manual review.",
-          nl: "FAB bevat een configureerbaar opvolgsysteem met een wachttijd en maximaal aantal pogingen. Wanneer de limiet bereikt is, markeert FAB de vermelding voor je handmatige beoordeling.",
+          en: "The unresolved item remains visible in the review queue and audit trail. Automatic vendor reminders and retry limits are not active in this release, so the operator controls any external follow-up.",
+          nl: "Het onopgeloste item blijft zichtbaar in de beoordelingswachtrij en auditlog. Automatische leveranciersherinneringen en pogingslimieten zijn niet actief in deze release; de gebruiker beheert externe opvolging.",
         },
       },
       {
         question: { en: "How does FAB decide what to flag for my review?", nl: "Hoe bepaalt FAB wat gemarkeerd wordt voor mijn beoordeling?" },
         answer: {
-          en: "FAB uses a confidence scoring system powered by AI. If any parameter falls below the confidence threshold, the transaction is flagged. Over time, FAB learns from your corrections and becomes increasingly accurate.",
-          nl: "FAB gebruikt een op AI gebaseerd vertrouwensscoresysteem. Als een parameter onder de vertrouwensdrempel valt, wordt de transactie gemarkeerd. Na verloop van tijd leert FAB van je correcties en wordt het steeds nauwkeuriger.",
+          en: "Confidence thresholds, validation rules, duplicate evidence, and connector capabilities determine whether an item can proceed. Corrections are retained as audit evidence and may inform configured categorization history; FAB does not promise unsupervised self-learning or steadily increasing accuracy.",
+          nl: "Vertrouwensdrempels, validatieregels, duplicaatbewijs en koppelingsmogelijkheden bepalen of een item verder kan. Correcties blijven als auditbewijs bewaard en kunnen ingestelde categorisatiehistorie ondersteunen; FAB belooft geen onbegeleid zelfleren of voortdurend toenemende nauwkeurigheid.",
         },
       },
       {
         question: { en: "Does FAB automatically delete documents from my inbox?", nl: "Verwijdert FAB automatisch documenten uit mijn inbox?" },
         answer: {
-          en: "No. FAB never automatically deletes documents from your WhatsApp, Gmail, or Google Drive. After processing, FAB stores a copy locally and routes the data — the original remains in its source location.",
-          nl: "Nee. FAB verwijdert nooit automatisch documenten uit je WhatsApp, Gmail of Google Drive. Na verwerking slaat FAB een kopie lokaal op en routeert de gegevens — het origineel blijft op de bronlocatie.",
+          en: "Gmail source messages are not deleted. Drive documents are moved to the configured archive only after FAB verifies the Wave transaction and exact attachment SHA-256 readback; otherwise they remain in place and become review blocked. Direct WhatsApp intake is not available.",
+          nl: "Gmail-bronberichten worden niet verwijderd. Drive-documenten gaan alleen naar het ingestelde archief nadat FAB de Wave-transactie en exacte SHA-256 van de bijlage heeft teruggelezen; anders blijven ze staan en worden ze geblokkeerd voor beoordeling. Directe WhatsApp-inname is niet beschikbaar.",
         },
       },
       {
         question: { en: "How often does FAB scan for new data?", nl: "Hoe vaak scant FAB naar nieuwe gegevens?" },
         answer: {
-          en: "FAB provides user-configurable frequency sliders. Platform synchronization and source scanning run hourly by default. Response checking runs every 5 minutes by default. All frequencies are adjustable.",
-          nl: "FAB biedt door de gebruiker instelbare frequentieschuifregelaars. Platformsynchronisatie en bronscannen draaien standaard elk uur. Antwoordcontrole draait standaard elke 5 minuten. Alle frequenties zijn aanpasbaar.",
+          en: "The autonomous worker interval and Windows Task Scheduler configuration control recurring processing. The dashboard reports worker state and provides guarded run controls; it does not currently expose generic frequency sliders for every connector.",
+          nl: "Het interval van de autonome worker en Windows Taakplanner bepalen terugkerende verwerking. Het dashboard toont de workerstatus en biedt beveiligde uitvoerbediening; het bevat momenteel geen algemene frequentieschuiven voor iedere koppeling.",
         },
       },
     ],
@@ -324,43 +324,43 @@ const faqCategories: FAQCategory[] = [
       {
         question: { en: "How do I set up FAB?", nl: "Hoe stel ik FAB in?" },
         answer: {
-          en: "FAB includes an onboarding wizard that guides you through connecting accounts, setting sync frequencies, and configuring your spending cap. Setup typically takes 15-20 minutes.",
-          nl: "FAB bevat een onboarding-wizard die je begeleidt bij het verbinden van accounts, het instellen van synchronisatiefrequenties en het configureren van je bestedingslimiet. De installatie duurt doorgaans 15-20 minuten.",
+          en: "Install FAB on the Windows host, open the Activation Checklist, and use the connector setup panels for local paths, Google authorization, Wave credentials, worker scheduling, recovery, and remote-access checks. Completion time depends on provider consent and the host configuration; no fixed setup duration is promised.",
+          nl: "Installeer FAB op de Windows-host, open de Activatiechecklist en gebruik de koppelingspanelen voor lokale paden, Google-autorisatie, Wave-inloggegevens, workerplanning, herstel en controle van externe toegang. De duur hangt af van providertoestemming en hostconfiguratie; er geldt geen vaste installatietijd.",
         },
       },
       {
         question: { en: "Does FAB support multiple bank accounts?", nl: "Ondersteunt FAB meerdere bankrekeningen?" },
         answer: {
-          en: "Yes. FAB supports connecting multiple bank accounts, essential for managing earmarked healthcare funds that may flow through different accounts. Each account is tracked separately.",
-          nl: "Ja. FAB ondersteunt het verbinden van meerdere bankrekeningen, essentieel voor het beheren van geoormerkte zorgfondsen die via verschillende rekeningen kunnen lopen. Elke rekening wordt apart gevolgd.",
+          en: "FAB can import supported statement files from multiple accounts and preserve their account identities during reconciliation. Direct PSD2 bank connections are not included in the current release.",
+          nl: "FAB kan ondersteunde afschriftbestanden van meerdere rekeningen importeren en hun rekeningidentiteit tijdens afstemming behouden. Directe PSD2-bankkoppelingen zijn niet opgenomen in de huidige release.",
         },
       },
       {
         question: { en: "Can FAB handle cash transactions?", nl: "Kan FAB contante transacties verwerken?" },
         answer: {
-          en: "Yes. You can manually input cash transactions or take a photo of a receipt — FAB uses OCR to automatically extract the details and categorize it.",
-          nl: "Ja. Je kunt contante transacties handmatig invoeren of een foto van een bon maken — FAB gebruikt OCR om automatisch de details te extraheren en te categoriseren.",
+          en: "Cash receipts can enter through supported file, scanner, Gmail, Drive, or selected photo intake paths. OCR extracts candidate fields and low-confidence or incomplete results go to review; the current dashboard does not provide a separate manual cash-journal form.",
+          nl: "Contante bonnen kunnen via ondersteunde bestands-, scanner-, Gmail-, Drive- of geselecteerde foto-inname binnenkomen. OCR extraheert kandidaatvelden en onzekere of onvolledige resultaten gaan naar beoordeling; het huidige dashboard heeft geen apart handmatig kasboekformulier.",
         },
       },
       {
         question: { en: "Can I export my data from FAB?", nl: "Kan ik mijn gegevens exporteren uit FAB?" },
         answer: {
-          en: "Yes. FAB allows you to export your complete financial data at any time in universally accepted formats. Your data belongs to you.",
-          nl: "Ja. FAB stelt je in staat om je volledige financiële gegevens op elk moment te exporteren in universeel geaccepteerde formaten. Je gegevens zijn van jou.",
+          en: "FAB provides documented ledger, report, support-bundle, and recovery exports for their intended workflows. Export coverage and target compatibility must be checked before relying on an export for migration, filing, or disaster recovery.",
+          nl: "FAB biedt gedocumenteerde grootboek-, rapport-, supportbundel- en herstelexports voor hun bedoelde werkstromen. Controleer exportdekking en compatibiliteit met het doel voordat je een export gebruikt voor migratie, aangifte of calamiteitenherstel.",
         },
       },
       {
         question: { en: "Does FAB offer customer support?", nl: "Biedt FAB klantenondersteuning?" },
         answer: {
-          en: "Yes. FAB provides support through email and in-app chat, plus video tutorials and in-app guidance. Our team understands the unique challenges of managing disability-related finances.",
-          nl: "Ja. FAB biedt ondersteuning via e-mail en in-app chat, plus videotutorials en in-app begeleiding. Ons team begrijpt de unieke uitdagingen van het beheren van financiën gerelateerd aan een beperking.",
+          en: "FAB includes an operator runbook, activation checklist, diagnostics, audit history, and an exportable support bundle. No staffed email, chat, video-support channel, or response-time service level is bundled with this release.",
+          nl: "FAB bevat een gebruikershandleiding, activatiechecklist, diagnostiek, auditgeschiedenis en exporteerbare supportbundel. Deze release bevat geen bemand e-mail-, chat- of video-ondersteuningskanaal en geen gegarandeerde reactietijd.",
         },
       },
       {
         question: { en: "Will FAB be available outside the Netherlands?", nl: "Komt FAB beschikbaar buiten Nederland?" },
         answer: {
-          en: "FAB is initially launching in the Netherlands. Our long-term vision includes expansion to countries with similar personal budget systems, such as the UK, Germany, and Australia.",
-          nl: "FAB lanceert eerst in Nederland. Onze langetermijnvisie omvat uitbreiding naar landen met vergelijkbare persoonsgebonden budgetsystemen, zoals het VK, Duitsland en Australië.",
+          en: "FAB is currently designed and tested for Dutch bookkeeping workflows. Tax, banking, care-budget, reporting, and regulatory behavior for other countries has not been validated.",
+          nl: "FAB is momenteel ontworpen en getest voor Nederlandse boekhoudwerkstromen. Belasting-, bank-, zorgbudget-, rapportage- en regelgevingsgedrag voor andere landen is niet gevalideerd.",
         },
       },
     ],

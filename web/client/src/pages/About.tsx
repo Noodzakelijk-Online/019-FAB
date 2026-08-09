@@ -107,9 +107,9 @@ export default function About() {
   ];
 
   const impactStats = [
-    { stat: "1M+", labelKey: "about.impact.stat1", detailKey: "about.impact.stat1Detail" },
-    { stat: "€3.6B", labelKey: "about.impact.stat2", detailKey: "about.impact.stat2Detail" },
-    { stat: "30%", labelKey: "about.impact.stat3", detailKey: "about.impact.stat3Detail" },
+    { icon: Eye, labelKey: "about.impact.stat1", detailKey: "about.impact.stat1Detail" },
+    { icon: Shield, labelKey: "about.impact.stat2", detailKey: "about.impact.stat2Detail" },
+    { icon: Users, labelKey: "about.impact.stat3", detailKey: "about.impact.stat3Detail" },
   ];
 
   return (
@@ -464,9 +464,9 @@ export default function About() {
                   className="bg-white rounded-2xl p-6 border border-sand-dark/10 flex gap-6 items-start"
                 >
                   <div className="shrink-0">
-                    <span className="font-serif text-3xl text-teal">
-                      {item.stat}
-                    </span>
+                    <div className="w-10 h-10 rounded-lg bg-sage-light flex items-center justify-center">
+                      <item.icon className="w-5 h-5 text-teal" aria-hidden="true" />
+                    </div>
                   </div>
                   <div>
                     <h4 className="font-sans font-semibold text-charcoal text-sm mb-1">

@@ -3,7 +3,6 @@ import express from "express";
 import compression from "compression";
 import { createServer } from "http";
 import net from "net";
-import helmet from "helmet";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
@@ -15,6 +14,7 @@ import { registerFabOperationsRoutes } from "../fabOperations";
 import { registerFabRuntimeRoute } from "../fabRuntime";
 import { registerFabSourcePreviewRoutes } from "../fabSourcePreview";
 import { ENV } from "./env";
+import { createFabSecurityMiddleware } from "./security";
 
 const log = createLogger("Server");
 
@@ -44,15 +44,7 @@ async function startServer() {
   // Trust first proxy (required for rate limiting and IP detection behind reverse proxy)
   app.set("trust proxy", 1);
 
-  // ── Security headers via Helmet ───────────────────────────────
-  // Helmet sets Content-Security-Policy, X-Content-Type-Options,
-  // Strict-Transport-Security, X-Frame-Options, etc.
-  app.use(
-    helmet({
-      contentSecurityPolicy: false, // Managed by Vite in dev, configured separately in prod
-      crossOriginEmbedderPolicy: false, // Allow embedding external resources (CDN images, Stripe)
-    })
-  );
+  app.use(...createFabSecurityMiddleware(ENV.isProduction));
 
   // Compress JSON and static responses for remote/ngrok clients. Small
   // responses stay uncompressed to avoid spending CPU for negligible savings.

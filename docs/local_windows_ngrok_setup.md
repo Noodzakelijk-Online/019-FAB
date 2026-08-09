@@ -4,7 +4,7 @@ FAB is local-first. The supported Windows runtime is the authenticated API, auto
 
 ## Local Windows 11 mode
 
-1. Install Python 3.10 or newer, Node.js, pnpm, Tesseract OCR with Dutch and English language data, and Poppler PDF tools.
+1. Install Python 3.13, Node.js, pnpm, Tesseract OCR with Dutch and English language data, and Poppler PDF tools. The launcher creates and validates an isolated `.venv`; it does not install packages into the global Python runtime.
 2. Create `config/config.ini` from `config/config_template.ini`.
 3. Set a random `operations.api_token` of at least 32 characters. Do not paste it into URLs, browser storage, logs, or Git.
 4. Start FAB:
@@ -19,7 +19,7 @@ FAB is local-first. The supported Windows runtime is the authenticated API, auto
 python -m src.run_fab_doctor
 ```
 
-The launcher prints the selected URLs. Defaults are:
+The first start installs the local Python requirements into `.venv` and the dashboard packages into `web/node_modules` when they are absent. The launcher prints the selected URLs. Defaults are:
 
 - Operator dashboard: `http://127.0.0.1:3000/admin/operations`
 - Local API: `http://127.0.0.1:5001`

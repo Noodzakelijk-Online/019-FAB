@@ -7,9 +7,9 @@
 | C2 Critical safety gaps | Complete | Persistent emergency stop and sanitized support bundle implemented and tested. |
 | C3 Product truthfulness | Complete | Unsupported public claims and invented testimonials removed in English and Dutch. |
 | C4 Focused verification | Complete | Emergency-stop and support-bundle tests plus Python compilation. |
-| C5 Full verification | Complete | 768 backend tests, 153 web tests, type check, build, focused safety tests, live 26-resource profile, both images, and the Compose service acceptance passed. |
-| C6 Browser acceptance | Partial | Desktop/mobile DOM and geometry passed without overflow or overlays. The in-app Browser runtime could not capture screenshots or dispatch clicks despite finding enabled controls. |
+| C5 Full verification | Complete | 780 backend tests plus 38 subtests, 161 web tests, type check, build budgets, dependency gates, live Windows/HAI checks, both exact-source images, and the Compose service acceptance passed. |
+| C6 Browser acceptance | Complete for local release | Connected Chrome desktop and narrow responsive screenshots, navigation, delivery controls, DOM containment, and console checks passed. Broad cross-browser certification remains external. |
 | C7 Source hygiene | Complete | Temporary extraction/build probes removed; staged snapshot has no runtime paths or high-confidence credential patterns. |
-| C8 Delivery | Complete on remote verification | Implementation commit `c5e42aa` passed a clean-clone gate; the final delivery response records the pushed `origin/main` hash. |
+| C8 Delivery | Pending remote verification | Push the current implementation, run remote CI, and verify a clean clone before recording the final evidence hash. |
 
 On context loss, resume at the first non-complete checkpoint and re-run `git status --short` before editing.

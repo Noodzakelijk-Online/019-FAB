@@ -379,7 +379,39 @@ function Wait-FabEndpoint {
 
 Set-Location -LiteralPath $root
 
-$python = Get-Command python -ErrorAction Stop
+$venvRoot = Join-Path $root ".venv"
+$venvPython = Join-Path $venvRoot "Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $venvPython)) {
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher) {
+        & $pyLauncher.Source -3.13 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Creating FAB's isolated Python 3.13 runtime..."
+            & $pyLauncher.Source -3.13 -m venv $venvRoot
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        $systemPython = Get-Command python -ErrorAction SilentlyContinue
+        if ($systemPython) {
+            & $systemPython.Source -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "Creating FAB's isolated Python 3.13 runtime..."
+                & $systemPython.Source -m venv $venvRoot
+            }
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        throw "FAB requires Python 3.13. Install Python 3.13, then run Start-FAB.cmd again."
+    }
+}
+
+$python = Get-Command $venvPython -ErrorAction Stop
+& $python.Source -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "The FAB .venv is not Python 3.13. Remove only the .venv directory, install Python 3.13, and run Start-FAB.cmd again."
+}
 $node = Get-Command node -ErrorAction Stop
 $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
 
@@ -627,15 +659,18 @@ if (-not $webPid) {
     $previousWebPort = $env:PORT
     $previousLocalApiUrl = $env:FAB_LOCAL_API_URL
     $previousLocalApiToken = $env:FAB_LOCAL_API_TOKEN
+    $previousOperationsServiceToken = $env:FAB_OPERATIONS_SERVICE_TOKEN
     $previousNodeEnvironment = $env:NODE_ENV
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
         if ($apiToken) {
             $env:FAB_LOCAL_API_TOKEN = $apiToken
+            $env:FAB_OPERATIONS_SERVICE_TOKEN = $apiToken
         }
         else {
             Remove-Item Env:FAB_LOCAL_API_TOKEN -ErrorAction SilentlyContinue
+            Remove-Item Env:FAB_OPERATIONS_SERVICE_TOKEN -ErrorAction SilentlyContinue
         }
         if ($webMode -eq "development") {
             $env:NODE_ENV = "development"
@@ -667,6 +702,12 @@ if (-not $webPid) {
         }
         else {
             $env:FAB_LOCAL_API_TOKEN = $previousLocalApiToken
+        }
+        if ($null -eq $previousOperationsServiceToken) {
+            Remove-Item Env:FAB_OPERATIONS_SERVICE_TOKEN -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_OPERATIONS_SERVICE_TOKEN = $previousOperationsServiceToken
         }
         if ($null -eq $previousNodeEnvironment) {
             Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue

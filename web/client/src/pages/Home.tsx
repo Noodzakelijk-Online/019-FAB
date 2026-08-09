@@ -17,7 +17,6 @@ import {
   Heart,
   Landmark,
   Link2,
-  Loader2,
   Lock,
   Mail,
   MessageSquare,
@@ -35,10 +34,6 @@ import Footer from "@/components/Footer";
 import WaitlistModal from "@/components/WaitlistModal";
 import { Link } from "wouter";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
-import { trpc } from "@/lib/trpc";
-import { toast } from "sonner";
 
 const fadeUp = {
   hidden: { opacity: 0, y: 30 },
@@ -52,33 +47,6 @@ const stagger = {
 export default function Home() {
   const { t } = useLanguage();
   const [waitlistOpen, setWaitlistOpen] = useState(false);
-  const { user, isAuthenticated } = useAuth();
-  const [checkoutLoading, setCheckoutLoading] = useState(false);
-
-  const createCheckout = trpc.stripe.createCheckout.useMutation({
-    onSuccess: (data) => {
-      if (data.url) {
-        window.location.href = data.url;
-      }
-    },
-    onError: (error) => {
-      setCheckoutLoading(false);
-      toast.error(error.message || "Failed to create checkout session");
-    },
-  });
-
-  const handleSubscribe = () => {
-    if (!isAuthenticated) {
-      // Redirect to login first, then come back
-      window.location.href = getLoginUrl();
-      return;
-    }
-    setCheckoutLoading(true);
-    createCheckout.mutate({
-      origin: window.location.origin,
-      productKey: "payAsYouGo",
-    });
-  };
 
   return (
     <div className="min-h-screen bg-warm-white">
@@ -1027,7 +995,7 @@ export default function Home() {
             viewport={{ once: true, margin: "-100px" }}
             variants={stagger}
           >
-            {/* Free Tier */}
+            {/* Local runtime */}
             <motion.div
               variants={fadeUp}
               className="bg-white rounded-2xl p-8 lg:p-10 shadow-sm border border-sand-dark/20"
@@ -1058,16 +1026,17 @@ export default function Home() {
                   </li>
                 ))}
               </ul>
-              <Button
-                variant="outline"
-                className="w-full py-5 rounded-xl border-2 border-teal/20 text-teal hover:bg-teal/5"
-                onClick={() => setWaitlistOpen(true)}
-              >
-                {t("pricing.free.cta")}
-              </Button>
+              <Link href="/admin/operations">
+                <Button
+                  variant="outline"
+                  className="w-full py-5 rounded-xl border-2 border-teal/20 text-teal hover:bg-teal/5"
+                >
+                  {t("pricing.free.cta")}
+                </Button>
+              </Link>
             </motion.div>
 
-            {/* Pay As You Go */}
+            {/* Connected service costs */}
             <motion.div
               variants={fadeUp}
               className="bg-teal rounded-2xl p-8 lg:p-10 shadow-lg text-white relative overflow-hidden"
@@ -1101,17 +1070,12 @@ export default function Home() {
                     </li>
                   ))}
                 </ul>
-                <Button
-                  className="w-full py-5 rounded-xl bg-white text-teal hover:bg-white/90 font-semibold"
-                  onClick={handleSubscribe}
-                  disabled={checkoutLoading}
-                >
-                  {checkoutLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                  ) : null}
-                  {t("pricing.payg.cta")}
-                  {!checkoutLoading && <ArrowRight className="ml-2 w-4 h-4" />}
-                </Button>
+                <Link href="/faq">
+                  <Button className="w-full py-5 rounded-xl bg-white text-teal hover:bg-white/90 font-semibold">
+                    {t("pricing.payg.cta")}
+                    <ArrowRight className="ml-2 w-4 h-4" />
+                  </Button>
+                </Link>
               </div>
             </motion.div>
           </motion.div>

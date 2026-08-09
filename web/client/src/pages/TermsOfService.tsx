@@ -6,7 +6,7 @@ export default function TermsOfService() {
 
   if (lang === "nl") {
     return (
-      <LegalLayout title="Algemene Voorwaarden" lastUpdated="4 maart 2026">
+      <LegalLayout title="Algemene Voorwaarden" lastUpdated="9 augustus 2026">
         <h2>1. Aanvaarding van Voorwaarden</h2>
         <p>
           Door gebruik te maken van FAB ("de Dienst"), gaat u akkoord met deze Algemene Voorwaarden. Als u niet akkoord gaat met deze voorwaarden, gebruik de Dienst dan niet. FAB behoudt zich het recht voor deze voorwaarden op elk moment te wijzigen.
@@ -14,14 +14,14 @@ export default function TermsOfService() {
 
         <h2>2. Beschrijving van de Dienst</h2>
         <p>
-          FAB is een financieel orkestratieplatform dat geautomatiseerde boekhouding en financieel beheer biedt. De Dienst omvat onder meer:
+          FAB is een lokaal financieel operations-platform voor ondersteunde boekhoudwerkstromen. De Dienst omvat onder meer:
         </p>
         <ul>
           <li>Geautomatiseerde verwerking en categorisering van financiële documenten</li>
-          <li>PGB-budgetbeheer en declaratieverwerking</li>
+          <li>Classificatie en rapportage van PGB-gerelateerd bewijs, zonder directe SVB-indiening</li>
           <li>Financiële overzichten en rapportages</li>
-          <li>Integratie met banken en financiële instellingen</li>
-          <li>AI-gestuurde financiële inzichten</li>
+          <li>Import van ondersteunde bankafschriftbestanden en functiegebonden providerkoppelingen</li>
+          <li>Vertrouwensscores, validatie en beoordelingswachtrijen</li>
         </ul>
 
         <h2>3. Accountregistratie</h2>
@@ -35,18 +35,18 @@ export default function TermsOfService() {
           <li>Uw account niet te delen met derden</li>
         </ul>
 
-        <h2>4. Gratis en Betaalde Diensten</h2>
-        <h3>4.1 Gratis Abonnement</h3>
+        <h2>4. Implementatie en Externe Kosten</h2>
+        <h3>4.1 Lokale FAB-runtime</h3>
         <p>
-          Het gratis abonnement biedt basisfunctionaliteit met beperkingen op het aantal documenten, bankverbindingen en functies zoals beschreven op onze prijspagina.
+          Deze release meet lokaal FAB-gebruik niet en verkoopt geen abonnement of transactietegoed. De implementatie-eigenaar beheert de Windows-host, opslag, back-ups, beveiliging en operationele configuratie.
         </p>
-        <h3>4.2 Betaal per Gebruik</h3>
+        <h3>4.2 Externe diensten</h3>
         <p>
-          De betaalde dienst biedt uitgebreide functionaliteit op basis van gebruik. FAB factureert geverifieerde resourcekosten maal 2,5 via Stripe en rekent geen vast maandbedrag.
+          Google, Wave, OCR-, AI-, tunnel-, hosting- en andere externe diensten vallen onder hun eigen voorwaarden, quota en kosten. FAB berekent of factureert die kosten niet.
         </p>
-        <h3>4.3 Annulering en Restitutie</h3>
+        <h3>4.3 Optionele commerciële facturatie</h3>
         <p>
-          U kunt uw betaalmethode op elk moment beheren via uw accountinstellingen. Alleen daadwerkelijk geregistreerd gebruik wordt gefactureerd. Betwiste gebruikskosten en restituties worden per geval beoordeeld.
+          De aanwezige Stripe-betalingsmethode is standaard uitgeschakeld en mag alleen worden geactiveerd nadat een afzonderlijk factureringsproces, meting, privacygrondslag en voorwaarden daadwerkelijk zijn ingericht. De huidige lokale implementatie verzamelt geen betaalmethode.
         </p>
 
         <h2>5. Aanvaardbaar Gebruik</h2>
@@ -93,7 +93,7 @@ export default function TermsOfService() {
 
         <h2>10. Beëindiging</h2>
         <p>
-          Wij kunnen uw account opschorten of beëindigen als u deze voorwaarden schendt. Bij beëindiging kunt u uw gegevens exporteren gedurende een periode van 30 dagen.
+          Stop de Dienst pas nadat het grootboek, brondocumenten, herstelsnapshot, encryptieherstelmateriaal en noodzakelijke exports zijn gecontroleerd. Bewaring en verwijdering volgen de ingestelde lokale procedures en toepasselijke wettelijke termijnen.
         </p>
 
         <h2>11. Toepasselijk Recht</h2>
@@ -110,7 +110,7 @@ export default function TermsOfService() {
   }
 
   return (
-    <LegalLayout title="Terms of Service" lastUpdated="March 4, 2026">
+    <LegalLayout title="Terms of Service" lastUpdated="August 9, 2026">
       <h2>1. Acceptance of Terms</h2>
       <p>
         By using FAB ("the Service"), you agree to these Terms of Service. If you do not agree to these terms, do not use the Service. FAB reserves the right to modify these terms at any time.
@@ -118,14 +118,14 @@ export default function TermsOfService() {
 
       <h2>2. Description of Service</h2>
       <p>
-        FAB is a financial orchestration platform that provides automated bookkeeping and financial management. The Service includes, among other things:
+        FAB is a local financial operations platform for supported bookkeeping workflows. The Service includes, among other things:
       </p>
       <ul>
         <li>Automated processing and categorization of financial documents</li>
-        <li>PGB budget management and declaration processing</li>
+        <li>Classification and reporting of PGB-related evidence without direct SVB submission</li>
         <li>Financial overviews and reporting</li>
-        <li>Integration with banks and financial institutions</li>
-        <li>AI-powered financial insights</li>
+        <li>Supported bank-statement imports and capability-specific provider connectors</li>
+        <li>Confidence scoring, validation, and review queues</li>
       </ul>
 
       <h2>3. Account Registration</h2>
@@ -139,18 +139,18 @@ export default function TermsOfService() {
         <li>Not share your account with third parties</li>
       </ul>
 
-      <h2>4. Free and Paid Services</h2>
-      <h3>4.1 Free Plan</h3>
+      <h2>4. Deployment and External Costs</h2>
+      <h3>4.1 Local FAB Runtime</h3>
       <p>
-        The free plan offers basic functionality with limitations on the number of documents, bank connections, and features as described on our pricing page.
+        This release does not meter local FAB use or sell a subscription or transaction allowance. The deployment owner manages the Windows host, storage, backups, security, and operational configuration.
       </p>
-      <h3>4.2 Pay-As-You-Go</h3>
+      <h3>4.2 External Services</h3>
       <p>
-        The paid service offers extended functionality based on usage. FAB invoices verified resource cost multiplied by 2.5 through Stripe and charges no fixed monthly fee.
+        Google, Wave, OCR, AI, tunnel, hosting, and other external services retain their own terms, quotas, and costs. FAB does not calculate or invoice those costs.
       </p>
-      <h3>4.3 Cancellation and Refunds</h3>
+      <h3>4.3 Optional Commercial Billing</h3>
       <p>
-        You can manage your payment method at any time through account settings. Only recorded usage is invoiced. Disputed usage charges and refunds are assessed case by case.
+        The included Stripe payment-method path is disabled by default and may only be activated after a separate billing process, metering system, privacy basis, and terms are actually configured. The current local deployment does not collect a payment method.
       </p>
 
       <h2>5. Acceptable Use</h2>
@@ -197,7 +197,7 @@ export default function TermsOfService() {
 
       <h2>10. Termination</h2>
       <p>
-        We may suspend or terminate your account if you violate these terms. Upon termination, you can export your data for a period of 30 days.
+        Stop the Service only after verifying the ledger, source documents, recovery snapshot, encryption recovery material, and required exports. Retention and deletion follow the configured local procedures and applicable statutory periods.
       </p>
 
       <h2>11. Governing Law</h2>
