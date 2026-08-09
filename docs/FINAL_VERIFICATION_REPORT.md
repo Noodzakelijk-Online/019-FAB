@@ -14,6 +14,7 @@ This report separates local software verification from provider, account, infras
 - Control-center hardening commit: `d563d95`.
 - Production-runtime implementation commit: `2f70668`.
 - Managed-cloud and runtime-efficiency implementation commit: `76e5fff`.
+- Worker, OCR, and local-session hardening implementation commit: `b228fdc`.
 - Final evidence commit: recorded by the final Git push and delivery response.
 
 ## Results
@@ -39,7 +40,7 @@ This report separates local software verification from provider, account, infras
 | Desktop/narrow browser QA | Pass | The rebuilt dashboard rendered in the in-app Browser with live operator data and no console warnings/errors. Connections exposed exact provider/cloud gates; document rows exposed working Review actions and a review opened with separate-source and FAB-evidence links. A 480-pixel effective viewport reported no horizontal overflow, then the viewport was reset. |
 | Product-path truthfulness search | Pass with legacy debt | Supported API, dashboard, and authoritative worker paths expose explicit local, review, execution, and provider states. Disabled legacy compatibility modules still contain incomplete prototype helpers and are not certified product capabilities. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Remote CI | Pass on prior baseline; current run pending publish | GitHub Actions run `31308630176` passed all six jobs on the immediately preceding `main` commit. The current implementation run is recorded in the delivery response after publish. |
+| Remote CI | Pass | GitHub Actions run `31310667870` on implementation commit `b228fdc` passed the frontend, Linux backend, and all four Windows backend jobs. |
 | Fresh-clone verification | Pass on prior baseline | The immediately preceding published commit passed an independent clean-clone source, frozen dependency, test, build, and Compose verification. Current-source verification above ran from the complete tracked tree before publish. |
 
 ## Provider state

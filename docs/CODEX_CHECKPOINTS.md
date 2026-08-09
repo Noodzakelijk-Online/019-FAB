@@ -10,6 +10,6 @@
 | C5 Full verification | Complete | 815 backend tests plus 38 subtests, 163 web tests, type check, build budgets, dependency gates, live Windows/HAI/cloud checks, and Compose configuration passed. Prior exact-source image acceptance remains valid for the unchanged image definitions. |
 | C6 Browser acceptance | Complete for local release | Current-source in-app Browser desktop and 480-pixel-effective responsive checks passed with no horizontal overflow or console warnings/errors. Connections and a complete document Review action were exercised. Broad cross-browser certification remains external. |
 | C7 Source hygiene | Complete | Temporary extraction/build probes removed; staged snapshot has no runtime paths or high-confidence credential patterns. |
-| C8 Delivery | In progress | Prior baseline `12b36ee` is on `origin/main` with all six GitHub Actions jobs green. The current implementation commit, push, and CI run are recorded by the delivery response. |
+| C8 Delivery | Complete | Implementation `b228fdc` is on `origin/main`; GitHub Actions run `31310667870` passed the frontend, Linux backend, and all four Windows backend jobs. The documentation-only evidence commit is recorded by the delivery response. |
 
 On context loss, resume at the first non-complete checkpoint and re-run `git status --short` before editing.
