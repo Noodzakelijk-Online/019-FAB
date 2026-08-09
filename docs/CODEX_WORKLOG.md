@@ -8,6 +8,7 @@
 - Direct 50-summary profiling reduced dependency discoveries from 100 to 50 and total time from 755.67 ms to 432.58 ms before caching. With the bounded cache, 100 summaries needed one discovery and measured 1.55 ms median and 3.18 ms p95 after the cold call.
 - After a production Windows restart, 100 authenticated persistent `/api/settings` reads all returned 200 and improved from 39.41 ms median / 54.81 ms p95 to 2.48 ms median / 3.02 ms p95. The runtime source fingerprint matched the working tree and API, worker, and dashboard error logs remained empty.
 - Verification passed 18 focused readiness/support tests, 795 backend tests with four optional-runtime skips, 165 web tests, TypeScript checking, and production build budgets. No provider record, review decision, source file, or external submission was changed.
+- Implementation commit `04a2ad4` is on `origin/main`; GitHub Actions run `31328111774` passed the frontend, Linux backend, and all four Windows backend jobs.
 
 ## 2026-08-09 - Authoritative runtime access identity
 
