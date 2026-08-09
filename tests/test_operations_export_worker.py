@@ -23,7 +23,6 @@ class TestOperationsExportWorker(unittest.TestCase):
             "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
             "fab_autonomy_execute_approved_exports": True,
             "worker_run_once": True,
-            "worker_run_legacy_workflow": True,
             "worker_process_approved_postings": True,
             "worker_process_due_retries": True,
             "worker_create_scheduled_backups": True,
@@ -73,13 +72,10 @@ class TestOperationsExportWorker(unittest.TestCase):
             )
             worker = FabWorker(config)
 
-            with patch.object(worker, "install_signal_handlers"), patch(
-                "src.worker.scheduler.WorkflowController"
-            ) as workflow_controller:
+            with patch.object(worker, "install_signal_handlers"):
                 worker.run()
 
             self.assertIsNone(worker.database)
-            workflow_controller.return_value.run_workflow.assert_called_once()
             attempt = ledger.get_export_attempt(export_attempt_id)
             self.assertEqual(attempt["status"], "supervision_required")
             self.assertEqual(attempt["external_submission"], "not_executed")
@@ -110,7 +106,7 @@ class TestOperationsExportWorker(unittest.TestCase):
 
             with patch.object(worker, "install_signal_handlers"), patch.object(
                 worker,
-                "_run_legacy_workflow",
+                "_sync_source_connectors",
                 side_effect=RuntimeError("api_key=super-secret-value connector unavailable"),
             ), patch.object(worker, "_run_local_autonomy") as autonomy, patch.object(
                 worker,
@@ -135,7 +131,6 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_connector_failure_does_not_suppress_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config["worker_run_legacy_workflow"] = False
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch.object(
@@ -182,37 +177,13 @@ class TestOperationsExportWorker(unittest.TestCase):
                 actor="local_worker",
             )
 
-    def test_worker_can_disable_legacy_pipeline_for_local_only_operation(self):
+    def test_retired_legacy_pipeline_configuration_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config.update({
-                "worker_run_legacy_workflow": False,
-                "worker_process_approved_postings": False,
-                "worker_include_wave_plan": False,
-                "worker_include_wave_sync": False,
-            })
-            worker = FabWorker(config)
+            config["worker_run_legacy_workflow"] = True
 
-            with patch.object(worker, "install_signal_handlers"), patch(
-                "src.worker.scheduler.WorkflowController"
-            ) as workflow_controller:
-                worker.run()
-
-            workflow_controller.assert_not_called()
-            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
-            audit_actions = [event["action"] for event in ledger.list_audit_events(limit=30)]
-            self.assertIn("local_worker.autonomy_cycle", audit_actions)
-            self.assertIn("local_worker.cycle_completed", audit_actions)
-            self.assertNotIn("local_worker.stage_failed", audit_actions)
-
-    def test_legacy_pipeline_is_disabled_when_configuration_is_incomplete(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config = self._config(temp_dir)
-            config.pop("worker_run_legacy_workflow")
-
-            worker = FabWorker(config)
-
-            self.assertFalse(worker.run_legacy_workflow)
+            with self.assertRaisesRegex(ValueError, "was retired"):
+                FabWorker(config)
 
     def test_worker_refreshes_wave_settings_saved_after_startup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -220,7 +191,6 @@ class TestOperationsExportWorker(unittest.TestCase):
             config.update({
                 "fab_local_secret_store_path": os.path.join(temp_dir, "credentials", "secrets.enc"),
                 "fab_local_secret_key_path": os.path.join(temp_dir, "credentials", "secrets.key"),
-                "worker_run_legacy_workflow": False,
                 "worker_run_local_autonomy": False,
                 "worker_sync_source_connectors": False,
                 "worker_recover_workflows": False,
@@ -252,7 +222,6 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_scheduled_backup_failure_does_not_suppress_later_worker_stages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config["worker_run_legacy_workflow"] = False
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch(
@@ -280,7 +249,6 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_scheduled_report_failure_does_not_suppress_export_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config["worker_run_legacy_workflow"] = False
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch.object(
@@ -308,7 +276,6 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_notification_failure_does_not_suppress_export_stage(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config["worker_run_legacy_workflow"] = False
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch.object(
@@ -335,7 +302,6 @@ class TestOperationsExportWorker(unittest.TestCase):
     def test_compliance_failure_does_not_suppress_notifications_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
-            config["worker_run_legacy_workflow"] = False
             worker = FabWorker(config)
 
             with patch.object(worker, "install_signal_handlers"), patch.object(

@@ -124,6 +124,11 @@ class TestConfigLoader(unittest.TestCase):
         self.assertEqual(config["deskew_threshold"], "0.5")
         self.assertEqual(config["deskew_max_angle"], "15")
         self.assertEqual(config["fab_preprocessing_temp_dir"], "")
+        self.assertTrue(config["enable_template_matching"])
+        self.assertEqual(config["template_matching_templates_dir"], "")
+        self.assertEqual(config["vendor_templates_file"], "")
+        self.assertEqual(config["vendor_templates"], {})
+        self.assertTrue(config["enable_line_item_extraction"])
 
     def test_python_container_installs_fail_closed_runtime_defaults(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -136,7 +141,7 @@ class TestConfigLoader(unittest.TestCase):
             "COPY config/config_template.ini ./config/config.ini",
             dockerfile,
         )
-        self.assertFalse(template["worker_run_legacy_workflow"])
+        self.assertNotIn("worker_run_legacy_workflow", template)
         self.assertFalse(template["freshdesk_enabled"])
 
     def test_duplicate_option_names_do_not_overwrite_earlier_legacy_aliases(self):

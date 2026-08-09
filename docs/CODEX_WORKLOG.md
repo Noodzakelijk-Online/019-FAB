@@ -1,5 +1,17 @@
 # Codex Worklog
 
+## 2026-08-09 - Authoritative worker and placeholder retirement
+
+- Removed the opt-in checkpoint controller so connector intake, local autonomy, reporting, compliance, export handling, and verified archival have one operations-ledger owner. A stale `worker_run_legacy_workflow=true` setting now fails startup with a clear migration error.
+- Removed orphaned checkpoint storage, synthetic learning, generic cache/batch/performance, and interactive migration helpers plus tests that only certified their initialization or fabricated data.
+- Preserved and documented the live correction-learning service, lazy OCR/ML loading, bounded worker/API data paths, authenticated historical imports, reconciliation, and checksum-bound provisional VAT reporting.
+- Consolidated vendor-template extraction into the active processor pipeline. It now loads directory, file, and inline definitions deterministically; normalizes dates, amounts, VAT, currency, and line items; emits field confidence/evidence; and isolates malformed user templates.
+- Removed both duplicate file-backed review queues and the orphaned retry/SMTP facade. Review, exceptions, retries, notifications, and correction evidence remain owned by the operations ledger, authenticated API, and dashboard.
+- Exact-source Compose acceptance exposed and fixed a dashboard identity mismatch: the bundled server previously resolved two levels above `/app/dist` to `/` while the API identified `/app`. Compose now supplies an explicit `/app` instance root, and tests plus live container acceptance require matching API/dashboard identities.
+- Removed the dummy tax-export method rather than allowing an unverified file to resemble a statutory filing.
+- Closed child-process streams in the Windows worker ownership test after the focused run exposed a `ResourceWarning`.
+- Final verification passed 771 backend tests with three optional-runtime skips, 163 dashboard tests, TypeScript checking, production build budgets, dependency/peer audits, Python compilation, PowerShell parsing, Compose configuration, authenticated Windows API/dashboard/HAI acceptance, and worker ownership rejection. No provider operation or financial source file was changed.
+
 ## 2026-08-09 - Release safety and unsupported entrypoint retirement
 
 - Removed duplicate Google Cloud Function handlers that could return success after OCR/categorization without durable ledger, review, export, or provider-readback evidence.

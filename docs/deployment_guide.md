@@ -8,7 +8,7 @@ Local deployment is suitable for development, testing, and running the solution 
 
 ### 1.1. Prerequisites
 
-*   **Python 3.9+** installed.
+*   **Python 3.13** installed (the Windows launcher can provision a project-local runtime).
 *   **`pip`** (Python package installer).
 *   **`git`** (if cloning from repository).
 *   **Tesseract OCR**: Install Tesseract OCR engine and language packs (`eng`, `nld`) on your system. Refer to Tesseract's official documentation for installation instructions specific to your OS.
@@ -21,19 +21,19 @@ Local deployment is suitable for development, testing, and running the solution 
 
 1.  **Obtain the Project Files:**
 
-    *   **From a Zip Archive**: Extract the provided `automated_bookkeeping_local_YYYYMMDD_HHMMSS.zip` file to your desired deployment directory (e.g., `/opt/automated_bookkeeping`).
+    *   **From a Zip Archive**: Extract the verified `fab-windows-<UTC timestamp>.zip` or `fab-compose-<UTC timestamp>.zip` release and retain its `.sha256` sidecar for verification.
     *   **From Git Repository**: Clone the repository:
         ```bash
-        git clone <repository_url>
-        cd automated_bookkeeping
+        git clone https://github.com/Robert-Velhorst/019-FAB.git
+        cd 019-FAB
         ```
 
 2.  **Set up Python Environment:**
 
     It is highly recommended to use a Python virtual environment.
     ```bash
-    python3 -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate.bat`
+    python3.13 -m venv .venv
+    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate.bat`
     ```
 
 3.  **Install Python Dependencies:**
@@ -78,7 +78,6 @@ Local deployment is suitable for development, testing, and running the solution 
     health_cache_ttl_seconds = 2
     worker_sync_source_connectors = true
     worker_source_connectors =
-    worker_run_legacy_workflow = false
     enabled = false
     ```
     This SQLite ledger records workflow runs and ordered step evidence, document statuses, normalized bookkeeping records and line items, review items, routing attempts, export attempts, bank statement imports, bank transactions, reconciliation matches, and audit events without requiring the web database/API to be online. Local intake stores file metadata and SHA-256 duplicate fingerprints, not raw document bytes. The worker creates an atomic recovery package on the configured interval containing a verified SQLite snapshot and every source document that has a safe, checksum-matching ledger path. With `backup_require_complete_source_evidence=true`, any missing or changed source blocks the package instead of reporting a false-success backup. Keep the ledger and backup directory outside Git when they contain real financial data.
@@ -91,15 +90,14 @@ Local deployment is suitable for development, testing, and running the solution 
     ```
     This uses the authoritative operations ledger and the same runtime ownership
     lock as the recurring worker. It fails closed when another worker owns the
-    checkout. The legacy checkpoint controller runs only when
-    `worker_run_legacy_workflow=true` is explicitly configured for migration.
+    checkout. The retired checkpoint controller is not part of this command.
     For continuous operation, run the recurring worker rather than repeatedly launching the one-shot command:
     ```bash
     python -m src.run_worker
     ```
-    The worker first runs durable connector intake for explicitly enabled Gmail, Google Drive, and Freshdesk sources, then runs the policy-gated local autonomous cycle, scheduled reports, provisional VAT/retention assessment, notification refresh, operations-ledger exports, and optional compatibility retries as independent audited stages. Connector intake records one timed workflow step per selected source; local autonomy records every executable action, including skipped, failed, and `not_run` downstream boundaries. From the Runs panel, a failed run can be retried only when its current recovery plan permits it: connector retries remain read-only and autonomous retries are restricted to the exact failed low-risk step. Each attempt is a new linked run, and approved export execution is never selected. `GET /api/workflows/{id}/recovery-plan` is read-only; authenticated `POST /api/workflows/{id}/retry` performs the governed retry. One failed connector, report, compliance, or notification stage does not suppress the remaining local bookkeeping stages. `worker_sync_source_connectors=false` disables connector intake; `worker_source_connectors` can restrict a cycle to named enabled sources. Keep `worker_run_legacy_workflow=false` unless a migration still depends on the old checkpoint pipeline. Worker OAuth is non-interactive: prepare and validate Google token files during a supervised setup run, then leave `interactive_auth=false`. Google Photos whole-library background access is unavailable; use `python -m src.run_photos_picker_auth` once, then start and complete each user-owned receipt selection from Sources. The worker never creates, opens, polls, or cancels Picker sessions. `worker_interval_seconds` controls the interval; `worker_run_once=true` is useful when Windows Task Scheduler supplies the recurrence. A SQLite runtime lease prevents the worker, Task Scheduler, and `/api/autonomy/run` from overlapping the local autonomous cycle; a per-source-run lease prevents duplicate concurrent recovery attempts. Scheduled reports use a separate unique database slot, so overlapping worker launches cannot create duplicate report artifacts. Compliance assessments and notification events use source checksums/fingerprints so repeated cycles do not create noise. Expired autonomy leases recover after `fab_autonomy_lease_seconds`.
+    The worker first runs durable connector intake for explicitly enabled Gmail, Google Drive, and Freshdesk sources, then runs the policy-gated local autonomous cycle, scheduled reports, provisional VAT/retention assessment, notification refresh, operations-ledger exports, and optional compatibility retries as independent audited stages. Connector intake records one timed workflow step per selected source; local autonomy records every executable action, including skipped, failed, and `not_run` downstream boundaries. From the Runs panel, a failed run can be retried only when its current recovery plan permits it: connector retries remain read-only and autonomous retries are restricted to the exact failed low-risk step. Each attempt is a new linked run, and approved export execution is never selected. `GET /api/workflows/{id}/recovery-plan` is read-only; authenticated `POST /api/workflows/{id}/retry` performs the governed retry. One failed connector, report, compliance, or notification stage does not suppress the remaining local bookkeeping stages. `worker_sync_source_connectors=false` disables connector intake; `worker_source_connectors` can restrict a cycle to named enabled sources. The retired checkpoint controller cannot be enabled; a stale `worker_run_legacy_workflow=true` setting fails startup with a migration message instead of creating a second processing path. Worker OAuth is non-interactive: prepare and validate Google token files during a supervised setup run, then leave `interactive_auth=false`. Google Photos whole-library background access is unavailable; use `python -m src.run_photos_picker_auth` once, then start and complete each user-owned receipt selection from Sources. The worker never creates, opens, polls, or cancels Picker sessions. `worker_interval_seconds` controls the interval; `worker_run_once=true` is useful when Windows Task Scheduler supplies the recurrence. A SQLite runtime lease prevents the worker, Task Scheduler, and `/api/autonomy/run` from overlapping the local autonomous cycle; a per-source-run lease prevents duplicate concurrent recovery attempts. Scheduled reports use a separate unique database slot, so overlapping worker launches cannot create duplicate report artifacts. Compliance assessments and notification events use source checksums/fingerprints so repeated cycles do not create noise. Expired autonomy leases recover after `fab_autonomy_lease_seconds`.
 
-    The Python Docker image installs `config_template.ini` as its baseline `config.ini`, so the same reviewed fail-closed defaults apply even when no host configuration file is mounted. Compose environment variables continue to override runtime paths and secrets. Optional connectors and the legacy workflow therefore remain disabled until explicitly configured. The web image uses a frozen, audited dependency lockfile and serves compressed responses above 1 KiB.
+    The Python Docker image installs `config_template.ini` as its baseline `config.ini`, so the same reviewed fail-closed defaults apply even when no host configuration file is mounted. Compose environment variables continue to override runtime paths and secrets. Optional connectors remain disabled until explicitly configured, and the removed checkpoint workflow cannot be enabled. The web image uses a frozen, audited dependency lockfile and serves compressed responses above 1 KiB.
 
     On Windows Task Scheduler, set **Program/script** to the virtual environment's `python.exe`, **Add arguments** to `-m src.run_worker`, and **Start in** to the repository directory. Use either one long-running worker with restart-on-failure or `worker_run_once=true` with a recurring task, not both recurrence models at once.
 
@@ -122,8 +120,8 @@ Local deployment is suitable for development, testing, and running the solution 
 
     [Service]
     User=your_username
-    WorkingDirectory=/path/to/your/automated_bookkeeping
-    ExecStart=/path/to/your/automated_bookkeeping/.venv/bin/python -m src.run_worker
+    WorkingDirectory=/path/to/your/019-FAB
+    ExecStart=/path/to/your/019-FAB/.venv/bin/python -m src.run_worker
     Restart=on-failure
     EnvironmentFile=/etc/fab/fab.env
 
@@ -131,7 +129,7 @@ Local deployment is suitable for development, testing, and running the solution 
     WantedBy=multi-user.target
     ```
     *   Replace `your_username` with your actual username.
-    *   Replace `/path/to/your/automated_bookkeeping` with the actual path to your project directory.
+    *   Replace `/path/to/your/019-FAB` with the actual path to your project directory.
     *   Store required environment values in a root-owned `0600` environment file or a reviewed secret manager; never place credentials directly in the unit file.
 
 2.  **Reload systemd, enable, and start the service:**

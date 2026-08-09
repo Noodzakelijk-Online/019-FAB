@@ -35,16 +35,16 @@ Ensure you have the following installed on your system:
 
     If you are cloning from a Git repository:
     ```bash
-    git clone <repository_url>
-    cd automated_bookkeeping
+        git clone https://github.com/Robert-Velhorst/019-FAB.git
+        cd 019-FAB
     ```
 
 2.  **Create a Python Virtual Environment (Recommended):**
 
     A virtual environment isolates your project's dependencies from other Python projects.
     ```bash
-    python3 -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+    python3.13 -m venv .venv
+    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate`
     ```
 
 3.  **Install Dependencies:**
@@ -103,7 +103,6 @@ Local operating ledger and optional web operations API settings.
 *   `workflow_recovery_max_retries`: Maximum linked automatic retry depth. Default: `3`.
 *   `workflow_recovery_base_delay_seconds` / `workflow_recovery_max_delay_seconds`: Exponential retry backoff bounds. Defaults: `300` / `3600`.
 *   `workflow_recovery_stale_seconds`: Grace period before a running connector/autonomy workflow with no active lease is finalized as interrupted. Default: `900` (15 minutes). An active runtime lease always prevents finalization.
-*   `worker_run_legacy_workflow`: Compatibility switch for the old checkpoint pipeline. Default: `false`.
 *   Local reconciliation uses the `[reconciliation]` matching thresholds and stores imported bank transactions, candidate matches, missing-receipt alerts, unmatched documents, and approval decisions in the local ledger.
 *   `enabled`: Set to `true` only when the local web operations API is running and protected by a token.
 *   `api_url`: Base URL for the optional web operations API, such as `http://127.0.0.1:3000`.
@@ -202,14 +201,16 @@ python -m src.run_photos_picker_auth
 
 The command opens Google's user-owned OAuth flow and stores only the resulting JSON token at `picker_token_file`. It does not run in the worker or accept credentials from the dashboard. The local API exposes `GET/POST /api/sources/google-photos/sessions`, `GET /api/sources/google-photos/sessions/{id}`, and explicit `POST .../{id}/collect` and `POST .../{id}/cancel` actions. Successful collection pages through every selected item, downloads only HTTPS Google-hosted photos with a bearer token, applies file-size limits, registers evidence through duplicate/revision controls, and deletes the provider session. Videos are skipped rather than entering the receipt OCR pipeline.
 
-### 4.6. `[processor]` Section
+### 4.6. `[document_processing]` Section
 
 Settings for document processing.
 
-*   `ocr_processor`: The primary OCR engine to use. Options: `vision` (Google Cloud Vision), `tesseract`, `dutch_ocr`, `handwritten_recognition`, `bilingual`.
-*   `line_item_extraction_enabled`: `true` or `false`. Enable/disable line item extraction.
-*   `template_matching_templates_dir`: Directory containing JSON templates for structured data extraction. (e.g., `templates/document_templates`)
-*   `vendor_templates_file`: Path to a JSON file defining vendor-specific extraction rules. (e.g., `config/vendor_templates.json`)
+*   `primary_ocr_method`: Primary OCR engine. The supported default pipeline accepts `tesseract` or explicitly configured `vision`.
+*   `enable_line_item_extraction`: Enable or disable line-item extraction.
+*   `enable_template_matching`: Enable or disable user-owned vendor rules.
+*   `template_matching_templates_dir`: Optional directory containing JSON vendor definitions. Files load in filename order.
+*   `vendor_templates_file`: Optional JSON file containing vendor definitions; it overrides same-named directory definitions.
+*   `vendor_templates`: Optional inline JSON object; it overrides same-named file definitions. Invalid files, schemas, and regular expressions are isolated and do not abort OCR.
 *   `tesseract_cmd`: Path to the Tesseract executable (if not in system PATH). (e.g., `/usr/local/bin/tesseract`)
 *   `tesseract_lang`: Default Tesseract language (e.g., `eng`, `nld`).
 *   `dutch_ocr_lang`: Language for Dutch OCR processor (e.g., `nld`).
@@ -372,7 +373,7 @@ Edit the JSON file specified in `[categorizer] categorization_rules` to define o
 
 ### 6.2. Training ML Categorizer
 
-If you intend to use the ML Categorizer, you will need to train the model with your own historical data. The `LearningManager` module provides functionalities for this. Refer to the `technical_reference.md` for details on how to prepare your data and trigger model training.
+Manual category corrections are persisted in the operations ledger and create reviewable vendor/category rule suggestions through `CorrectionLearningService`. FAB never fabricates OCR text or silently retrains a model from synthetic feedback. Rules become effective through the governed correction and review path.
 
 ### 6.3. Extending Document Fetchers/Processors/Data Entry Handlers
 

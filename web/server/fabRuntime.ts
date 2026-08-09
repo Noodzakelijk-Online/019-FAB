@@ -6,7 +6,7 @@ import { ENV } from "./_core/env";
 export function registerFabRuntimeRoute(
   app: Application,
   localApiEndpoint = ENV.fabLocalApiUrl,
-  instanceRoot = path.resolve(import.meta.dirname, "../.."),
+  instanceRoot = ENV.fabInstanceRoot || path.resolve(import.meta.dirname, "../.."),
 ) {
   app.get("/api/fab/runtime", (_req, res) => {
     res.setHeader("cache-control", "no-store");

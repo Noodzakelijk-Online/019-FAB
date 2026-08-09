@@ -44,11 +44,10 @@ _DEPENDENCY_PATHS = {
         "apply_local_wave_settings",
     ),
     "Database": ("src.storage.database", "Database"),
-    "WorkflowController": ("src.workflow.controller", "WorkflowController"),
 }
 
-# Keep these names patchable in worker tests while avoiding their import cost for
-# disabled stages. _dependency replaces each placeholder on first real use.
+# Keep these names patchable in worker tests while avoiding import cost for
+# inactive stages. _dependency replaces each lazy slot on first real use.
 for _dependency_name in _DEPENDENCY_PATHS:
     globals()[_dependency_name] = None
 
@@ -73,7 +72,11 @@ class FabWorker:
         self.process_postings = _as_bool(self.config.get("worker_process_approved_postings", True))
         self.process_retries = _as_bool(self.config.get("worker_process_due_retries", True))
         self.operations_ledger = _dependency("build_local_operations_ledger")(self.config)
-        self.run_legacy_workflow = _as_bool(self.config.get("worker_run_legacy_workflow", False))
+        if _as_bool(self.config.get("worker_run_legacy_workflow", False)):
+            raise ValueError(
+                "worker_run_legacy_workflow was retired; use the authoritative "
+                "connector intake and local autonomy stages instead"
+            )
         self.sync_source_connectors = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_sync_source_connectors", True)
         )
@@ -141,7 +144,6 @@ class FabWorker:
                 ("scheduled_backup", self._process_scheduled_backup),
                 ("workflow_recovery", self._recover_workflows),
                 ("connector_intake", self._sync_source_connectors),
-                ("legacy_workflow", self._run_legacy_workflow),
                 ("local_autonomy", self._run_local_autonomy),
                 ("scheduled_reports", self._process_scheduled_reports),
                 ("compliance", self._assess_compliance),
@@ -182,11 +184,6 @@ class FabWorker:
                 break
             self._sleep_until_next_cycle()
         self._record_audit("stopped", {}, "Worker stopped")
-
-    def _run_legacy_workflow(self) -> None:
-        if not self.run_legacy_workflow:
-            return
-        _dependency("WorkflowController")(self.config).run_workflow()
 
     def _sync_source_connectors(self) -> None:
         if not self.sync_source_connectors or not self.operations_ledger:

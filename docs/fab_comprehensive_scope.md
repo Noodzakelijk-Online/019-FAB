@@ -2,7 +2,7 @@
 
 FAB is intended to be a complete automated bookkeeping platform: it ingests financial documents, extracts and validates structured data, manages vendors and categories, prevents duplicates, routes entries to the right bookkeeping platform, reconciles bank activity, exposes review and reporting workflows, and preserves an auditable record of every action.
 
-The current repository already contains many module-level foundations for this vision. The main enhancement work is to stabilize the automation core, add durable data persistence, connect the Python workflow to the React/Node web app, and turn the admin interface into a real bookkeeping operations dashboard.
+The repository now has a locally operational SQLite-backed worker, authenticated API, React/Node operations dashboard, governed HAI connector, Windows launcher, and Compose deployment. Remaining work is dominated by live provider/accountant acceptance and hosted multi-user governance, not by a missing local bookkeeping backbone.
 
 ## 1. Data Extraction and Upload
 
@@ -32,9 +32,9 @@ The current repository already contains many module-level foundations for this v
 
 - Gmail, Google Drive, and Freshdesk now have bounded pagination, content-addressed downloads, durable source/document provenance, exact-content idempotency, provider-revision review, isolated failures, and source health/readiness visibility. Production credential provisioning and connector-specific retry scheduling still need operational deployment work.
 - Google Photos whole-library background reads are no longer available. FAB now provides a durable user-owned Picker session, paginated selected-photo retrieval, bounded authenticated download, duplicate/revision registration, provider cleanup, and session health/audit visibility. Production OAuth-client approval and a live account acceptance run remain deployment tasks.
-- OCR and extraction should emit confidence scores per field, not just document-level results.
-- Extracted fields need a database-backed record so corrections, review decisions, and model feedback are preserved.
-- Validation output should consistently include machine-readable errors, warnings, and blocking/non-blocking status.
+- OCR, financial extraction, and vendor templates emit per-field confidence and attributable evidence. Derived preprocessing files are private and removed after OCR.
+- Extracted fields, source identity, revisions, corrections, review decisions, and workflow evidence persist in the operations ledger.
+- Validation findings are machine-readable and distinguish warnings from blockers; live OCR/provider acceptance across the user's full document population remains an operational gate.
 
 ## 2. Vendor and Category Management
 
@@ -53,14 +53,14 @@ The current repository already contains many module-level foundations for this v
 - `src/categorizers/hybrid_categorizer.py`
 - `src/categorizers/rule_based_categorizer.py`
 - `src/categorizers/ml_categorizer.py`
-- `src/learning/learning_manager.py`
-- `src/learning/feedback_learner.py`
+- `src/learning/correction_learning.py`
+- `src/operations/local_corrections.py`
 
 ### Enhancement Gaps
 
-- Vendor profiles, aliases, category history, and user rules should move from config/file structures into durable tables.
-- Category decisions should include explanation data: rule matched, vendor match score, ML confidence, fallback reason, and review requirement.
-- Manual corrections should feed back into vendor aliases, rules, and model training data.
+- Category intents, suggestions, applied rules, correction evidence, and Wave account mappings persist in the ledger or encrypted local setup according to their sensitivity.
+- Decisions expose method, confidence, evidence, fallback/review state, and exact-vendor rule attribution. User-owned extraction templates are deterministic and malformed definitions fail independently.
+- Approved corrections can create attributable exact-vendor category rules. Broader alias management, nested-category editing, and model training remain review-gated product work.
 
 ## 3. Duplicate and Document Handling
 
@@ -79,9 +79,9 @@ The current repository already contains many module-level foundations for this v
 
 ### Enhancement Gaps
 
-- Duplicate fingerprints and match decisions need persistent storage.
-- The workflow should decide whether to skip, merge, supersede, or manually review duplicate-like documents.
-- Version control should cover document metadata, extracted fields, category decisions, and user corrections, not only file manifests.
+- Exact content identities, provider revisions, fuzzy duplicate candidates, grouping decisions, and review outcomes persist in the ledger.
+- Autonomous policy skips exact duplicates and routes ambiguous or superseding evidence to review instead of silently merging it.
+- Document revisions, extracted fields, correction history, duplicate links, source evidence, and export/readback state remain queryable. Provider-side document version semantics still require connector-specific acceptance.
 
 ## 4. Integration and Multi-Account Support
 
@@ -105,10 +105,7 @@ The current repository already contains many module-level foundations for this v
 
 ### Enhancement Gaps
 
-- Several integration handlers still contain placeholder or dummy behavior and need real API/session flows.
-- Routing rules should be configurable and auditable.
-- Platform entry attempts need durable status records, retry handling, and external IDs from Waveapps/MijnGeldzaken.
-- The web app should expose operational APIs for workflow runs, review actions, and integration status.
+- Supported Wave execution, MijnGeldzaken artifact supervision, routing rules, export attempts, retries, external IDs, workflow runs, reviews, and integration status use durable ledger/API/dashboard paths. Provider acceptance and additional Wave mutation coverage remain gated rather than represented as successful.
 
 ## 5. User Interface and Experience
 
@@ -120,19 +117,19 @@ The current repository already contains many module-level foundations for this v
 
 ### Current Code Anchors
 
-- `web/client/src/pages/admin/Overview.tsx`
-- `web/client/src/pages/admin/Waitlist.tsx`
-- `web/client/src/pages/admin/Messages.tsx`
-- `web/client/src/pages/admin/Blog.tsx`
-- `web/drizzle/schema.ts`
-- `src/manual_review/manual_review_interface.py`
-- `src/error_handling/manual_review.py`
+- `web/client/src/pages/admin/Operations.tsx`
+- `web/server/routers.ts`
+- `src/operations/local_api.py`
+- `src/operations/local_ledger.py`
+- `src/operations/local_review.py`
+- `src/operations/local_exceptions.py`
+- `src/learning/correction_learning.py`
 
 ### Enhancement Gaps
 
-- The current web admin mostly manages waitlist, messages, blog, and Stripe information.
-- The web database currently lacks bookkeeping documents, review items, vendors, categories, workflow runs, and audit events.
-- Manual review exists as a file-backed Python concept, not as a first-class web workflow.
+- The Operations dashboard is the first-class bookkeeping workspace for live health, documents, review, exceptions, workflow runs, exports, reports, connectors, backup, and audit evidence.
+- Review changes persist in the authoritative SQLite ledger and can create attributable category-rule suggestions through the correction-learning service.
+- Durable per-user layout/column presets and fine-grained bookkeeping roles remain future product work; they are not represented as active controls.
 
 ## 6. Reporting and Analytics
 
@@ -180,9 +177,9 @@ The current repository already contains many module-level foundations for this v
 
 ### Enhancement Gaps
 
-- Financial operations need audit logging beyond application logs.
-- Secrets should be integrated with a production secrets manager for deployment.
-- RBAC should be expanded from basic admin/user web roles into bookkeeping-specific permissions.
+- Financial operations use durable audit events in addition to application logs; sensitive local connector values use the encrypted secret store and are redacted from API/support output.
+- Hosted deployment still needs a deployment-owned secrets manager and identity provider.
+- RBAC should be expanded from the authenticated local operator boundary and basic web roles into bookkeeping-specific permissions before multi-user hosting.
 - The local operations layer now produces idempotent, provisional Dutch VAT assessments, reviewable structured findings, source-file evidence, and seven-year document-retention records. Filing and deletion remain explicitly unauthorized.
 - Compliance still needs full Dutch return-box mappings, ICP/private-use/small-business rules, exchange-rate policy, accountant approval, and a separately approved filing connector.
 
@@ -196,16 +193,19 @@ The current repository already contains many module-level foundations for this v
 
 ### Current Code Anchors
 
-- `src/workflow/controller.py`
-- `src/error_handling/enhanced_error_recovery.py`
+- `src/worker/scheduler.py`
+- `src/operations/local_autonomy.py`
+- `src/operations/local_workflow_recovery.py`
+- `src/operations/local_notifications.py`
+- `src/operations/local_exceptions.py`
 - `web/server/_core/notification.ts`
 - `web/server/routers.ts`
 
 ### Enhancement Gaps
 
-- Workflow runs need persistent state and step-level status.
+- Workflow runs and step-level status are persisted in the operations ledger with governed retry evidence.
 - Local event definitions, user preferences, inbox lifecycle, and audit tracking are implemented in the operations layer. Approved recipient/channel delivery and delivery-attempt evidence remain open.
-- Automation needs confidence thresholds and safe fallback to review.
+- Confidence thresholds and review fallback are implemented; live provider acceptance remains the boundary for unattended external execution.
 
 ## 9. Error Handling and Support
 
@@ -218,16 +218,19 @@ The current repository already contains many module-level foundations for this v
 
 ### Current Code Anchors
 
-- `src/error_handling/enhanced_error_recovery.py`
-- `src/error_handling/manual_review.py`
-- `src/manual_review/manual_review_interface.py`
+- `src/worker/scheduler.py`
+- `src/operations/local_workflow_recovery.py`
+- `src/operations/local_exceptions.py`
+- `src/operations/local_review.py`
+- `src/operations/local_ledger.py`
+- `web/client/src/pages/admin/Operations.tsx`
 - `web/client/src/components/AIChatBox.tsx`
 
 ### Enhancement Gaps
 
-- Error recovery decisions need structured result types.
-- Support/chat should be connected to real user/account/document context before it becomes operationally useful.
-- Audit logs should be queryable from the admin dashboard.
+- Stage failures, recovery eligibility, retry attempts, exceptions, review decisions, and audit events are structured ledger records and queryable from the dashboard.
+- Support/chat still needs approved identity, retention, and document-context policy before it can perform bookkeeping actions.
+- Outbound notification delivery remains disabled until recipient approval and delivery-attempt evidence are implemented.
 
 ## 10. Scalability, Performance, Backup, and Recovery
 
@@ -241,9 +244,9 @@ The current repository already contains many module-level foundations for this v
 
 ### Current Code Anchors
 
-- `src/performance/batch_processor.py`
-- `src/performance/cache_manager.py`
-- `src/performance/performance_optimizer.py`
+- `src/worker/scheduler.py`
+- `src/operations/local_ledger.py`
+- `src/operations/local_health.py`
 - `src/backup/backup_manager.py`
 - `package.py`
 - `docker-compose.yml`
@@ -259,52 +262,25 @@ The current repository already contains many module-level foundations for this v
 
 ## Recommended Delivery Sequence
 
-### Phase 0: Stabilize the Current Codebase
-
-- Fix failing syntax and contract issues in Python tests.
-- Remove tracked `__pycache__` artifacts and add appropriate ignore rules.
-- Make `python -m unittest discover tests` reliable in a clean environment.
-- Make `web` install, typecheck, and test commands reproducible.
-
-### Phase 1: Core Data Model
-
-- Add database tables for documents, extracted fields, vendors, categories, review items, workflow runs, routing attempts, reconciliation matches, and audit events.
-- Define shared status enums for processing, review, routing, reconciliation, and backup states.
-- Add migration and seed data for local development.
-
-### Phase 2: Manual Review Dashboard
-
-- Build admin pages for review backlog, document detail, field correction, vendor/category selection, duplicate resolution, and approval.
-- Connect review actions to persistent records.
-- Feed approved corrections back into vendor/category learning.
-
-### Phase 3: Workflow Orchestration
-
-- Persist each workflow run and step result. Implemented for the local autonomous cycle and connector intake.
-- Add resumable processing and retries. The first governed slice is implemented for connector-source retries and exact low-risk autonomous-step retries; broader crash resume and automatic retry policy remain open.
-- Add integration status and error visibility to the dashboard. Implemented through Workflow Runs, `/api/workflows`, health, and exception links.
-- Connect the Python workflow to the web API or move orchestration behind a worker/job boundary.
-
-### Phase 4: Platform Integrations and Reconciliation
+### Phase 1: Provider Acceptance
 
 - Provision and validate production Gmail, Google Drive `sort out`, and Freshdesk credentials against the durable connector-intake control plane.
 - Validate the supervised Google Photos Picker flow with the production OAuth client and receipt-selection account, including token revocation and provider timeout recovery.
-- Replace Waveapps and MijnGeldzaken placeholders with real entry flows.
-- Implement bank transaction import and reconciliation status views.
+- Run a synthetic receipt through Wave creation, attachment upload, and independent attachment readback before enabling Drive archival. Expand only provider operations that can meet the same idempotency/readback bar.
+- Keep MijnGeldzaken as an explicit supervised checksum-bound artifact flow unless an authenticated provider API is approved.
 
-### Phase 5: Reporting, Notifications, and Compliance
+### Phase 2: Financial and Legal Acceptance
 
-- Add financial reports and charts from persisted bookkeeping data.
-- Add scheduled report generation.
-- Add notification preferences and event-driven alerts.
-- Add structured VAT/tax/compliance findings and audit views.
+- Have a Dutch accountant validate chart-of-account mappings, opening balances, VAT box semantics, private-use/ICP/KOR rules, exchange-rate policy, and close packs.
+- Keep VAT outputs provisional until mappings, approval responsibilities, and a filing connector pass separate acceptance.
+- Rehearse ledger/source restore on a production-sized copy and sign off the DPIA, retention inventory, and disaster-recovery procedure.
 
-### Phase 6: Production Readiness
+### Phase 3: Hosted and Multi-User Operation
 
-- Add queue-based processing, monitoring, backups, restore flows, secrets management, and deployment runbooks.
-- Expand RBAC and audit logging.
-- Add support workflows tied to user/account/document context.
+- Add deployment-owned identity, bookkeeping-specific RBAC, secrets management, monitoring, and a dedicated HTTPS endpoint before remote multi-user access.
+- Add approved recipients/channels and delivery-attempt evidence before enabling outbound notifications or scheduled report delivery.
+- Split the large OCR-capable image only if measured registry transfer, memory, or cold-start cost justifies the operational complexity.
 
 ## Immediate Next Build Target
 
-The persistent operating backbone, review surface, workflow-step evidence, and first governed retry slice are now present. The next orchestration increment is automatic recovery policy: persisted backoff/attempt limits, dependency-aware continuation after a successful retry, and process-crash tests that prove no external action is replayed without approval and idempotency evidence.
+Complete the live Google Drive to Wave acceptance loop with a synthetic non-financial test document: source identity, extraction/review, approved draft, provider record, attachment upload, independent attachment readback, and only then verified Drive archival. Until that succeeds, FAB must continue reporting the provider gate and leave every source file in place.

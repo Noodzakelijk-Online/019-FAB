@@ -13,6 +13,7 @@ export const ENV = {
     : process.env.NODE_ENV === "test",
   fabLocalApiUrl: process.env.FAB_LOCAL_API_URL ?? "http://127.0.0.1:5001",
   fabLocalApiToken: process.env.FAB_LOCAL_API_TOKEN ?? "",
+  fabInstanceRoot: process.env.FAB_INSTANCE_ROOT ?? "",
   fabLocalApiInsecureHosts: (process.env.FAB_LOCAL_API_INSECURE_HOSTS ?? "")
     .split(",")
     .map(value => value.trim().toLowerCase())

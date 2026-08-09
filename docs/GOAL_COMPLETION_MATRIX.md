@@ -18,7 +18,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 011 Core workflow vertical slice | Implemented | Intake through recovery covered by ledger services and tests. |
 | 012 External provider reality review | Implemented | Capability states distinguish live, supervised, and blocked. |
 | 013 Compliance and platform policy boundaries | Partial | Guardrails exist; legal/accountant and provider-policy sign-off remains external. |
-| 014 No fake success and no mock production behavior | Partial | Supported entrypoints use the authoritative ledger worker and execution/readback states are explicit. Fake-success Cloud Function, root workflow, and unauthenticated mobile-upload entrypoints are removed and release tests prevent their packaging. Disabled internal migration/learning/tax helpers still require retirement or completion before final codebase-wide certification. |
+| 014 No fake success and no mock production behavior | Implemented | Supported entrypoints use the authoritative ledger worker and explicit execution/readback states. Fake-success cloud/mobile/root/checkpoint entrypoints, synthetic learning, placeholder performance/migration helpers, and the dummy tax export are removed; tests prevent their accidental return. |
 | 015 Storage, files, uploads, and media safety | Implemented | Hashing, path validation, ignored runtime roots, and recovery evidence. |
 | 016 Background jobs, schedulers, and workers | Implemented | Worker, schedules, leases, recovery, reports, and notifications. |
 | 017 Idempotency and duplicate action prevention | Implemented | Content fingerprints, duplicate candidates, operation IDs, runtime leases. |
@@ -107,7 +107,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 100 Real-provider cleanup and account safety | Partial | No real mutation in this audit; live account acceptance requires the owner. |
 | 101 Support/debug bundle design | Implemented | Sanitized CLI/API/dashboard ZIP with privacy tests. |
 | 102 Data retention and archival policy | Implemented | Retention/compliance services and evidence-gated Drive archival. |
-| 103 Migration from prototype to production | Partial | Local operational product works and unsupported Cloud Function/mobile/root launchers are retired; internal legacy helpers plus deployment/provider/legal gates remain. |
+| 103 Migration from prototype to production | Partial | Local operational product works and duplicate prototype launchers and placeholder helpers are retired. Live deployment, provider, accountant, and legal acceptance gates remain. |
 | 104 Operator safety stop and emergency controls | Implemented | Persistent audited stop, per-step checks, dashboard/API/HAI policy. |
 | 105 User onboarding and first-run wizard | Partial | Activation checklist/setup drawers exist; end-to-end guided wizard remains. |
 | 106 Role-based settings and team permissions | Partial | Admin/operator gating exists; granular multi-user team permissions remain. |
@@ -118,5 +118,5 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 111 Ambiguous external action resolution | Implemented | Ambiguous/supervised/export/attachment states fail closed. |
 | 112 Versioning and changelog discipline | Partial | Git history and worklog exist; formal release changelog/version automation remains. |
 | 113 Regression baseline | Implemented | CI and local backend/web suites. |
-| 114 Maintenance and refactoring review | Partial | External-looking unsafe compatibility entrypoints and dependencies are retired; remaining internal legacy debt is explicit. |
+| 114 Maintenance and refactoring review | Implemented | External-looking unsafe entrypoints, duplicate checkpoint orchestration, synthetic learning, generic performance/migration wrappers, dummy tax output, and unused dependencies are retired. Retained posting compatibility is explicit and fail-closed. |
 | 115 Final human-operator readiness test | Blocked | Requires owner-run live provider acceptance and explicit human sign-off. |

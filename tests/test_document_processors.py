@@ -19,7 +19,6 @@ import src.document_processors.enhanced_processor as enhanced_module
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.document_processors.dutch_ocr_processor import DutchOcrProcessor
 from src.document_processors.handwritten_recognition_processor import HandwrittenRecognitionProcessor
-from src.document_processors.vendor_template_processor import VendorTemplateProcessor
 from src.document_processors.bilingual_processor import BilingualProcessor
 import src.document_processors.handwritten_recognition_processor as handwritten_module
 import src.document_processors.vision_processor as vision_module
@@ -185,11 +184,85 @@ class TestDocumentProcessors(unittest.TestCase):
         self.assertIn("Handwritten Text", result["ocr_text"])
 
     def test_template_matching_processor(self):
-        config = {"template_matching_templates_dir": os.path.join(self.temp_dir.name, "templates")}
+        with open(self.config["vendor_templates_file"], "w", encoding="utf-8") as handle:
+            json.dump({
+                "VendorA": {
+                    "keywords": ["Vendor A", "VendorA"],
+                    "extraction_patterns": {
+                        "transaction_date": r"Date: (\d{2}-\d{2}-\d{4})",
+                        "total_amount": r"Total: (\d+[.,]\d{2})",
+                        "vat_amount": r"VAT: (\d+[.,]\d{2})",
+                        "currency": r"Currency: ([A-Z]{3})",
+                    },
+                    "line_item_pattern": r"^(?P<description>.+?)\s+(?P<total>\d+[.,]\d{2})$",
+                }
+            }, handle)
+        config = {"vendor_templates_file": self.config["vendor_templates_file"]}
         processor = TemplateMatchingProcessor(config)
-        # For a real test, you'd need to create dummy template files and test matching logic
-        result = processor.process_document(self.dummy_image_path, ocr_text="Some text with a template pattern")
-        self.assertIn("ocr_text", result)
+        result = processor.process_document(
+            self.dummy_image_path,
+            ocr_text=(
+                "Vendor A\nDate: 31-07-2026\nCurrency: EUR\n"
+                "Consulting 100,00\nVAT: 21,00\nTotal: 121,00"
+            ),
+        )
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "VendorA")
+        self.assertEqual(result["extracted_data"]["transaction_date"], "2026-07-31")
+        self.assertEqual(result["extracted_data"]["total_amount"], 121.0)
+        self.assertEqual(result["extracted_data"]["vat_amount"], 21.0)
+        self.assertEqual(result["extracted_data"]["currency"], "EUR")
+        self.assertEqual(
+            result["extracted_data"]["line_items"],
+            [{"description": "Consulting", "total": 100.0}],
+        )
+        self.assertEqual(result["field_confidences"]["vendor_name"], 0.95)
+        self.assertEqual(result["field_evidence"]["total_amount"]["source"], "vendor_template")
+        self.assertEqual(processor.template_errors, [])
+
+    def test_template_matching_isolates_invalid_user_templates(self):
+        processor = TemplateMatchingProcessor({
+            "vendor_templates": {
+                "Broken": {"keywords": "["},
+                "Valid": {
+                    "keywords": "Valid Vendor",
+                    "total_pattern": r"Total: (\d+[.,]\d{2})",
+                },
+            }
+        })
+
+        result = processor.process_document(
+            self.dummy_image_path,
+            ocr_text="Valid Vendor\nTotal: 12,34",
+        )
+
+        self.assertEqual(result["extracted_data"]["vendor_name"], "Valid")
+        self.assertEqual(result["extracted_data"]["total_amount"], 12.34)
+        self.assertEqual(processor.template_errors[0]["path"], "Broken.keywords")
+
+    def test_template_matching_isolates_invalid_extraction_schema(self):
+        processor = TemplateMatchingProcessor({
+            "vendor_templates": {
+                "Schema Vendor": {
+                    "keywords": "Schema Vendor",
+                    "extraction_patterns": ["not", "an", "object"],
+                },
+            }
+        })
+
+        result = processor.process_document(
+            self.dummy_image_path,
+            ocr_text="Schema Vendor",
+        )
+
+        self.assertEqual(result["extracted_data"], {"vendor_name": "Schema Vendor"})
+        self.assertEqual(
+            processor.template_errors,
+            [{
+                "path": "Schema Vendor.extraction_patterns",
+                "error": "extraction_patterns must be an object",
+            }],
+        )
 
     def test_line_item_extractor(self):
         config = {}
@@ -253,20 +326,6 @@ class TestDocumentProcessors(unittest.TestCase):
         self.assertEqual(second["deskew_angle"], 0.0)
         for cleanup_path in first["cleanup_paths"] + second["cleanup_paths"]:
             os.remove(cleanup_path)
-
-    def test_vendor_template_processor(self):
-        with open(self.config["vendor_templates_file"], "w", encoding="utf-8") as handle:
-            json.dump({
-                "VendorA": {
-                    "keywords": "VendorA",
-                    "extraction_patterns": {"total_amount": r"Total: (\d+\.\d{2})"},
-                }
-            }, handle)
-        processor = VendorTemplateProcessor(self.config)
-        ocr_text = "This is a document from VendorA. Total: 123.45"
-        result = processor.process_document(self.dummy_image_path, ocr_text=ocr_text)
-        self.assertEqual(result["extracted_data"]["vendor_name"], "VendorA")
-        self.assertEqual(result["extracted_data"]["total_amount"], 123.45)
 
     @patch("src.document_processors.bilingual_processor.langdetect.detect")
     @patch("src.document_processors.bilingual_processor.TesseractProcessor")

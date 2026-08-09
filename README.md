@@ -12,23 +12,23 @@ The governed cutover from repository 025's Apps Script is documented in [docs/sc
 - **Governed Downstream Delivery**: Prepares approval-gated Wave operations and checksum-bound MijnGeldzaken artifacts. Receipt attachment work remains supervised until exact Wave readback succeeds.
 - **Review-Based Learning**: Approved corrections can create explainable exact-vendor rules. FAB does not fabricate training text or promise unsupervised accuracy gains.
 - **Validation**: Validates extracted data against predefined rules and patterns.
-- **Error Handling & Recovery**: Robust error handling with retry mechanisms and manual review interfaces for flagged documents.
+- **Error Handling & Recovery**: Records stage failures, governed retries, exceptions, and authenticated review decisions in the operations ledger.
 - **Workflow Evidence**: Persists ordered autonomous actions and connector-source steps with attempts, timestamps, duration, result metadata, failures, and aborted downstream work.
 - **Governed Workflow Recovery**: Plans and executes linked attempt-2+ retries for failed read-only connector sources or the exact failed low-risk autonomous step, without replaying approved exports or other external actions. The worker applies bounded exponential backoff, stops at a configurable retry depth, and safely finalizes abandoned runs only after their runtime lease has expired.
-- **Performance Optimization**: Includes batch processing, caching, and performance optimization strategies.
+- **Performance Optimization**: Uses bounded worker batches, lazy OCR/ML imports, SQLite WAL/indexes, compact cached projections, compressed responses, and enforced web build budgets.
 - **Security**: Manages credentials securely using encryption.
 - **Compliance**: Checks documents against regulatory compliance rules.
 - **Browser Upload**: The authenticated operator dashboard accepts bounded receipt uploads from supported desktop or mobile browsers into the same local evidence ledger.
 - **Automated Reconciliation**: Reconciles processed transactions with banking data.
-- **Data Migration**: Tools for migrating existing financial data.
+- **Historical Import**: Routes authenticated document uploads, connector intake, and bank statements through the same identity, duplicate, review, and ledger contracts.
 - **Budget Management**: Helps in tracking and managing budgets.
 - **Bank Statement Import**: Imports and reconciles supported statement data locally. Direct PSD2 bank feeds are not implemented.
 - **Financial Analysis**: Generates financial reports and insights.
 - **Backup & Restore**: Manages backup and restoration of application data.
 
-## Project Structure
+## Selected Project Structure
 ```
-automated_bookkeeping/
+019-FAB/
 ├── config/
 │   └── config_template.ini
 ├── docs/
@@ -84,33 +84,14 @@ automated_bookkeeping/
 │   │   ├── processor_pipeline.py
 │   │   ├── template_matching_processor.py
 │   │   ├── tesseract_processor.py
-│   │   ├── vendor_template_processor.py
 │   │   └── vision_processor.py
-│   ├── error_handling/
-│   │   ├── __init__.py
-│   │   ├── enhanced_error_recovery.py
-│   │   └── manual_review.py
 │   ├── financial_analysis/
 │   │   └── financial_analyzer.py
 │   ├── integration.py
 │   ├── learning/
 │   │   ├── __init__.py
-│   │   ├── enhanced_learning_system.py
-│   │   ├── feedback_learner.py
-│   │   ├── learning_manager.py
-│   │   ├── mijngeldzaken_analyzer.py
-│   │   └── waveapps_analyzer.py
+│   │   └── correction_learning.py
 │   ├── main.py
-│   ├── manual_review/
-│   │   └── manual_review_interface.py
-│   ├── migration/
-│   │   ├── data_migration.py
-│   │   └── migration_wizard.py
-│   ├── performance/
-│   │   ├── __init__.py
-│   │   ├── batch_processor.py
-│   │   ├── cache_manager.py
-│   │   └── performance_optimizer.py
 │   ├── reconciliation/
 │   │   └── automated_reconciliation.py
 │   ├── security/
@@ -121,32 +102,12 @@ automated_bookkeeping/
 │   │   └── validation_manager.py
 │   └── workflow/
 │       ├── __init__.py
-│       ├── controller.py
-│       └── logger.py
+│       ├── autonomous_playbook.py
+│       ├── logger.py
+│       ├── safety_engine.py
+│       └── state_machine.py
 ├── tests/
-│   ├── __init__.py
-│   ├── test_banking_api.py
-│   ├── test_bilingual_processor.py
-│   ├── test_budget_manager.py
-│   ├── test_categorizers.py
-│   ├── test_components.py
-│   ├── test_compliance.py
-│   ├── test_config_loader.py
-│   ├── test_data_entry.py
-│   ├── test_document_fetchers.py
-│   ├── test_document_processors.py
-│   ├── test_error_handling.py
-│   ├── test_financial_analysis.py
-│   ├── test_integration.py
-│   ├── test_learning_modules.py
-│   ├── test_manual_review.py
-│   ├── test_migration.py
-│   ├── test_performance.py
-│   ├── test_photos_fetcher.py
-│   ├── test_receipt_validator.py
-│   ├── test_reconciliation.py
-│   ├── test_security.py
-│   └── test_workflow.py
+│   └── test_*.py (backend regression and safety suite)
 ├── Dockerfile
 ├── package.py
 └── requirements.txt
@@ -155,7 +116,7 @@ automated_bookkeeping/
 ## Setup and Installation
 
 ### Prerequisites
-- Python 3.9+
+- Python 3.13
 - pip (Python package installer)
 - Docker (optional, for containerized deployment)
 - Git, which is used to bind release archives to an exact committed revision
@@ -163,15 +124,15 @@ automated_bookkeeping/
 ### Local Installation
 1.  **Clone the repository (or extract the zip file):**
     ```bash
-    git clone <repository_url>
-    cd automated_bookkeeping
+    git clone https://github.com/Robert-Velhorst/019-FAB.git
+    cd 019-FAB
     ```
-    (If you received a zip file, extract it to your desired location and navigate into the `automated_bookkeeping` directory.)
+    (If you received a release ZIP, extract it and navigate into its FAB directory.)
 
 2.  **Create a virtual environment (recommended):**
     ```bash
-    python3 -m venv venv
-    source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+    python3.13 -m venv .venv
+    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate`
     ```
 
 3.  **Install dependencies:**
@@ -188,20 +149,8 @@ automated_bookkeeping/
     **Security Note**: For sensitive credentials, it is highly recommended to use environment variables instead of directly editing `config.ini`. The `ConfigLoader` is designed to prioritize environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`).
 
 ### Docker Installation
-1.  **Build the Docker image:**
-    ```bash
-    docker build -t automated-bookkeeping .
-    ```
 
-2.  **Run the Docker container:**
-    ```bash
-    docker run -it --rm \\
-        -v /path/to/your/local/data:/app/data \\
-        -e APP_GMAIL_CLIENT_ID="your_client_id" \\
-        -e APP_GMAIL_CLIENT_SECRET="your_client_secret" \\
-        automated-bookkeeping
-    ```
-    (Replace `/path/to/your/local/data` with a path on your host machine to persist data like logs, downloaded documents, etc. Provide necessary environment variables for credentials.)
+Use `docker-compose.yml` so the API, authoritative worker, and dashboard share the same ledger and service identity. Set strong `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` environment values, then run `docker compose up --build`. The Compose definition binds dashboard/API ports to loopback and refuses to render when either required secret is absent. See `docs/deployment_guide.md` for volumes, health checks, and managed-cloud requirements.
 
 ## Usage
 

@@ -52,7 +52,6 @@ print(json.dumps({
     'cv2': 'cv2' in sys.modules,
     'pytesseract': 'pytesseract' in sys.modules,
     'googleapiclient': 'googleapiclient' in sys.modules,
-    'workflow_controller': 'src.workflow.controller' in sys.modules,
     'connector_intake': 'src.operations.local_connector_intake' in sys.modules,
 }, sort_keys=True))
 """
@@ -73,7 +72,6 @@ print(json.dumps({
                 "numpy": False,
                 "pandas": False,
                 "pytesseract": False,
-                "workflow_controller": False,
             },
         )
 

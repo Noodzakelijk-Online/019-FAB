@@ -10,11 +10,9 @@ FAB now separates posting into three stages:
 
 Approved posting execution is disabled unless the local config explicitly enables it.
 
-The legacy `WorkflowController` also defaults to draft-only operation. It will
-create an approval-required review item and an audited routing attempt instead
-of calling a Waveapps or MijnGeldzaken handler directly. Do not enable direct
-workflow dispatch in normal operation; use the export-attempt workflow so
-approval, retries, and results remain in the local ledger.
+The retired checkpoint controller can no longer submit or prepare postings.
+Supported external execution is owned by the operations-ledger export path and
+remains approval, backup, idempotency, and provider-readback gated.
 
 Add these keys to the `[operations]` section in `config/config.ini` when the operator is ready:
 
@@ -22,7 +20,6 @@ Add these keys to the `[operations]` section in `config/config.ini` when the ope
 fab_autonomy_execute_approved_exports = false
 worker_process_approved_postings = true
 worker_process_legacy_postings = false
-workflow_execute_external_posting = false
 ```
 
 Meaning:
@@ -30,7 +27,6 @@ Meaning:
 - `fab_autonomy_execute_approved_exports = false` means approved operations-ledger export attempts are not executed automatically.
 - `worker_process_approved_postings = true` means the worker checks the authoritative `export_attempts` queue, but execution still respects `fab_autonomy_execute_approved_exports`.
 - `worker_process_legacy_postings = false` prevents the worker from polling deprecated `posting_attempts` in parallel.
-- `workflow_execute_external_posting = false` keeps the legacy pipeline from bypassing FAB's draft/approval process.
 
 To enable real execution after careful testing:
 

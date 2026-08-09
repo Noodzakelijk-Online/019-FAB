@@ -27,20 +27,20 @@ graph TD
     end
 
     subgraph Supporting Modules
-        E -- Feedback --> K[Learning Manager]
-        G -- Feedback --> K
-        K -- Model Updates --> F
-        H -- Flagged Documents --> L[Manual Review Interface]
-        I -- Errors --> M[Error Handling]
+        E -- Corrections --> K[Correction Learning]
+        G -- Corrections --> K
+        K -- Reviewed Rules --> F
+        H -- Flagged Documents --> L[Operations Review]
+        I -- Errors --> M[Workflow Evidence]
         M --> L
         N[Config Loader] -- Configuration --> B,D,F,I,K,M,O,P,Q,R,S,T
         O[Security Manager] -- Credential Management --> B,I,Q
-        P[Performance Optimizer] -- Optimization --> D,F
+        P[Boundary Optimizations] -- Bounded and Lazy Work --> D,F
         Q[Banking API] -- Transaction Data --> R[Automated Reconciliation]
         R --> S[Budget Manager]
         S --> T[Financial Analyzer]
-        U[Mobile Capture] --> C
-        V[Data Migration] --> J
+        U[Authenticated Upload] --> C
+        V[Authenticated Historical Import] --> C
         W[Regulatory Compliance] --> H
         X[Backup Manager] -- Data Backup --> A,C,E,G,L,S
     end
@@ -85,12 +85,11 @@ graph TD
 
 ## 2. Module Interfaces and Data Flow
 
-### 2.1. `src/workflow/controller.py` (`WorkflowController`)
+### 2.1. `src/worker/scheduler.py` (`FabWorker`)
 
-*   **Purpose**: Orchestrates the entire document processing workflow. It initializes and coordinates all other modules.
-*   **Key Methods**:
-    *   `run_workflow()`: Main entry point for the workflow. Fetches documents, processes them through the pipeline, categorizes, validates, and dispatches to data entry handlers.
-*   **Data Flow**: Pulls documents from fetchers, pushes to processors, then to categorizers, validators, and finally to data entry handlers.
+*   **Purpose**: Runs the authoritative operations-ledger bookkeeping stages under one owned worker runtime.
+*   **Key Methods**: `run()` executes scheduled backup, governed recovery, connector intake, local autonomy, scheduled reporting, compliance, notifications, approved export handling, verified Drive archival, and retained posting compatibility as isolated audited stages.
+*   **Data Flow**: Every supported document path enters the SQLite operations ledger before processing, review, routing, export approval, external execution, provider readback, and archival evidence. The old checkpoint controller was removed and stale attempts to enable it fail startup.
 
 ### 2.2. `src/config_loader.py` (`ConfigLoader`)
 
@@ -188,9 +187,10 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 
 ### 2.15. `src/document_processors/template_matching_processor.py` (`TemplateMatchingProcessor`)
 
-*   **Purpose**: Extracts structured data from documents based on predefined templates and keyword matching.
-*   **Dependencies**: (None specific beyond Python built-ins).
-*   **Configuration**: `template_matching_templates_dir`.
+*   **Purpose**: Applies user-owned vendor templates to OCR text and emits normalized dates, amounts, VAT, currency, line items, field confidence, and attributable evidence.
+*   **Dependencies**: Python JSON/regular-expression support plus the shared financial field normalizer.
+*   **Configuration**: `vendor_templates`, `vendor_templates_file`, and `template_matching_templates_dir`. Directory files are loaded deterministically, file settings override directory definitions, and inline settings override both.
+*   **Failure behavior**: Invalid files, schemas, or regular expressions are isolated in `template_errors`; one malformed template cannot abort OCR or prevent a later valid template from matching.
 
 ### 2.16. `src/document_processors/line_item_extractor.py` (`LineItemExtractor`)
 
@@ -203,12 +203,6 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 *   **Dependencies**: `opencv-python`.
 *   **Configuration**: `enable_enhanced_preprocessing`, `denoising_strength`, `deskew_threshold`, `deskew_max_angle`, and optional `fab_preprocessing_temp_dir`.
 *   **Safety behavior**: Writes a private temporary PNG outside the source folder, returns only sanitized preprocessing evidence, and marks the derived path for unconditional cleanup. Unsupported inputs and unavailable OpenCV fail safely to the original document.
-
-### 2.18. `src/document_processors/vendor_template_processor.py` (`VendorTemplateProcessor`)
-
-*   **Purpose**: Extracts data based on vendor-specific templates and rules.
-*   **Dependencies**: (None specific beyond Python built-ins).
-*   **Configuration**: `vendor_templates_file`.
 
 ### 2.19. `src/document_processors/bilingual_processor.py` (`BilingualProcessor`)
 
@@ -283,75 +277,18 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 *   **Dependencies**: `requests`.
 *   **Configuration**: Encrypted local dashboard setup or `waveapps_personal_access_token`, `waveapps_personal_id`, `waveapps_personal_category_mapping`, `waveapps_handicap_tag`.
 
-### 2.31. `src/learning/learning_manager.py` (`LearningManager`)
+### 2.31. `src/learning/correction_learning.py` (`CorrectionLearningService`)
 
-*   **Purpose**: Orchestrates the learning process, including analyzing historical data from bookkeeping systems and incorporating user feedback.
-*   **Key Methods**:
-    *   `learn_from_existing_data()`: Triggers analysis of data from Waveapps and Mijngeldzaken.
-    *   `provide_feedback(document_id, original_category, corrected_category)`: Records user corrections for future learning.
-    *   `get_learned_patterns(source)`: Retrieves learned patterns (e.g., vendor-category mappings).
-*   **Dependencies**: `WaveappsAnalyzer`, `MijngeldzakenAnalyzer`, `FeedbackLearner`.
+*   **Purpose**: Converts approved operator corrections into durable, reviewable vendor/category rule suggestions using real document and correction evidence.
+*   **Safety**: It does not fabricate OCR text, scrape provider history, or retrain from synthetic examples. Suggestions remain attributable to the correction that created them.
 
-### 2.32. `src/learning/waveapps_analyzer.py` (`WaveappsAnalyzer`)
+### Operations-owned error and review handling
 
-*   **Purpose**: Analyzes historical transaction data from Waveapps to identify categorization patterns.
-*   **Dependencies**: `requests`.
-*   **Configuration**: `waveapps_business_access_token`, `waveapps_business_id`.
+The duplicate JSON review queues and SMTP retry facade were removed. `FabWorker` records independent stage failures in the operations ledger; `LocalWorkflowRecoveryService` creates governed retries; `LocalExceptionQueueService`, `LocalReviewService`, and `CorrectionLearningService` own operator review, resolution, and attributable correction evidence. These records are exposed through the authenticated local API and the Operations dashboard.
 
-### 2.33. `src/learning/mijngeldzaken_analyzer.py` (`MijngeldzakenAnalyzer`)
+### Performance implementation
 
-*   **Purpose**: Analyzes historical transaction data from mijngeldzaken.nl (e.g., from CSV exports) to identify categorization patterns.
-*   **Dependencies**: `pandas`.
-*   **Configuration**: `mijngeldzaken_export_file_path`.
-
-### 2.34. `src/learning/feedback_learner.py` (`FeedbackLearner`)
-
-*   **Purpose**: Records and manages user feedback on categorization, which can be used to retrain ML models or refine rules.
-*   **Configuration**: `feedback_log_file`.
-
-### 2.35. `src/learning/enhanced_learning_system.py` (`EnhancedLearningSystem`)
-
-*   **Purpose**: Integrates all learning components to provide a comprehensive and adaptive learning system. Handles model retraining based on feedback.
-*   **Dependencies**: `LearningManager`, `FeedbackLearner`, `MLCategorizer`.
-
-### 2.36. `src/error_handling/enhanced_error_recovery.py` (`EnhancedErrorRecovery`)
-
-*   **Purpose**: Provides robust error handling, including retry mechanisms and error notifications.
-*   **Key Methods**:
-    *   `execute_with_retry(func, operation_name, *args, **kwargs)`: Executes a function with retry logic.
-    *   `handle_error(exception, operation_name)`: Logs the error and triggers notifications/manual review if configured.
-*   **Configuration**: `error_recovery_max_retries`, `error_recovery_retry_delay_seconds`, `email_notifications_enabled`.
-
-### 2.37. `src/error_handling/manual_review.py` (`ManualReviewInterface`)
-
-*   **Purpose**: Manages a queue of documents that require manual review due to processing errors or low confidence categorization.
-*   **Key Methods**:
-    *   `add_to_review_queue(document_id, reason, details)`: Adds a document to the queue.
-    *   `get_pending_reviews()`: Retrieves documents awaiting review.
-    *   `mark_reviewed(document_id, new_status, resolution)`: Marks a document as reviewed.
-*   **Configuration**: `manual_review_queue_file`.
-
-### 2.38. `src/performance/batch_processor.py` (`BatchProcessor`)
-
-*   **Purpose**: Processes documents in batches to improve efficiency and reduce overhead.
-*   **Key Methods**:
-    *   `process_batch(items, processing_function)`: Applies a processing function to a list of items in batches.
-
-### 2.39. `src/performance/cache_manager.py` (`CacheManager`)
-
-*   **Purpose**: Caches frequently accessed data or results of expensive operations to improve performance.
-*   **Key Methods**:
-    *   `set(key, value, ttl)`: Stores data in the cache.
-    *   `get(key)`: Retrieves data from the cache.
-    *   `clear(key)`: Removes data from the cache.
-*   **Configuration**: `cache_dir`.
-
-### 2.40. `src/performance/performance_optimizer.py` (`PerformanceOptimizer`)
-
-*   **Purpose**: Identifies and implements performance optimizations across the system.
-*   **Key Methods**:
-    *   `optimize_processing_pipeline(pipeline)`: Applies optimizations to the document processing pipeline.
-    *   `profile_resource_usage()`: Monitors and reports on CPU/memory usage.
+The placeholder performance wrappers were removed. Production performance is implemented at the owning boundaries: lazy OCR/ML imports, bounded worker batches, SQLite WAL and indexes, runtime leases, compressed HTTP responses, compact projections, single-flight reads, immutable web assets, and build-size budgets.
 
 ### Retired: standalone mobile capture
 
@@ -385,16 +322,9 @@ The unauthenticated Flask uploader was removed. It acknowledged arbitrary filena
     *   `validate_document(document_data)`: Runs all configured validators on a document.
 *   **Dependencies**: `ReceiptValidator`.
 
-### 2.46. `src/migration/data_migration.py` (`DataMigration`)
+### Historical data imports
 
-*   **Purpose**: Handles the migration of historical financial data from old systems or formats into the new system.
-*   **Key Methods**:
-    *   `migrate_data()`: Executes the data migration process.
-*   **Configuration**: `migration_source_db`, `migration_target_db`.
-
-### 2.47. `src/migration/migration_wizard.py` (`MigrationWizard`)
-
-*   **Purpose**: Provides a guided interface for users to perform data migrations.
+The interactive placeholder migration wizard was removed. Supported historical imports use authenticated bank-transaction ingestion, connector intake, and document upload APIs, all of which normalize into the operations ledger with source identity, duplicate detection, review state, and audit evidence.
 
 ### 2.48. `src/budget/budget_manager.py` (`BudgetManager`)
 
@@ -544,7 +474,7 @@ python -m unittest discover tests
 *   **Ledger Schema Safety**: `LocalOperationsLedger` records ordered, immutable migration identifiers in `schema_migrations` and mirrors the version in SQLite `user_version`. Startup rejects future, unknown, incomplete, or checksum-mismatched history. Before upgrading a populated legacy ledger, it creates a private SQLite backup through the backup API, verifies `PRAGMA integrity_check`, writes a SHA-256 manifest atomically, and only then initializes the new schema. Schema status is exposed through health and sanitized doctor output; rollback restores the verified snapshot with FAB stopped and uses the prior compatible release.
 *   **Correlated API Errors**: Every JSON error under `/api/` is normalized after route handling to include `success=false`, `status`, `errorCode`, `message`, and a bounded `requestId`; existing route-specific fields remain available. The effective ID is returned in `X-Request-ID`. Unhandled exceptions produce generic client text and a sanitized correlated local log entry.
 *   **Local Readiness Settings**: `LocalReadinessService` powers `/api/settings`, the Settings panel, and the compact readiness block inside `/api/health`. It checks local ledger/backup/intake paths, source readiness for local folders, Gmail, Drive, Photos, Freshdesk, Wave, MijnGeldzaken, OCR, and banking, dependency availability for Tesseract, Playwright, Flask, Google clients, Pillow, and SQLite, and remote API exposure safety. Credential values are never returned; only configured/missing/file-exists status and secret key names are exposed.
-*   **Local Autonomous Cycle**: `LocalAutonomousService` powers `/api/autonomy/plan`, `/api/autonomy/run`, the recurring `FabWorker`, and the Autonomous Cycle dashboard panel. It combines readiness, operations health, intake state, review queues, routable documents, trusted exact-vendor category candidates, pending routing drafts, imported bank transactions, reconciliation candidates, and Wave workflow planning into one policy-gated run loop. Local intake, processing, bounded trusted-category application, draft preparation, reconciliation candidates, stale-draft regeneration, and read-only planning can run automatically. For configured Wave targets, the `refresh_wave_entity_mirror` action refreshes customers, products/services, and invoices before routing when no prior sync exists, the mirror is stale, or a failed run has passed its retry window. `includeWaveSync=false` or `fab_autonomy_sync_wave_entities=false` keeps this manual-only; sync failures become attention evidence and do not abort unrelated local bookkeeping work. Real runs acquire the `local_autonomous_cycle` SQLite runtime lease; concurrent triggers receive `409 already_running`, while dry runs remain non-mutating. The worker runs durable connector intake first, then local autonomy, reports, compliance, notifications, operations exports, and compatibility queues as isolated audited stages. The old checkpoint workflow remains opt-in through `worker_run_legacy_workflow`; it is off by default. Approved exports run only through their configured worker/autonomy execution gates; they remain approval-bound and preflight-backed-up. MijnGeldzaken external submission remains supervised. Remote exposure blocks, non-category review decisions, draft approvals, credential changes, backup restore, deletion, and outbound messages remain outside automatic execution.
+*   **Local Autonomous Cycle**: `LocalAutonomousService` powers `/api/autonomy/plan`, `/api/autonomy/run`, the recurring `FabWorker`, and the Autonomous Cycle dashboard panel. It combines readiness, operations health, intake state, review queues, routable documents, trusted exact-vendor category candidates, pending routing drafts, imported bank transactions, reconciliation candidates, and Wave workflow planning into one policy-gated run loop. Local intake, processing, bounded trusted-category application, draft preparation, reconciliation candidates, stale-draft regeneration, and read-only planning can run automatically. For configured Wave targets, the `refresh_wave_entity_mirror` action refreshes customers, products/services, and invoices before routing when no prior sync exists, the mirror is stale, or a failed run has passed its retry window. `includeWaveSync=false` or `fab_autonomy_sync_wave_entities=false` keeps this manual-only; sync failures become attention evidence and do not abort unrelated local bookkeeping work. Real runs acquire the `local_autonomous_cycle` SQLite runtime lease; concurrent triggers receive `409 already_running`, while dry runs remain non-mutating. The worker runs durable connector intake first, then local autonomy, reports, compliance, notifications, operations exports, verified Drive archival, and the retained posting compatibility queue as isolated audited stages. The checkpoint workflow has been retired; a stale enablement flag fails worker construction. Approved exports run only through their configured worker/autonomy execution gates; they remain approval-bound and preflight-backed-up. MijnGeldzaken external submission remains supervised. Remote exposure blocks, non-category review decisions, draft approvals, credential changes, backup restore, deletion, and outbound messages remain outside automatic execution.
 
 ### 5.2. Supported cloud release and deployment
 

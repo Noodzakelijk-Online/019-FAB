@@ -107,11 +107,29 @@ class ReleasePackageTests(unittest.TestCase):
             "main.py",
             "src/cloud_functions.py",
             "src/mobile_capture/mobile_document_capture.py",
+            "src/workflow/controller.py",
+            "src/workflow/checkpoint_store.py",
+            "src/learning/enhanced_learning_system.py",
+            "src/learning/learning_manager.py",
+            "src/learning/feedback_learner.py",
+            "src/learning/waveapps_analyzer.py",
+            "src/learning/mijngeldzaken_analyzer.py",
+            "src/performance/batch_processor.py",
+            "src/performance/cache_manager.py",
+            "src/performance/performance_optimizer.py",
+            "src/migration/data_migration.py",
+            "src/migration/migration_wizard.py",
+            "src/document_processors/vendor_template_processor.py",
+            "src/manual_review/manual_review_interface.py",
+            "src/error_handling/enhanced_error_recovery.py",
+            "src/error_handling/manual_review.py",
         )
         self.assertFalse([path for path in retired_paths if (repository / path).exists()])
         requirements = (repository / "requirements.txt").read_text(encoding="utf-8").lower()
         self.assertNotIn("functions-framework", requirements)
         self.assertNotIn("google-cloud-storage", requirements)
+        compose = (repository / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("FAB_INSTANCE_ROOT: /app", compose)
 
     def _write_required_sources(self):
         files = {

@@ -9,7 +9,7 @@ from src.security.local_secret_store import (
 )
 
 class ConfigLoader:
-    """Loads sectioned config while preserving legacy flat config keys."""
+    """Load sectioned configuration and collision-safe flat runtime aliases."""
 
     def __init__(self, config_file: str = "config/config.ini"):
         self.config_file = config_file
@@ -92,7 +92,7 @@ class ConfigLoader:
         return stripped
 
     def _add_flat_aliases(self, config_data: Dict[str, Any]) -> None:
-        """Expose sectioned values as flat keys for legacy workflow modules."""
+        """Expose section-qualified flat aliases for runtime service consumers."""
         for section, values in list(config_data.items()):
             if not isinstance(values, dict):
                 continue

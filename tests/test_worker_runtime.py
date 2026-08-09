@@ -55,15 +55,16 @@ class TestWorkerRuntime(unittest.TestCase):
             finally:
                 child.terminate()
                 child.wait(timeout=10)
+                if child.stdout:
+                    child.stdout.close()
+                if child.stderr:
+                    child.stderr.close()
 
     def test_one_shot_runner_uses_owned_runtime_and_preserves_loaded_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             original_directory = Path.cwd()
-            loaded_config = {
-                "worker_run_once": False,
-                "worker_run_legacy_workflow": False,
-            }
+            loaded_config = {"worker_run_once": False}
             worker = MagicMock()
 
             with patch.object(
@@ -75,7 +76,6 @@ class TestWorkerRuntime(unittest.TestCase):
 
             configured = worker_type.call_args.args[0]
             self.assertTrue(configured["worker_run_once"])
-            self.assertFalse(configured["worker_run_legacy_workflow"])
             self.assertFalse(loaded_config["worker_run_once"])
             worker.run.assert_called_once_with()
             self.assertEqual(Path.cwd(), original_directory)

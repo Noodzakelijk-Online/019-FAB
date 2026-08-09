@@ -76,21 +76,3 @@ class RegulatoryCompliance:
             "compliant_rules": compliant_rules,
         }
 
-    def generate_tax_export(self, categorized_data_list: List[Dict[str, Any]], export_format: str = "csv") -> str:
-        """Generates a tax export file (placeholder)."""
-        # This would involve aggregating data and formatting it according to tax authority requirements.
-        print(f"Generating tax export in {export_format} format...")
-        # For demonstration, just return a dummy path
-        export_path = f"/tmp/tax_export_{datetime.date.today().isoformat()}.{export_format}"
-        with open(export_path, "w") as f:
-            f.write("Dummy tax export content\n")
-            for data in categorized_data_list:
-                extracted_data = data.get("extracted_data", {})
-                f.write(
-                    f"{extracted_data.get('transaction_date')},"
-                    f"{extracted_data.get('total_amount')},"
-                    f"{data.get('category')}\n"
-                )
-        return export_path
-
-
