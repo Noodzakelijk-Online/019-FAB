@@ -33,7 +33,7 @@ Security considerations for the execution environment are paramount.
 
 - **Least Privilege**: The system operates with the minimum necessary permissions in its execution environment.
 - **Containerization (Docker)**: For containerized deployments, Docker images are built with security best practices, minimizing the attack surface (e.g., using minimal base images, avoiding unnecessary packages).
-- **Cloud Security**: For cloud deployments (Google Cloud Functions, Cloud Run), leverage Google Cloud's built-in security features, such as VPC networks, firewall rules, and IAM policies.
+- **Cloud Security**: Run the persistent Compose services or equivalent images behind private networking, authenticated TLS ingress, firewall policy, managed identities/secrets, encrypted volumes, and monitored backups. The removed stateless Cloud Function compatibility handlers are not a supported financial-data boundary.
 - **Regular Updates**: Dependencies and system components are kept up-to-date to patch known vulnerabilities.
 
 ## 5. Error Handling and Resilience

@@ -20,8 +20,7 @@ The following Python libraries are used in the project. They are listed in `requ
 - `tensorflow` or `pytorch`: (Optional, depending on specific ML model implementation) For deep learning models.
 - `cryptography`: For secure credential encryption.
 - `python-dotenv`: For loading environment variables.
-- `fastapi` or `flask`: (Optional, for manual review UI or local API) For building web interfaces.
-- `uvicorn`: (If using FastAPI) ASGI server.
+- `Flask` and `waitress`: Authenticated local operations API and production WSGI server.
 - `requests`: For general HTTP requests to various APIs (e.g., Waveapps).
 - `beautifulsoup4` or `lxml`: For parsing HTML/XML if needed (e.g., for specific web scraping scenarios, though Playwright handles most of this).
 - `schedule`: For scheduling recurring tasks.
@@ -32,11 +31,8 @@ The following Python libraries are used in the project. They are listed in `requ
 
 ## External Tools / Services
 
-- **Google Cloud Platform (GCP)**:
-    - Google Cloud Vision API (for primary OCR).
-    - Google Cloud Storage (for temporary storage of documents, if needed).
-    - Google Cloud Functions / Cloud Run (for cloud deployment).
-    - Google Secret Manager (for secure credential storage in cloud).
+- **Google Cloud Platform (optional)**: Google Cloud Vision may be configured as an OCR provider. FAB does not deploy unauthenticated Google Cloud Functions.
+- **Docker Compose**: Supported multi-service cloud/container runtime; remote deployment still requires authenticated TLS ingress and managed secrets.
 - **Tesseract OCR Engine**: Required if Tesseract is used as a fallback OCR method. Needs to be installed in the execution environment.
 - **Waveapps API**: For integration with Waveapps accounting software.
 - **mijngeldzaken.nl**: The web application for which browser automation is performed.

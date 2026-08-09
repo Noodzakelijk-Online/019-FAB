@@ -13,7 +13,6 @@ from src.performance.cache_manager import CacheManager
 from src.performance.performance_optimizer import PerformanceOptimizer
 from src.error_handling.enhanced_error_recovery import EnhancedErrorRecovery
 from src.compliance.regulatory_compliance import RegulatoryCompliance
-from src.mobile_capture.mobile_document_capture import MobileDocumentCapture
 from src.reconciliation.automated_reconciliation import AutomatedReconciliation
 from src.migration.data_migration import DataMigration
 from src.migration.migration_wizard import MigrationWizard
@@ -35,7 +34,6 @@ class TestComponents(unittest.TestCase):
             "error_recovery_max_retries": 3,
             "error_recovery_retry_delay_seconds": 1,
             "compliance_rules_file": os.path.join(self.temp_dir.name, "compliance_rules.json"),
-            "mobile_capture_upload_dir": os.path.join(self.temp_dir.name, "mobile_uploads"),
             "reconciliation_threshold": 0.05,
             "migration_source_db": f"sqlite:///{os.path.join(self.temp_dir.name, 'source.db')}",
             "migration_target_db": f"sqlite:///{os.path.join(self.temp_dir.name, 'target.db')}",
@@ -118,12 +116,6 @@ class TestComponents(unittest.TestCase):
         self.assertTrue(result["is_compliant"])
         self.assertIn("rule1", result["compliant_rules"])
         os.remove(self.config["compliance_rules_file"])
-
-    def test_mobile_document_capture(self):
-        capture = MobileDocumentCapture(self.config)
-        # This test would involve simulating an upload, which is complex
-        # For now, just test initialization
-        self.assertIsNotNone(capture)
 
     def test_automated_reconciliation(self):
         reconciliation = AutomatedReconciliation(self.config)

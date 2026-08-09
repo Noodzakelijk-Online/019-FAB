@@ -22,11 +22,10 @@ Before you can use the system, you need to complete the initial setup steps.
 
 Ensure you have the following installed on your system:
 
-*   **Python 3.9 or higher**: Download from [python.org](https://www.python.org/downloads/).
+*   **Python 3.13**: `Start-FAB.cmd` provisions the project-local runtime automatically on Windows through the Windows Python launcher, `uv`, or a matching system `python` installation.
 *   **`pip`**: Python's package installer, usually comes with Python.
 *   **`git`** (optional, if cloning from a repository): Download from [git-scm.com](https://git-scm.com/downloads).
 *   **Docker** (optional, for containerized deployment): Download from [docker.com](https://www.docker.com/products/docker-desktop).
-*   **Google Cloud SDK** (optional, if deploying to Google Cloud Functions): Follow instructions on [cloud.google.com](https://cloud.google.com/sdk/docs/install).
 
 ### 3.2. Installation
 
@@ -354,15 +353,16 @@ python -m unittest discover tests
 
 ### 5.3. Building Deployment Packages
 
-The `package.py` script can be used to create deployable zip archives for local or cloud environments.
+The `package.py` script creates checksum-bound source archives for the supported Windows 11 standalone and Docker Compose environments. It must run from a clean committed checkout and never packages local configuration, tokens, credentials, financial data, logs, backups, test fixtures, or build output.
 
 To build packages:
 
 ```bash
-python package.py
+python package.py --target windows
+python package.py --target compose
 ```
 
-This will create `automated_bookkeeping_local_YYYYMMDD_HHMMSS.zip` and `automated_bookkeeping_cloud_YYYYMMDD_HHMMSS.zip` files in the `dist/` directory.
+This creates `fab-windows-*.zip` or `fab-compose-*.zip` plus a `.zip.sha256` sidecar in `dist/`. Every archive includes `FAB/RELEASE-MANIFEST.json`; the builder verifies every member before reporting success. Cloud archives are for the authenticated Compose contract described in `deployment_guide.md`, not Google Cloud Functions.
 
 ## 6. Advanced Usage and Customization
 

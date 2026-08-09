@@ -12,7 +12,7 @@ _SOURCE_DIRECTORIES = (
     "web/shared",
 )
 _SOURCE_FILES = (
-    "main.py",
+    "src/main.py",
     "Start-FAB.ps1",
     "Stop-FAB.ps1",
     "requirements.txt",

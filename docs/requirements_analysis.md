@@ -12,7 +12,7 @@ Develop a fully automated system to fetch financial documents, extract relevant 
 ## Core Constraints & Technologies
 - **Programming Language**: Python is strongly recommended due to library support for APIs, OCR, and browser automation.
 - **No New Third-Party Tools**: Only use the APIs and capabilities of Gmail, Google Drive, Google Photos, Freshdesk, mijngeldzaken.nl, Waveapps, and potentially Google Cloud services (like Cloud Vision API). No external services like Zapier, Make, Dext, Nanonets etc.
-- **Execution Environment**: The solution should be able to run both locally and in cloud environments (Google Cloud Functions, Google Cloud Run).
+- **Execution Environment**: The solution must run locally on Windows 11 and in a persistent container environment. FAB uses Docker Compose or equivalent private orchestration because the worker, ledger, source evidence, and archive gates require durable shared state; stateless Cloud Function handlers are not supported.
 - **Security**: Secure storage and handling of all credentials (API keys, OAuth 2.0 tokens, website passwords) is critical. Use environment variables, secrets managers, or other secure methods – no hardcoding.
 
 ## Detailed Requirements

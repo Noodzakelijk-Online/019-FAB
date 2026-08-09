@@ -56,7 +56,6 @@ automated_bookkeeping/
 │   │   ├── hybrid_categorizer.py
 │   │   ├── ml_categorizer.py
 │   │   └── rule_based_categorizer.py
-│   ├── cloud_functions.py
 │   ├── compliance/
 │   │   └── regulatory_compliance.py
 │   ├── config_loader.py
@@ -107,8 +106,6 @@ automated_bookkeeping/
 │   ├── migration/
 │   │   ├── data_migration.py
 │   │   └── migration_wizard.py
-│   ├── mobile_capture/
-│   │   └── mobile_document_capture.py
 │   ├── performance/
 │   │   ├── __init__.py
 │   │   ├── batch_processor.py
@@ -144,7 +141,6 @@ automated_bookkeeping/
 │   ├── test_learning_modules.py
 │   ├── test_manual_review.py
 │   ├── test_migration.py
-│   ├── test_mobile_capture.py
 │   ├── test_performance.py
 │   ├── test_photos_fetcher.py
 │   ├── test_receipt_validator.py
@@ -162,7 +158,7 @@ automated_bookkeeping/
 - Python 3.9+
 - pip (Python package installer)
 - Docker (optional, for containerized deployment)
-- Google Cloud SDK (if deploying to Google Cloud Functions)
+- Git, which is used to bind release archives to an exact committed revision
 
 ### Local Installation
 1.  **Clone the repository (or extract the zip file):**
@@ -358,11 +354,19 @@ python -m unittest discover tests
 ```
 
 ### Building Deployment Packages
-Use the `package.py` script to create deployable zip files:
+Use `package.py` from a clean committed checkout to create verified source
+archives for the supported Windows 11 or Docker Compose runtimes:
 ```bash
-python package.py
-# This will create packages in the `dist/` directory
+python package.py --target windows
+python package.py --target compose
 ```
+
+Each ZIP is built only from tracked non-runtime files, contains a
+`RELEASE-MANIFEST.json` with per-file SHA-256 checksums, and has a matching
+`.zip.sha256` sidecar. Packaging refuses modified tracked files, secret paths,
+credential-like files, runtime data, tests, and CI-only files. The old
+unauthenticated Cloud Function and standalone mobile-upload packages are not
+supported.
 
 ## Deployment
 

@@ -1,6 +1,6 @@
 # Deployment Guide for Automated Bookkeeping Solution
 
-This guide provides instructions for deploying the Automated Bookkeeping Solution to various environments, including local setups and Google Cloud Functions.
+This guide covers the supported Windows 11 standalone, supervised ngrok, and Docker Compose deployment contracts.
 
 ## 1. Local Deployment
 
@@ -175,5 +175,7 @@ The web service's Docker gateway trust is intentionally narrow: it applies only 
 ## 3. Cloud Deployment Boundary
 
 No unauthenticated Google Cloud Function deployment is supported. For cloud use, deploy the same Compose services or equivalent images behind private networking, TLS, an authenticated reverse proxy, a managed secret store, encrypted persistent volumes, monitored backups, and provider egress controls. A cloud deployment is not accepted until restore, provider sandbox, authorization-expiry, and attachment-readback tests pass in that exact environment.
+
+Build a tracked-source-only Compose release from a clean committed checkout with `python package.py --target compose`. Verify the emitted `.zip.sha256` sidecar before transferring it. The archive manifest binds every included file to its size and SHA-256 checksum; it never includes local secrets or runtime financial data.
 
 

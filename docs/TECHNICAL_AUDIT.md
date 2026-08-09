@@ -66,10 +66,11 @@ Audit date: 2026-08-09
 - Compose configuration, both images, authenticated service health, dashboard access, a complete 24-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
 - SQLite rollback is restore-based by design. Operational recovery still requires a rehearsed restore using the prior compatible FAB release.
 - Formal penetration testing, DPIA approval, accountant validation, and production disaster-recovery exercises remain external work.
-- Disabled legacy compatibility modules still contain prototype-only helpers.
-  Supported launch, API, dashboard, and worker paths do not invoke them, but a
-  final codebase-wide no-placeholder claim requires removing or completing
-  those helpers.
+- Production-looking Google Cloud Function, root workflow, and standalone
+  mobile-upload compatibility entrypoints have been removed. Disabled internal
+  legacy learning, migration, and tax-export helpers still contain incomplete
+  behavior; a final codebase-wide no-placeholder claim requires removing or
+  completing those helpers.
 
 ## Technical debt register
 
@@ -79,6 +80,6 @@ Audit date: 2026-08-09
 | Medium | Image optimization | The OCR/PDF-capable API image is 1.52 GB; consider a separate lightweight API image and an OCR worker image if registry transfer or cold-start cost becomes material. |
 | Medium | Performance baseline | Run sustained idle-host and concurrent-refresh tests, and track cold backup-integrity scan time separately from warm bounded-health latency and payload size. |
 | Medium | Recovery rehearsal | Exercise the documented schema rollback and full source-evidence recovery process on a production-sized copy before unattended upgrades. |
-| Medium | Legacy compatibility retirement | Remove or complete prototype-only migration, learning, mobile-capture, and tax-export helpers after confirming no retained deployment depends on them. |
+| Medium | Legacy compatibility retirement | Mobile/cloud/root-launch entrypoints are retired. Remove or complete the remaining internal migration, learning, performance, and tax-export helpers after confirming no retained deployment depends on them. |
 | Medium | Privacy governance | Complete a signed DPIA and data-processing inventory before multi-user production use. |
 | Low | Public product shell | Keep public deployment, capability, and billing text synchronized with the operator product before each release. |

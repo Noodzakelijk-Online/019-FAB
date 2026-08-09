@@ -13,8 +13,6 @@ langdetect # For BilingualProcessor
 python-dateutil # Windows-compatible IANA timezone data for local scheduling
 pandas # For DataMigration and FinancialAnalyzer
 openpyxl # For reading .xlsx files with pandas
-Flask # For MobileDocumentCapture and ManualReviewInterface (if web-based)
+Flask # Authenticated local operations API and retained compatibility dashboard
 waitress # Production WSGI server for the local FAB API
-functions-framework # For Google Cloud Functions
-google-cloud-storage # For Google Cloud Functions
 cryptography # For SecurityManager

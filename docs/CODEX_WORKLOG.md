@@ -1,5 +1,18 @@
 # Codex Worklog
 
+## 2026-08-09 - Release safety and unsupported entrypoint retirement
+
+- Removed duplicate Google Cloud Function handlers that could return success after OCR/categorization without durable ledger, review, export, or provider-readback evidence.
+- Removed the unauthenticated standalone mobile Flask uploader; local/mobile uploads now use the authenticated operations intake contract and authoritative ledger path.
+- Removed the old root `main.py` launcher so the only documented one-shot entrypoint is the ownership-checked `python -m src.main` worker cycle.
+- Removed `functions-framework` and `google-cloud-storage` from the production dependency set because no supported runtime imports them.
+- Bound the project-local Windows `.venv` to the exact `requirements-local.txt` checksum. A changed dependency contract now stops FAB and rebuilds only the verified, non-linked environment before recording the new checksum, preventing retired packages from accumulating across upgrades.
+- Live upgrade acceptance exposed and fixed a Windows bootstrap edge case: an unavailable `py -3.13` registration no longer prevents fallback to an installed `uv`-managed Python 3.13 runtime. Native probes now use explicit exit codes, and incomplete environments are removed only through the same path and reparse-point guard.
+- Rebuilt `package.py` around clean committed Git source. Windows and Compose ZIPs exclude tests, CI files, secret/runtime paths, credential-like files, and untracked state; each archive includes a per-file SHA-256 manifest and archive hash sidecar.
+- Added atomic package output, failed-build cleanup, path/link/duplicate/member-count and compressed/uncompressed size bounds, dirty-tree refusal, required-runtime inventories, exact source-commit binding, and complete post-build verification.
+- Added regression coverage for successful Windows/Compose builds, secret and retired-entrypoint rejection, tamper detection, oversized manifests, dirty sources, and cleanup after final verification failure.
+- Verification passed 822 backend tests plus 38 subtests, 163 web tests, TypeScript checking, production build budgets, checksum-bound Windows dependency reconciliation, authenticated local API/HAI acceptance, and real Windows/Compose archive verification. No provider operation or runtime financial file was included or changed.
+
 ## 2026-08-09 - Production entrypoint consolidation
 
 - Routed `python -m src.main` through one ownership-checked cycle of the

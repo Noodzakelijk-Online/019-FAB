@@ -245,13 +245,13 @@ The current repository already contains many module-level foundations for this v
 - `src/performance/cache_manager.py`
 - `src/performance/performance_optimizer.py`
 - `src/backup/backup_manager.py`
-- `cloud_functions.py`
-- `src/cloud_functions.py`
+- `package.py`
+- `docker-compose.yml`
 - `Dockerfile`
 
 ### Enhancement Gaps
 
-- Processing should move toward queued jobs and workers.
+- The API and worker now own queued stages through the durable SQLite workflow and runtime-lease model.
 - Source-complete version 2 recovery packages now cover the operations ledger and every checksum-matching original document, fail closed on evidence gaps, run on a due-aware worker schedule, and expose redacted status plus strict creation in the operator dashboard.
 - Generated report/export artifacts and a sanitized configuration snapshot still need explicit package coverage.
 - Ledger restore has confirmation, integrity checks, pre-restore backup, and audit logging; automated relocation/restoration of source-document bytes into a new storage root still needs a separately approved recovery workflow.

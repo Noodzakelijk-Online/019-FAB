@@ -18,7 +18,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 011 Core workflow vertical slice | Implemented | Intake through recovery covered by ledger services and tests. |
 | 012 External provider reality review | Implemented | Capability states distinguish live, supervised, and blocked. |
 | 013 Compliance and platform policy boundaries | Partial | Guardrails exist; legal/accountant and provider-policy sign-off remains external. |
-| 014 No fake success and no mock production behavior | Partial | Supported entrypoints use the authoritative ledger worker and execution/readback states are explicit. Disabled legacy compatibility helpers still contain incomplete prototype methods; they are not product capabilities and must be removed or completed before final codebase-wide certification. |
+| 014 No fake success and no mock production behavior | Partial | Supported entrypoints use the authoritative ledger worker and execution/readback states are explicit. Fake-success Cloud Function, root workflow, and unauthenticated mobile-upload entrypoints are removed and release tests prevent their packaging. Disabled internal migration/learning/tax helpers still require retirement or completion before final codebase-wide certification. |
 | 015 Storage, files, uploads, and media safety | Implemented | Hashing, path validation, ignored runtime roots, and recovery evidence. |
 | 016 Background jobs, schedulers, and workers | Implemented | Worker, schedules, leases, recovery, reports, and notifications. |
 | 017 Idempotency and duplicate action prevention | Implemented | Content fingerprints, duplicate candidates, operation IDs, runtime leases. |
@@ -36,7 +36,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 029 Security headers and web security | Implemented | Restrictive production CSP, conditional HTTPS HSTS, standard browser protections, request tracing, auth/sanitization, and real TCP/live header tests are wired; independent penetration testing remains a separate external gate. |
 | 030 Secrets management and credential rotation | Partial | Local encrypted Wave store and OAuth reauthorization state; full rotation drill remains. |
 | 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. `python -m src.main` uses the same owned worker path for one cycle. Managed ngrok start/stop wrappers verify ownership and never pool or stop another project's endpoint. |
-| 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, HAI/cloud status, and local-operator acceptance passed. A dedicated production endpoint is still an infrastructure activation gate. |
+| 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, HAI/cloud status, and local-operator acceptance passed. Clean-source Windows/Compose release archives are source-commit and checksum bound. A dedicated production endpoint is still an infrastructure activation gate. |
 | 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |
 | 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, workflow state, and project-owned cloud status. |
@@ -70,7 +70,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 063 Provider credential verification checklist | Implemented | Gmail/Drive authorization and Wave setup/readiness drawers. |
 | 064 Threat model and security design review | Implemented | `SECURITY.md` plus existing `security_approach.md`. |
 | 065 Privacy impact assessment | Partial | Data boundaries documented; signed DPIA remains external. |
-| 066 Supply chain and dependency review | Implemented | Frozen web lockfile, pinned CI actions, production bundle budgets, high-severity dependency audit, and peer-contract checks run locally and in CI; license/legal review remains phase 067. |
+| 066 Supply chain and dependency review | Implemented | Frozen web lockfile, pinned CI actions, production bundle budgets, high-severity dependency audit, peer-contract checks, tracked-only release manifests, and retired unused Cloud Function dependencies run locally and in CI; license/legal review remains phase 067. |
 | 067 License and third-party service review | Partial | License/dependency docs exist; legal review remains external. |
 | 068 CI/CD quality gates | Implemented | Linux/Windows backend plus web audit, peer check, type check, test, and production build-budget workflow. |
 | 069 Release process, canary, and rollback | Partial | Verification/backup rollback exists; production canary environment does not. |
@@ -98,7 +98,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 091 Feature-level definition of done | Implemented | Status definition and acceptance contract in this matrix. |
 | 092 Fresh-clone dry run | Implemented | Clean clone of `76e5fff` passed exact remote identity, clean status, Python compilation, Compose parsing, frozen install, dependency audit, TypeScript, all 161 web tests, and production build budgets. |
 | 093 Manual verification evidence | Partial | Local browser, Windows, HAI, and container evidence passed; live provider acceptance remains blocked. |
-| 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, and `git diff --check` passed. |
+| 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, release archive inventory/checksum verification, and `git diff --check` passed. |
 | 095 Completion matrix | Implemented | This document includes every phase. |
 | 096 Final verification report | Implemented | `FINAL_VERIFICATION_REPORT.md` records local, browser, container, fresh-clone, safety, and provider-boundary results. |
 | 097 Final response requirements | Partial | Can be complete only in the delivery response. |
@@ -107,7 +107,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 100 Real-provider cleanup and account safety | Partial | No real mutation in this audit; live account acceptance requires the owner. |
 | 101 Support/debug bundle design | Implemented | Sanitized CLI/API/dashboard ZIP with privacy tests. |
 | 102 Data retention and archival policy | Implemented | Retention/compliance services and evidence-gated Drive archival. |
-| 103 Migration from prototype to production | Partial | Local operational product works; deployment/provider/legal gates remain. |
+| 103 Migration from prototype to production | Partial | Local operational product works and unsupported Cloud Function/mobile/root launchers are retired; internal legacy helpers plus deployment/provider/legal gates remain. |
 | 104 Operator safety stop and emergency controls | Implemented | Persistent audited stop, per-step checks, dashboard/API/HAI policy. |
 | 105 User onboarding and first-run wizard | Partial | Activation checklist/setup drawers exist; end-to-end guided wizard remains. |
 | 106 Role-based settings and team permissions | Partial | Admin/operator gating exists; granular multi-user team permissions remain. |
@@ -118,5 +118,5 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 111 Ambiguous external action resolution | Implemented | Ambiguous/supervised/export/attachment states fail closed. |
 | 112 Versioning and changelog discipline | Partial | Git history and worklog exist; formal release changelog/version automation remains. |
 | 113 Regression baseline | Implemented | CI and local backend/web suites. |
-| 114 Maintenance and refactoring review | Partial | Audit and debt register complete; remaining debt is explicit. |
+| 114 Maintenance and refactoring review | Partial | External-looking unsafe compatibility entrypoints and dependencies are retired; remaining internal legacy debt is explicit. |
 | 115 Final human-operator readiness test | Blocked | Requires owner-run live provider acceptance and explicit human sign-off. |

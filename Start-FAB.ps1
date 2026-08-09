@@ -377,27 +377,106 @@ function Wait-FabEndpoint {
     throw "$Name did not become ready at $Url within $TimeoutSeconds seconds. Check $logsRoot."
 }
 
+function Invoke-FabNativeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [switch]$DiscardOutput
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        if ($DiscardOutput) {
+            & $FilePath @ArgumentList 2>$null | Out-Null
+        }
+        else {
+            $commandOutput = @(& $FilePath @ArgumentList 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $commandOutput | ForEach-Object { Write-Warning ([string]$_) }
+            }
+        }
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Remove-FabVirtualEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstanceRoot,
+        [Parameter(Mandatory = $true)][string]$VenvPath
+    )
+
+    if (-not (Test-Path -LiteralPath $VenvPath)) {
+        return
+    }
+    $expectedVenvPath = [System.IO.Path]::GetFullPath((Join-Path $InstanceRoot ".venv")).TrimEnd('\')
+    $actualVenvPath = [System.IO.Path]::GetFullPath($VenvPath).TrimEnd('\')
+    if ($actualVenvPath -ne $expectedVenvPath) {
+        throw "Refusing to reconcile an unexpected Python environment path: $actualVenvPath"
+    }
+    $venvItem = Get-Item -LiteralPath $VenvPath -Force
+    if (($venvItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to reconcile FAB's Python environment because .venv is a reparse point."
+    }
+    Remove-Item -LiteralPath $VenvPath -Recurse -Force
+}
+
 Set-Location -LiteralPath $root
 
+$requirementsPath = Join-Path $root "requirements-local.txt"
+$requirementsHash = (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $venvRoot = Join-Path $root ".venv"
 $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+$venvRequirementsMarker = Join-Path $venvRoot ".fab-requirements.sha256"
+if (Test-Path -LiteralPath $venvRoot) {
+    $installedRequirementsHash = ""
+    if (Test-Path -LiteralPath $venvRequirementsMarker) {
+        $installedRequirementsHash = ([string](Get-Content -LiteralPath $venvRequirementsMarker -Raw)).Trim().ToLowerInvariant()
+    }
+    if ($installedRequirementsHash -ne $requirementsHash) {
+        Write-Host "FAB's local dependency contract changed; rebuilding the isolated Python environment..."
+        & (Join-Path $root "Stop-FAB.ps1")
+        Remove-FabVirtualEnvironment -InstanceRoot $root -VenvPath $venvRoot
+    }
+}
 if (-not (Test-Path -LiteralPath $venvPython)) {
+    $pythonVersionProbe = "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)"
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
     if ($pyLauncher) {
-        & $pyLauncher.Source -3.13 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $probeExitCode = Invoke-FabNativeCommand -FilePath $pyLauncher.Source -ArgumentList @("-3.13", "-c", $pythonVersionProbe) -DiscardOutput
+        if ($probeExitCode -eq 0) {
             Write-Host "Creating FAB's isolated Python 3.13 runtime..."
-            & $pyLauncher.Source -3.13 -m venv $venvRoot
+            $createExitCode = Invoke-FabNativeCommand -FilePath $pyLauncher.Source -ArgumentList @("-3.13", "-m", "venv", $venvRoot)
+            if ($createExitCode -ne 0) {
+                Remove-FabVirtualEnvironment -InstanceRoot $root -VenvPath $venvRoot
+            }
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        $uv = Get-Command uv -ErrorAction SilentlyContinue
+        if ($uv) {
+            Write-Host "Creating FAB's isolated Python 3.13 runtime with uv..."
+            $createExitCode = Invoke-FabNativeCommand -FilePath $uv.Source -ArgumentList @("venv", "--seed", "--python", "3.13", $venvRoot)
+            if ($createExitCode -ne 0) {
+                Remove-FabVirtualEnvironment -InstanceRoot $root -VenvPath $venvRoot
+            }
         }
     }
 
     if (-not (Test-Path -LiteralPath $venvPython)) {
         $systemPython = Get-Command python -ErrorAction SilentlyContinue
         if ($systemPython) {
-            & $systemPython.Source -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 13) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) {
+            $probeExitCode = Invoke-FabNativeCommand -FilePath $systemPython.Source -ArgumentList @("-c", $pythonVersionProbe) -DiscardOutput
+            if ($probeExitCode -eq 0) {
                 Write-Host "Creating FAB's isolated Python 3.13 runtime..."
-                & $systemPython.Source -m venv $venvRoot
+                $createExitCode = Invoke-FabNativeCommand -FilePath $systemPython.Source -ArgumentList @("-m", "venv", $venvRoot)
+                if ($createExitCode -ne 0) {
+                    Remove-FabVirtualEnvironment -InstanceRoot $root -VenvPath $venvRoot
+                }
             }
         }
     }
@@ -418,7 +497,7 @@ $pnpm = Get-Command pnpm.cmd -ErrorAction Stop
 & $python.Source -c "import importlib.util,sys; modules=('flask','waitress','PIL','pytesseract','pdf2image','langdetect','googleapiclient','sklearn','joblib'); sys.exit(0 if all(importlib.util.find_spec(module) for module in modules) else 1)" 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Installing FAB local runtime dependencies..."
-    & $python.Source -m pip install -r (Join-Path $root "requirements-local.txt")
+    & $python.Source -m pip install --disable-pip-version-check --no-input -r $requirementsPath
     if ($LASTEXITCODE -ne 0) {
         throw "FAB local runtime dependency installation failed with exit code $LASTEXITCODE."
     }
@@ -534,6 +613,11 @@ if (Test-Path -LiteralPath $runtimePath) {
         Write-Warning "Ignoring unreadable runtime metadata at $runtimePath."
     }
 }
+& $python.Source -m pip check
+if ($LASTEXITCODE -ne 0) {
+    throw "FAB's isolated Python dependency integrity check failed with exit code $LASTEXITCODE."
+}
+Set-Content -LiteralPath $venvRequirementsMarker -Value $requirementsHash -Encoding ascii -NoNewline
 
 $sourceFingerprint = & $python.Source -m src.runtime_fingerprint
 if ($LASTEXITCODE -ne 0 -or -not $sourceFingerprint) {

@@ -353,10 +353,9 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
     *   `optimize_processing_pipeline(pipeline)`: Applies optimizations to the document processing pipeline.
     *   `profile_resource_usage()`: Monitors and reports on CPU/memory usage.
 
-### 2.41. `src/mobile_capture/mobile_document_capture.py` (`MobileDocumentCapture`)
+### Retired: standalone mobile capture
 
-*   **Purpose**: Provides an interface for integrating with mobile document capture solutions (e.g., uploading images from a mobile app).
-*   **Configuration**: `mobile_capture_upload_dir`.
+The unauthenticated Flask uploader was removed. It acknowledged arbitrary filenames without registering immutable evidence, applying upload limits, or entering the authoritative ledger. Mobile and desktop uploads now use the authenticated `/api/intake/upload` contract and the same validation, hashing, review, and audit path as every other local intake.
 
 ### 2.42. `src/reconciliation/automated_reconciliation.py` (`AutomatedReconciliation`)
 
@@ -426,12 +425,9 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
     *   `restore_backup(backup_file_path, restore_dir)`: Restores data from a backup.
 *   **Configuration**: `backup_base_dir`, `backup_paths`, `backup_config`.
 
-### 2.52. `src/cloud_functions.py`
+### Retired: Google Cloud Function compatibility handlers
 
-*   **Purpose**: Contains Google Cloud Functions entry points for serverless deployment.
-*   **Key Functions**:
-    *   `process_document_cloud_function(cloud_event)`: Triggered by GCS events for single document processing.
-    *   `trigger_workflow_http(request)`: HTTP triggered function to start the full workflow.
+The duplicate root and `src/` Cloud Function handlers were removed because they could return success after OCR/categorization without durable ledger registration, review, export, or provider-readback evidence. Supported cloud deployment uses the same API, worker, and web images under Docker Compose or an equivalent private orchestrator.
 
 ### 2.53. `src/integration.py`
 
@@ -448,7 +444,7 @@ Documents are represented as Python dictionaries with the following common struc
     "id": "unique_document_id",
     "original_filename": "invoice_123.pdf",
     "local_path": "/path/to/downloaded/file.pdf",
-    "source": "gmail" | "google_drive" | "freshdesk" | "google_photos" | "mobile_capture",
+    "source": "gmail" | "google_drive" | "freshdesk" | "google_photos" | "manual_upload",
     "ocr_text": "Extracted text from OCR",
     "extracted_data": {
         "vendor_name": "ABC Corp",
@@ -550,13 +546,12 @@ python -m unittest discover tests
 *   **Local Readiness Settings**: `LocalReadinessService` powers `/api/settings`, the Settings panel, and the compact readiness block inside `/api/health`. It checks local ledger/backup/intake paths, source readiness for local folders, Gmail, Drive, Photos, Freshdesk, Wave, MijnGeldzaken, OCR, and banking, dependency availability for Tesseract, Playwright, Flask, Google clients, Pillow, and SQLite, and remote API exposure safety. Credential values are never returned; only configured/missing/file-exists status and secret key names are exposed.
 *   **Local Autonomous Cycle**: `LocalAutonomousService` powers `/api/autonomy/plan`, `/api/autonomy/run`, the recurring `FabWorker`, and the Autonomous Cycle dashboard panel. It combines readiness, operations health, intake state, review queues, routable documents, trusted exact-vendor category candidates, pending routing drafts, imported bank transactions, reconciliation candidates, and Wave workflow planning into one policy-gated run loop. Local intake, processing, bounded trusted-category application, draft preparation, reconciliation candidates, stale-draft regeneration, and read-only planning can run automatically. For configured Wave targets, the `refresh_wave_entity_mirror` action refreshes customers, products/services, and invoices before routing when no prior sync exists, the mirror is stale, or a failed run has passed its retry window. `includeWaveSync=false` or `fab_autonomy_sync_wave_entities=false` keeps this manual-only; sync failures become attention evidence and do not abort unrelated local bookkeeping work. Real runs acquire the `local_autonomous_cycle` SQLite runtime lease; concurrent triggers receive `409 already_running`, while dry runs remain non-mutating. The worker runs durable connector intake first, then local autonomy, reports, compliance, notifications, operations exports, and compatibility queues as isolated audited stages. The old checkpoint workflow remains opt-in through `worker_run_legacy_workflow`; it is off by default. Approved exports run only through their configured worker/autonomy execution gates; they remain approval-bound and preflight-backed-up. MijnGeldzaken external submission remains supervised. Remote exposure blocks, non-category review decisions, draft approvals, credential changes, backup restore, deletion, and outbound messages remain outside automatic execution.
 
-### 5.2. Google Cloud Functions
+### 5.2. Supported cloud release and deployment
 
-*   **Statelessness**: Cloud Functions are stateless. Ensure all necessary data (e.g., `token.json` files, ML models) are either part of the deployment package, stored in Cloud Storage, or accessed via other persistent services.
-*   **Cold Starts**: Be aware of cold start latencies, especially for functions with large dependencies (like Tesseract or Playwright).
-*   **Memory/CPU**: Configure appropriate memory and CPU for functions. OCR and Playwright can be memory-intensive.
-*   **Environment Variables**: Use environment variables for configuration and secrets. Google Secret Manager is recommended for sensitive data.
-*   **Triggers**: Configure GCS triggers for event-driven processing or HTTP triggers for on-demand workflow execution.
+*   **Release archive**: `python package.py --target compose` packages only clean tracked source, records each file size/SHA-256 in `FAB/RELEASE-MANIFEST.json`, writes an archive SHA-256 sidecar, and verifies the result before success.
+*   **State ownership**: The API and worker share the persistent operations ledger and source evidence volumes; the web service remains stateless.
+*   **Ingress**: Remote access requires TLS, authenticated reverse-proxy policy, a managed secret store, and the explicit trusted public origin. The supervised local ngrok path exposes only the authenticated API/HAI surface.
+*   **Acceptance**: Restore, provider sandbox, authorization-expiry, attachment readback, and archive gates must pass in the deployed environment. A successful image start is not provider acceptance.
 
 ## 6. Future Improvements and Extensibility
 
