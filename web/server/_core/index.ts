@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import compression from "compression";
 import { createServer } from "http";
 import net from "net";
 import helmet from "helmet";
@@ -52,6 +53,10 @@ async function startServer() {
       crossOriginEmbedderPolicy: false, // Allow embedding external resources (CDN images, Stripe)
     })
   );
+
+  // Compress JSON and static responses for remote/ngrok clients. Small
+  // responses stay uncompressed to avoid spending CPU for negligible savings.
+  app.use(compression({ threshold: 1_024 }));
 
   // ── Stripe webhook — BEFORE express.json() for raw body ───────
   app.post(

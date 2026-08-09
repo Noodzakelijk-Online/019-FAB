@@ -4680,8 +4680,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/drive-wave/work-orders")
     def drive_wave_work_orders_api():
+        view = str(request.args.get("view") or "complete").strip().lower()
+        if view not in {"complete", "summary"}:
+            return jsonify({
+                "success": False,
+                "status": "unsupported_view",
+                "supportedViews": ["complete", "summary"],
+            }), 400
         return jsonify(
-            DriveWaveDeliveryService(ledger, config).list_work_orders(limit=_limit_arg())
+            DriveWaveDeliveryService(ledger, config).list_work_orders(
+                limit=_limit_arg(),
+                compact=view == "summary",
+            )
         )
 
     @app.get("/api/drive-wave/documents/<int:document_id>/work-order")
@@ -6117,6 +6127,20 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "supportedFormats": ["json", "csv"],
             }), 400
         projection = service.project(target_system=target_system, limit=limit)
+        if _bool_value(
+            request.args.get("summaryOnly") or request.args.get("summary_only"),
+            default=False,
+        ):
+            rows = projection.pop("rows", [])
+            projection["dataThroughDate"] = max(
+                (
+                    str(row.get("recordDate"))
+                    for row in rows
+                    if row.get("recordDate")
+                ),
+                default=None,
+            )
+            projection["rowsOmitted"] = len(rows)
         if _bool_value(request.args.get("audit"), default=False):
             service.record_projection_audit(projection, actor=request.args.get("actor") or "local_api")
         return jsonify(projection)

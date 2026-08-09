@@ -436,6 +436,51 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         )
         self.assertNotIn("ocr_text", str(order))
 
+    def test_compact_work_orders_preserve_queue_decisions_without_executor_payloads(self):
+        record_id = self.ledger.upsert_bookkeeping_record({
+            "documentId": self.document_id,
+            "status": "routed",
+            "targetSystem": "waveapps_business",
+            "recordDate": "2026-07-22",
+            "amount": 121.0,
+            "currency": "EUR",
+            "reviewRequired": False,
+            "exportStatus": "executed",
+        })
+        self.ledger.upsert_export_attempt({
+            "bookkeepingRecordId": record_id,
+            "documentId": self.document_id,
+            "targetSystem": "waveapps_business",
+            "actionId": "transaction_add",
+            "status": "executed",
+            "externalSubmission": "executed",
+            "externalId": "wave-transaction-compact",
+        })
+        service = DriveWaveDeliveryService(self.ledger, self.config)
+
+        complete = service.list_work_orders(limit=10)
+        compact = service.list_work_orders(limit=10, compact=True)
+        complete_order = complete["workOrders"][0]
+        compact_order = compact["workOrders"][0]
+
+        self.assertEqual(compact["view"], "summary")
+        self.assertNotIn("evidencePolicy", compact)
+        self.assertEqual(compact["summary"], complete["summary"])
+        self.assertEqual(compact_order["stage"], complete_order["stage"])
+        self.assertEqual(compact_order["actionRequired"], complete_order["actionRequired"])
+        self.assertEqual(compact_order["source"]["sha256"], self.source_hash)
+        self.assertEqual(
+            compact_order["wave"]["externalTransactionId"],
+            "wave-transaction-compact",
+        )
+        self.assertEqual(
+            compact_order["archivePlan"]["canArchive"],
+            complete_order["archivePlan"]["canArchive"],
+        )
+        self.assertNotIn("evidence", compact_order)
+        self.assertNotIn("browserExecution", compact_order)
+        self.assertNotIn("expectedFields", compact_order["wave"])
+
     def test_list_work_orders_uses_batched_delivery_context(self):
         service = DriveWaveDeliveryService(self.ledger, self.config)
 
@@ -954,6 +999,8 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         client = create_app(config).test_client()
 
         listed = client.get("/api/drive-wave/work-orders?limit=10")
+        compact = client.get("/api/drive-wave/work-orders?limit=10&view=summary")
+        unsupported = client.get("/api/drive-wave/work-orders?view=unknown")
         document_order = client.get(
             f"/api/drive-wave/documents/{self.document_id}/work-order"
         )
@@ -961,6 +1008,11 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
 
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.get_json()["count"], 1)
+        self.assertEqual(compact.status_code, 200)
+        self.assertEqual(compact.get_json()["view"], "summary")
+        self.assertNotIn("evidence", compact.get_json()["workOrders"][0])
+        self.assertEqual(unsupported.status_code, 400)
+        self.assertEqual(unsupported.get_json()["status"], "unsupported_view")
         self.assertEqual(document_order.status_code, 200)
         self.assertEqual(document_order.get_json()["documentId"], self.document_id)
         self.assertEqual(manifest.status_code, 200)

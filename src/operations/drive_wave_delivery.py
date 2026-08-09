@@ -162,11 +162,20 @@ class DriveWaveDeliveryService:
             "externalSubmission": "not_executed",
         }
 
-    def list_work_orders(self, limit: int = 100) -> Dict[str, Any]:
+    def list_work_orders(
+        self,
+        limit: int = 100,
+        *,
+        compact: bool = False,
+    ) -> Dict[str, Any]:
         documents = self._candidate_documents(limit)
         contexts = self._delivery_contexts(documents)
         work_orders = [
-            self._work_order(int(document["id"]), context=contexts[int(document["id"])])
+            self._work_order(
+                int(document["id"]),
+                context=contexts[int(document["id"])],
+                compact=compact,
+            )
             for document in documents
         ]
         summary = {
@@ -181,7 +190,7 @@ class DriveWaveDeliveryService:
             "completed": _count_stage(work_orders, "completed"),
         }
         connector_status = self.status()
-        return {
+        result = {
             "status": connector_status["status"],
             "receiptExecutor": {
                 "ready": connector_status.get("waveReceiptExecutorReady") is True,
@@ -191,10 +200,14 @@ class DriveWaveDeliveryService:
                 "missingCapabilities": connector_status.get("waveReceiptExecutorMissingCapabilities") or [],
             },
             "workOrderVersion": WORK_ORDER_VERSION,
+            "view": "summary" if compact else "complete",
             "count": len(work_orders),
             "summary": summary,
             "workOrders": work_orders,
-            "evidencePolicy": {
+            "externalSubmission": "not_executed",
+        }
+        if not compact:
+            result["evidencePolicy"] = {
                 "maxAgeSeconds": self._evidence_max_age_seconds(),
                 "requiredFieldMatches": list(REQUIRED_FIELD_MATCHES),
                 "sourceHashRequired": True,
@@ -210,9 +223,8 @@ class DriveWaveDeliveryService:
                 "expectedFieldsDigestRequired": True,
                 "postMoveHashVerificationRequired": True,
                 "archiveMode": "move_only_never_delete",
-            },
-            "externalSubmission": "not_executed",
-        }
+            }
+        return result
 
     def work_order(self, document_id: int) -> Dict[str, Any]:
         document = self.ledger.get_document(int(document_id))
@@ -290,6 +302,7 @@ class DriveWaveDeliveryService:
         document_id: int,
         *,
         context: Optional[Dict[str, Any]] = None,
+        compact: bool = False,
     ) -> Dict[str, Any]:
         if context is None:
             document = self.ledger.get_document(int(document_id)) or {}
@@ -349,12 +362,54 @@ class DriveWaveDeliveryService:
         )
         source_sha256 = _source_sha256(document)
         source_provider = _source_provider(document)
-        provider_metadata = _provider_metadata(document)
         external_transaction_id = str(
             evidence.get("externalTransactionId")
             or (terminal_export or {}).get("external_id")
             or ""
         )
+        work_order_id = f"source-wave-{document_id}-{source_sha256[:12] or 'unhashed'}"
+        if compact:
+            return {
+                "success": True,
+                "status": "ready",
+                "workOrderVersion": WORK_ORDER_VERSION,
+                "workOrderId": work_order_id,
+                "documentId": int(document_id),
+                "stage": stage,
+                "actionRequired": _stage_action(stage),
+                "source": {
+                    "provider": source_provider,
+                    "filename": document.get("original_filename"),
+                    "mimeType": document.get("mime_type"),
+                    "sha256": source_sha256,
+                },
+                "wave": {
+                    "targetSystem": "waveapps_business",
+                    "externalTransactionId": external_transaction_id or None,
+                },
+                "reviews": {
+                    "open": len(open_reviews),
+                    "blocking": len(unrelated_reviews),
+                    "reasons": sorted({
+                        str(item.get("reason") or "unknown")
+                        for item in unrelated_reviews
+                    }),
+                },
+                "archivePlan": {
+                    key: plan.get(key)
+                    for key in (
+                        "canArchive",
+                        "evidenceVerified",
+                        "externalSubmission",
+                        "reasons",
+                        "retentionStatus",
+                        "status",
+                    )
+                },
+                "externalSubmission": "not_executed",
+            }
+
+        provider_metadata = _provider_metadata(document)
         evidence_template = {
             "externalTransactionId": external_transaction_id,
             "businessId": self._business_id(),
@@ -388,7 +443,7 @@ class DriveWaveDeliveryService:
             "success": True,
             "status": "ready",
             "workOrderVersion": WORK_ORDER_VERSION,
-            "workOrderId": f"source-wave-{document_id}-{source_sha256[:12] or 'unhashed'}",
+            "workOrderId": work_order_id,
             "documentId": int(document_id),
             "stage": stage,
             "actionRequired": _stage_action(stage),

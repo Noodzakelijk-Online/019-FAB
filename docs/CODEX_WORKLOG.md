@@ -1,5 +1,20 @@
 # Codex Worklog
 
+## 2026-08-09 - Control-center data path and dependency hardening
+
+- Added compact Drive-to-Wave queue projections that preserve exact stage, review, retention, archive, and external-submission decisions while leaving complete evidence available from the default and per-document work-order endpoints.
+- Added an exact-checksum master-ledger summary response for dashboard reads; complete JSON and CSV projections remain unchanged.
+- Added two-second control-center request coalescing with generation-safe invalidation after writes, kept stale-resource fallback behavior, and scheduled the heaviest reads first within the four-request ceiling.
+- Enabled compression for JSON/static responses above 1 KiB.
+- On the live 150-document ledger, Drive/Wave list traffic fell from 988,287 to 141,040 bytes and master-ledger traffic from 202,949 to 918 bytes with the same checksum.
+- Cold control-center refresh fell from 2.04-2.64 seconds to 1.35-1.65 seconds across the complete optimization and dependency-upgrade runs; an immediate repeat completed in 36-54 ms. Gzip reduced the roughly 508 KB browser response to 78,294 bytes.
+- Upgraded the web dependency graph and removed the obsolete JSX-location plugin. The package audit fell from 86 findings to zero, with no peer-dependency errors and a reproducible frozen-lockfile install.
+- Migrated the chart wrapper to current Recharts contracts and fixed its formatter payload so consumers receive the complete tooltip payload array.
+- Fixed Express 5 SPA fallback routing after a production restart exposed the old bare-wildcard incompatibility; a real TCP test now protects nested dashboard routes.
+- Vite 8 reduced transformed client modules from 6,221 to 2,426, reduced the Operations chunk to 192.70 KB, and eliminated the greater-than-500-KB public chunk warning.
+- Verification passed 780 backend tests, 155 web tests, TypeScript checking, production builds, native and container runtime checks, dependency/peer audits, and desktop/mobile browser geometry and console inspection.
+- No provider record was changed, no Drive file was archived, and no external submission was performed.
+
 ## 2026-08-09 - Reliability, migration, and API contract follow-up
 
 - Normalized every JSON error below `/api/` to a correlated machine-readable envelope while preserving route-specific details.

@@ -1932,6 +1932,7 @@ class TestLocalOperationsApi(unittest.TestCase):
                 draft["checksum"],
             )
             master_ledger = client.get("/api/master-ledger?audit=true&actor=test")
+            master_summary = client.get("/api/master-ledger?summaryOnly=true")
             master_csv = client.get("/api/master-ledger?format=csv")
             self.assertEqual(master_ledger.status_code, 200)
             master_payload = master_ledger.get_json()
@@ -1941,6 +1942,14 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(master_payload["rows"][0]["downstreamStatus"], "queued")
             self.assertEqual(master_payload["rows"][0]["externalSubmission"], "queued")
             self.assertEqual(len(master_payload["ledgerChecksum"]), 64)
+            self.assertEqual(master_summary.status_code, 200)
+            self.assertNotIn("rows", master_summary.get_json())
+            self.assertEqual(master_summary.get_json()["rowsOmitted"], 1)
+            self.assertEqual(master_summary.get_json()["dataThroughDate"], "2026-06-28")
+            self.assertEqual(
+                master_summary.get_json()["ledgerChecksum"],
+                master_payload["ledgerChecksum"],
+            )
             self.assertEqual(master_csv.status_code, 200)
             self.assertIn("text/csv", master_csv.headers["Content-Type"])
             self.assertEqual(master_csv.headers["X-FAB-External-Submission"], "not_executed")

@@ -104,33 +104,35 @@ export type FabControlCenter = {
 const DEFAULT_FAB_LOCAL_API_URL = "http://127.0.0.1:5001";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const MAX_CONCURRENT_READS = 4;
+// Start the costliest independent reads first so the bounded worker pool does
+// not leave a long-running request at the end of the dashboard refresh.
 const READ_PATHS = {
-  liveness: "/api/live",
-  health: "/api/health",
-  metrics: "/api/dashboard",
-  autonomy: "/api/autonomy/plan?limit=25",
-  exceptions: "/api/exceptions?limit=25&includeEntities=true",
-  settings: "/api/settings",
-  sourceReadiness: "/api/sources/readiness",
-  sources: "/api/sources?limit=50",
-  workflows: "/api/workflows?limit=10",
-  recovery: "/api/workflows/recovery?limit=10",
   backups: "/api/backups?limit=5&verify=false",
+  autonomy: "/api/autonomy/plan?limit=25",
+  reviewQueue: "/api/review?status=open&limit=200",
+  exceptions: "/api/exceptions?limit=25&includeEntities=true",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&view=summary",
+  health: "/api/health",
+  closeReadiness: "/api/close-readiness",
+  recovery: "/api/workflows/recovery?limit=10",
+  liveness: "/api/live",
+  waveSetup: "/api/wave/setup",
+  driveWaveStatus: "/api/drive-wave/status",
+  workflows: "/api/workflows?limit=10",
+  masterLedger: "/api/master-ledger?limit=250&summaryOnly=true",
+  metrics: "/api/dashboard",
   notifications: "/api/notifications?limit=10",
+  settings: "/api/settings",
+  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=250",
   reconciliation: "/api/reconciliation?limit=10",
   activity: "/api/audit?limit=12",
-  closeReadiness: "/api/close-readiness",
+  sources: "/api/sources?limit=50",
+  waveReceiptExecutor: "/api/wave/receipt-executor/status",
+  sourceReadiness: "/api/sources/readiness",
+  driveAuthorization: "/api/connectors/google-drive/authorization",
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
-  driveWaveStatus: "/api/drive-wave/status",
-  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200",
   gmailAuthorization: "/api/connectors/gmail/authorization",
-  driveAuthorization: "/api/connectors/google-drive/authorization",
-  waveSetup: "/api/wave/setup",
-  waveReceiptExecutor: "/api/wave/receipt-executor/status",
-  reviewQueue: "/api/review?status=open&limit=200",
-  masterLedger: "/api/master-ledger?limit=250",
-  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=250",
 } as const;
 
 export type FabResourceKey = keyof typeof READ_PATHS;
@@ -143,6 +145,10 @@ const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
 };
 
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
+const CONTROL_CENTER_CACHE_TTL_MS = 2_000;
+let controlCenterSnapshot: { value: FabControlCenter; expiresAt: number } | null = null;
+let controlCenterInFlight: Promise<FabControlCenter> | null = null;
+let controlCenterCacheGeneration = 0;
 
 const COMMAND_PATHS: Record<FabOperatorCommandId, { path: string; body: JsonRecord; method?: "POST" | "DELETE" }> = {
   run_safe_cycle: { path: "/api/autonomy/run", body: { limit: 25, includeWavePlan: true, includeWaveSync: true, includeConnectorSync: true } },
@@ -206,6 +212,10 @@ export async function fabLocalRequest(
     if (!response.ok) {
       throw new Error(stringValue(body.error) || `FAB local API returned ${response.status}`);
     }
+    const method = String(init.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      invalidateFabControlCenterSnapshot();
+    }
     return body;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -242,6 +252,30 @@ async function settleFabReads(
 }
 
 export async function getFabControlCenter(): Promise<FabControlCenter> {
+  const now = Date.now();
+  if (controlCenterSnapshot && controlCenterSnapshot.expiresAt > now) {
+    return controlCenterSnapshot.value;
+  }
+  if (controlCenterInFlight) return controlCenterInFlight;
+
+  const generation = controlCenterCacheGeneration;
+  const request = buildFabControlCenter();
+  controlCenterInFlight = request;
+  try {
+    const value = await request;
+    if (value.connection.connected && generation === controlCenterCacheGeneration) {
+      controlCenterSnapshot = {
+        value,
+        expiresAt: Date.now() + CONTROL_CENTER_CACHE_TTL_MS,
+      };
+    }
+    return value;
+  } finally {
+    if (controlCenterInFlight === request) controlCenterInFlight = null;
+  }
+}
+
+async function buildFabControlCenter(): Promise<FabControlCenter> {
   const checkedAt = new Date().toISOString();
   const startedAt = Date.now();
   let endpoint = DEFAULT_FAB_LOCAL_API_URL;
@@ -296,7 +330,6 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   const registeredSources = arrayValue(resources.sources?.sources);
   const workflowRuns = arrayValue(resources.workflows?.workflowRuns);
   const reviewWorkItems = arrayValue(resources.reviewQueue?.workItems);
-  const masterLedgerRows = arrayValue(resources.masterLedger?.rows);
   const bankTransactions = arrayValue(resources.bankTransactions?.bankTransactions);
   const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
@@ -364,7 +397,7 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
         : null,
       latestWorkflowStatus: workflowRuns.length ? nullableString(workflowRuns[0].status) : null,
       dataThroughDate: resourceStates.masterLedger.state === "live" || resourceStates.masterLedger.state === "stale"
-        ? latestDate(masterLedgerRows.map((row) => row.recordDate || row.transactionDate))
+        ? nullableString(resources.masterLedger?.dataThroughDate)
         : null,
       sourceCount: resourceStates.sources.state === "live" || resourceStates.sources.state === "stale"
         ? registeredSources.length
@@ -457,6 +490,13 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
 
 export function resetFabControlCenterCacheForTests() {
   resourceCache.clear();
+  invalidateFabControlCenterSnapshot();
+}
+
+function invalidateFabControlCenterSnapshot() {
+  controlCenterSnapshot = null;
+  controlCenterInFlight = null;
+  controlCenterCacheGeneration += 1;
 }
 
 export async function runFabOperatorCommand(

@@ -299,10 +299,8 @@ describe("FAB local API gateway", () => {
       },
       "/api/master-ledger": {
         summary: { readyForApproval: 2 },
-        rows: [
-          { recordDate: "2026-06-30", amount: 42, vendorName: "Private ledger vendor" },
-          { recordDate: "2026-07-19", amount: 12, vendorName: "Private latest vendor" },
-        ],
+        dataThroughDate: "2026-07-19",
+        rowsOmitted: 2,
       },
       "/api/bank-transactions": {
         bankTransactions: [
@@ -546,10 +544,48 @@ describe("FAB local API gateway", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await getFabControlCenter();
+    const deliveryRequest = fetchMock.mock.calls.find(([input]) => (
+      new URL(String(input)).pathname === "/api/drive-wave/work-orders"
+    ));
+    const masterLedgerRequest = fetchMock.mock.calls.find(([input]) => (
+      new URL(String(input)).pathname === "/api/master-ledger"
+    ));
 
     expect(result.connection.connected).toBe(true);
+    expect(deliveryRequest).toBeDefined();
+    expect(new URL(String(deliveryRequest?.[0])).searchParams.get("view")).toBe("summary");
+    expect(masterLedgerRequest).toBeDefined();
+    expect(new URL(String(masterLedgerRequest?.[0])).searchParams.get("summaryOnly")).toBe("true");
     expect(fetchMock.mock.calls.length).toBeGreaterThan(20);
     expect(maximumActiveRequests).toBeLessThanOrEqual(4);
+  });
+
+  it("coalesces duplicate snapshots and invalidates them after a mutation", async () => {
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      return new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [first, second] = await Promise.all([
+      getFabControlCenter(),
+      getFabControlCenter(),
+    ]);
+    const firstSnapshotCalls = fetchMock.mock.calls.length;
+    const cached = await getFabControlCenter();
+
+    expect(first).toBe(second);
+    expect(cached).toBe(first);
+    expect(firstSnapshotCalls).toBeGreaterThan(20);
+    expect(fetchMock).toHaveBeenCalledTimes(firstSnapshotCalls);
+
+    await runFabOperatorCommand("refresh_notifications", "operator-cache-test");
+    expect(fetchMock).toHaveBeenCalledTimes(firstSnapshotCalls + 1);
+    await getFabControlCenter();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(firstSnapshotCalls + 20);
   });
 
   it("retains last valid resource data as visibly stale after a partial failure", async () => {
@@ -577,6 +613,7 @@ describe("FAB local API gateway", () => {
 
     const live = await getFabControlCenter();
     failMetrics = true;
+    await runFabOperatorCommand("refresh_notifications", "operator-stale-test");
     const stale = await getFabControlCenter();
 
     expect(live.metrics.pendingReview).toBe(3);
