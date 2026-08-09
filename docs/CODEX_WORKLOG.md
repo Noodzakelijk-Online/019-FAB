@@ -9,6 +9,7 @@
 - Live Windows acceptance loaded the real queue `50 -> 100 -> 119`; the final page contained 19 document groups. Desktop/responsive DOM checks found no horizontal or control-text overflow and no new console warnings/errors after the final reload and page fetch.
 - Corrected the English review-age unit from Dutch `u` to `h` and clarified document-review terminology.
 - Final local verification passed `793` backend tests with four optional-runtime skips, `165` web tests, TypeScript checking, and production build budgets. No review was resolved, no provider record was changed, no Drive source was archived, and no external submission was performed.
+- Implementation commit `53d8e21` is on `origin/main`; GitHub Actions run `31324705111` passed the frontend, Linux backend, and all four Windows backend jobs.
 
 ## 2026-08-09 - Quiescent maintenance and full evidence recovery
 
