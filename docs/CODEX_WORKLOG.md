@@ -12,6 +12,7 @@
 - Verification passed 793 backend tests plus 38 subtests, 161 web tests, TypeScript checking, production build budgets, the production dependency audit, PowerShell parsing, live Windows/HAI/cloud checks, desktop/narrow in-app Browser DOM interaction, and exact-source non-root Compose acceptance.
 - The in-app Browser exposed complete desktop and 520-pixel DOM state with the cloud card and no application errors, but its screenshot function returned blank frames; no screenshot claim is made for this follow-up.
 - The unmanaged ngrok endpoint on port 4040 remained untouched. FAB still needs a separately reserved HTTPS endpoint before managed cloud access can be accepted.
+- Implementation commit `76e5fff` is on `origin/main`; GitHub Actions run `31305186684` passed every Linux, Windows, dependency, test, type, and build job. A separate clean clone of that commit passed source compilation, Compose parsing, frozen install, dependency audit, TypeScript, all 161 web tests, and production build budgets.
 - No provider record was changed, no Drive source was archived, and no external submission was performed.
 
 ## 2026-08-09 - Production runtime, security, and truthful product follow-up

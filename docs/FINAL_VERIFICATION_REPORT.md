@@ -13,6 +13,7 @@ This report separates local software verification from provider, account, infras
 - Health and deployment efficiency commit: `8b3d1a7`.
 - Control-center hardening commit: `d563d95`.
 - Production-runtime implementation commit: `2f70668`.
+- Managed-cloud and runtime-efficiency implementation commit: `76e5fff`.
 - Final evidence commit: recorded by the final Git push and delivery response.
 
 ## Results
@@ -38,8 +39,8 @@ This report separates local software verification from provider, account, infras
 | Desktop/narrow browser QA | Pass with image limitation | Prior connected Chrome screenshots and interaction checks passed. The current source was rechecked in the in-app Browser at desktop and a 520-pixel viewport: meaningful live DOM, responsive navigation, visible cloud connection state, and no application errors. The Browser screenshot function returned blank frames, so this follow-up makes no current screenshot claim. |
 | No-excuses search | Pass | No operational `TODO`, `FIXME`, fake-success, mock-integration, or placeholder-credential path remains. Unsupported features are explicitly documented as unavailable or supervised. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Remote CI | Pass | GitHub Actions run `31301840108` passed the Linux backend, all four Windows backend shards, frontend dependency audit, peer check, TypeScript check, 161 web tests, and production build. |
-| Fresh-clone verification | Pass | Clean GitHub clone of implementation commit `2f70668`: exact remote hash, clean status, Python compilation, `2 passed` Windows worker-runtime tests, frozen web install, zero-vulnerability audit, peer check, TypeScript check, all 161 web tests, production build budgets, and Compose parsing passed. |
+| Remote CI | Pass | GitHub Actions run `31305186684` on implementation commit `76e5fff` passed the Linux backend, all four Windows backend shards, frontend dependency audit, peer check, TypeScript check, 161 web tests, and production build. |
+| Fresh-clone verification | Pass | Clean GitHub clone of implementation commit `76e5fff`: exact remote hash, clean status, Python compilation, Compose parsing, frozen web install, zero-vulnerability audit, TypeScript check, all 161 web tests, and production build budgets passed. The verified temporary clone was removed afterward. |
 
 ## Provider state
 
