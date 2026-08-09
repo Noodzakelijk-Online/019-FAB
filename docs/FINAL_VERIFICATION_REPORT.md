@@ -16,7 +16,7 @@ This report separates local software verification from provider, account, infras
 - Managed-cloud and runtime-efficiency implementation commit: `76e5fff`.
 - Worker, OCR, and local-session hardening implementation commit: `b228fdc`.
 - Dependency-safe workflow continuation commit: `3f2d5c6`.
-- Quiescent maintenance and full recovery implementation commit: recorded after publication.
+- Quiescent maintenance and full recovery implementation commit: `312ec34`.
 - Final evidence commit: recorded by the final Git push and delivery response.
 
 ## Results
@@ -45,7 +45,7 @@ This report separates local software verification from provider, account, infras
 | Desktop/narrow browser QA | Pass | The rebuilt maintenance dashboard rendered in the in-app Browser with no console warnings/errors or horizontal overflow. Ordinary backup/support actions were disabled, recovery state was visible, and the advanced-recovery link resolved to `127.0.0.1:5511` rather than Docker's private hostname. Connections and document Review behavior passed in the broader release. |
 | Product-path truthfulness search | Pass locally | Supported API, dashboard, and authoritative worker paths expose explicit local, review, execution, and provider states. Fake-success external entrypoints, duplicate checkpoint/review/error orchestration, synthetic learning, placeholder performance/migration wrappers, duplicate vendor-template processing, and dummy tax output are removed. Test-only mocks remain confined to tests. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Remote CI | Pass | GitHub Actions run `31319135326` on dependency-safe implementation commit `3f2d5c6` passed the frontend, Linux backend, and all four Windows backend jobs. |
+| Remote CI | Pass | GitHub Actions run `31322371840` on quiescent-recovery implementation commit `312ec34` passed the frontend, Linux backend, and all four Windows backend jobs. |
 | Fresh-clone verification | Pass on prior baseline | The immediately preceding published commit passed an independent clean-clone source, frozen dependency, test, build, and Compose verification. Current-source verification above ran from the complete tracked tree before publish. |
 
 ## Provider state
