@@ -2557,6 +2557,55 @@ class TestLocalOperationsApi(unittest.TestCase):
             refreshed = client.get("/api/bank-transactions?accountIdentifier=wave-checking").get_json()["bankTransactions"][0]
             self.assertEqual(refreshed["reconciliation_status"], "candidate")
 
+    def test_api_imports_bounded_bank_statement_file_with_actor_and_format_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            app = create_app({"fab_local_ledger_path": ledger_path})
+            client = app.test_client()
+            content = (
+                "Datum;Omschrijving;Bedrag;Valuta\n"
+                "28-06-2026;Transit fare;-12,50;EUR\n"
+                "28-06-2026;Transit fare;-12,50;EUR\n"
+            ).encode("utf-8")
+
+            imported = client.post("/api/bank-transactions/import", json={
+                "accountIdentifier": "nl-checking",
+                "actor": "fab_dashboard:9",
+                "contentBase64": base64.b64encode(content).decode("ascii"),
+                "filename": "statement.csv",
+                "format": "csv",
+                "source": "dashboard_bank_statement",
+            })
+            mismatched = client.post("/api/bank-transactions/import", json={
+                "contentBase64": base64.b64encode(content).decode("ascii"),
+                "filename": "statement.json",
+                "format": "csv",
+            })
+            malformed = client.post("/api/bank-transactions/import", json={
+                "contentBase64": "not-base64",
+                "filename": "statement.csv",
+                "format": "csv",
+            })
+            non_object = client.post("/api/bank-transactions/import", json=[])
+
+            self.assertEqual(imported.status_code, 200)
+            self.assertEqual(imported.get_json()["rowsImported"], 2)
+            self.assertEqual(imported.get_json()["externalSubmission"], "not_executed")
+            self.assertEqual(mismatched.status_code, 400)
+            self.assertEqual(malformed.status_code, 400)
+            self.assertEqual(non_object.status_code, 400)
+            self.assertEqual(non_object.get_json()["errorCode"], "invalid_request")
+            self.assertFalse(non_object.get_json()["success"])
+            ledger = LocalOperationsLedger(ledger_path)
+            transactions = ledger.list_bank_transactions(account_identifier="nl-checking")
+            self.assertEqual(len(transactions), 2)
+            import_event = next(
+                event
+                for event in ledger.list_audit_events(limit=20)
+                if event["action"] == "local_bank_transactions.import_completed"
+            )
+            self.assertEqual(import_event["details"]["actor"], "fab_dashboard:9")
+
     def test_api_review_ignore_closes_missing_receipt_bank_exception(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

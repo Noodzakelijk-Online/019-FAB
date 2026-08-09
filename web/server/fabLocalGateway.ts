@@ -82,6 +82,9 @@ export type FabControlCenter = {
   waveSetup: JsonRecord;
   waveReceiptExecutor: JsonRecord;
   cloudAccess: JsonRecord;
+  banking: {
+    recentImports: JsonRecord[];
+  };
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -140,7 +143,7 @@ const READ_PATHS = {
   metrics: "/api/dashboard",
   notifications: "/api/notifications?limit=10",
   settings: "/api/settings",
-  bankTransactions: "/api/bank-transactions?status=unreconciled&limit=250",
+  bankTransactions: "/api/bank-transactions?limit=250",
   reconciliation: "/api/reconciliation?limit=10",
   activity: "/api/audit?limit=12",
   sources: "/api/sources?limit=50",
@@ -379,6 +382,12 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
   const workflowRuns = arrayValue(resources.workflows?.workflowRuns);
   const reviewWorkItems = arrayValue(resources.reviewQueue?.workItems);
   const bankTransactions = arrayValue(resources.bankTransactions?.bankTransactions);
+  const unreconciledBankTransactions = bankTransactions.filter((item) => ![
+    "approved",
+    "reconciled",
+    "ignored",
+  ].includes(stringValue(item.reconciliation_status || item.reconciliationStatus).toLowerCase()));
+  const bankStatementImports = arrayValue(resources.bankTransactions?.bankStatementImports);
   const haiAllowedCommandIds = stringArray(resources.haiStatus?.allowedCommandIds);
   const sourceConnections = arrayValue(settings.sources).map((source) => {
     const sourceId = stringValue(source.id);
@@ -459,7 +468,7 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
         ? latestDate(registeredSources.map((source) => source.last_sync_at || source.lastSyncAt || source.updated_at || source.updatedAt))
         : null,
       unreconciledAmountByCurrency: resourceStates.bankTransactions.state === "live" || resourceStates.bankTransactions.state === "stale"
-        ? amountByCurrency(bankTransactions)
+        ? amountByCurrency(unreconciledBankTransactions)
         : null,
       oldestReviewAgeHours: resourceStates.reviewQueue.state === "live" || resourceStates.reviewQueue.state === "stale"
         ? reviewSummaryAgeHours(reviewSummary, checkedAt) ?? oldestReviewAgeHours(reviewWorkItems, checkedAt)
@@ -486,6 +495,20 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
     waveSetup,
     waveReceiptExecutor,
     cloudAccess,
+    banking: {
+      recentImports: bankStatementImports.slice(0, 5).map((item) => selectFields(item, [
+        "account_identifier",
+        "created_at",
+        "duplicates",
+        "filename",
+        "format",
+        "id",
+        "rows_imported",
+        "rows_seen",
+        "status",
+        "updated_at",
+      ])),
+    },
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -715,6 +738,39 @@ export async function validateFabWaveSetup(
   }, { timeoutMs: 20_000 });
 }
 
+export async function importFabBankStatement(input: {
+  filename: string;
+  format: "csv" | "json" | "camt" | "mt940";
+  accountIdentifier: string;
+  contentBase64: string;
+  actor: string;
+}): Promise<JsonRecord> {
+  const response = await fabLocalRequest("/api/bank-transactions/import", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: input.filename,
+      format: input.format,
+      accountIdentifier: input.accountIdentifier.trim().slice(0, 200) || "default",
+      contentBase64: input.contentBase64,
+      source: "dashboard_bank_statement",
+      actor: input.actor.trim().slice(0, 200) || "fab_dashboard:local_operator",
+    }),
+  }, { timeoutMs: 20_000 });
+  return selectFields(response, [
+    "accountIdentifier",
+    "bankStatementImportId",
+    "duplicates",
+    "externalSubmission",
+    "filename",
+    "format",
+    "rowsImported",
+    "rowsSeen",
+    "skipped",
+    "status",
+    "success",
+  ]);
+}
+
 export async function getFabReviewPage(input: {
   offset: number;
   limit?: number;
@@ -807,6 +863,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     waveSetup: {},
     waveReceiptExecutor: {},
     cloudAccess: {},
+    banking: { recentImports: [] },
     exceptions: [],
     exceptionSummary: {},
     connections: [],

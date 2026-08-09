@@ -7,6 +7,7 @@ import {
   getFabControlCenter,
   getFabLocalApiBaseUrl,
   getFabReviewPage,
+  importFabBankStatement,
   resetFabControlCenterCacheForTests,
   resolveFabReviewItem,
   runFabOperatorCommand,
@@ -506,6 +507,7 @@ describe("FAB local API gateway", () => {
           { id: 90, amount: -125.5, currency: "EUR", description: "Private bank line" },
           { id: 91, amount: 20, currency: "EUR", description: "Private bank line" },
           { id: 92, amount: 8.25, currency: "GBP", description: "Private bank line" },
+          { id: 93, amount: -999, currency: "EUR", reconciliation_status: "reconciled", description: "Private bank line" },
         ],
       },
     };
@@ -1030,6 +1032,58 @@ describe("FAB local API gateway", () => {
       body: { filename: "receipt.pdf", mimeType: "application/pdf" },
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("imports a bounded bank statement with a server-owned source and actor", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new Response(
+      JSON.stringify({
+        success: true,
+        status: "completed",
+        bankStatementImportId: 81,
+        accountIdentifier: "NL00FAB0123456789",
+        filename: "statement.csv",
+        format: "csv",
+        rowsSeen: 3,
+        rowsImported: 2,
+        duplicates: 1,
+        skipped: 0,
+        bankTransactionIds: [1, 2, 3],
+        internalMetadata: "must-not-cross-the-web-boundary",
+        externalSubmission: "not_executed",
+        path: new URL(String(input)).pathname,
+        request: JSON.parse(String(init?.body)),
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await importFabBankStatement({
+      filename: "statement.csv",
+      format: "csv",
+      accountIdentifier: "NL00FAB0123456789",
+      contentBase64: "YSxiLGM=",
+      actor: "fab_dashboard:9",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      status: "completed",
+      rowsSeen: 3,
+      rowsImported: 2,
+      duplicates: 1,
+      externalSubmission: "not_executed",
+    });
+    expect(result).not.toHaveProperty("bankTransactionIds");
+    expect(result).not.toHaveProperty("internalMetadata");
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({
+      filename: "statement.csv",
+      format: "csv",
+      accountIdentifier: "NL00FAB0123456789",
+      contentBase64: "YSxiLGM=",
+      source: "dashboard_bank_statement",
+      actor: "fab_dashboard:9",
+    });
   });
 
   it("resolves a review only through its fixed local API record path", async () => {

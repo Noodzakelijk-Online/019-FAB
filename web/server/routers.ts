@@ -92,6 +92,7 @@ import {
   createFabSupportBundle,
   getFabControlCenter,
   getFabReviewPage,
+  importFabBankStatement,
   resolveFabReviewItem,
   runFabOperatorCommand,
   saveFabWaveSetup,
@@ -463,6 +464,35 @@ export const appRouter = router({
         contentBase64: z.string().min(4).max(8_500_000),
       }).strict())
       .mutation(async ({ input }) => uploadFabIntakeFile(input)),
+    importBankStatement: fabOperatorProcedure
+      .input(z.object({
+        filename: z.string().trim().min(1).max(255).regex(
+          /\.(csv|json|xml|camt|sta|mt940)$/i,
+          "Bank statement must be CSV, JSON, CAMT/XML, or MT940",
+        ),
+        format: z.enum(["csv", "json", "camt", "mt940"]),
+        accountIdentifier: z.string().trim().min(1).max(200),
+        contentBase64: z.string().min(4).max(5_600_000),
+      }).strict().superRefine((input, ctx) => {
+        const extensions: Record<typeof input.format, string[]> = {
+          csv: [".csv"],
+          json: [".json"],
+          camt: [".camt", ".xml"],
+          mt940: [".mt940", ".sta"],
+        };
+        const filename = input.filename.toLowerCase();
+        if (!extensions[input.format].some((extension) => filename.endsWith(extension))) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["filename"],
+            message: `File extension does not match ${input.format} format`,
+          });
+        }
+      }))
+      .mutation(async ({ input, ctx }) => importFabBankStatement({
+        ...input,
+        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
+      })),
     installGmailCredentials: fabOperatorProcedure
       .input(z.object({
         filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),

@@ -69,9 +69,11 @@ type FabControlOverviewProps = {
   commandPending: boolean;
   pendingCommand: FabCommandId | null;
   uploading: boolean;
+  bankImporting: boolean;
   localApiEndpoint: string;
   onCommand: (commandId: FabCommandId) => void;
   onOpenIntake: () => void;
+  onOpenBankImport: () => void;
   onOpenCommands: () => void;
 };
 
@@ -96,9 +98,11 @@ export function FabControlOverview({
   commandPending,
   pendingCommand,
   uploading,
+  bankImporting,
   localApiEndpoint,
   onCommand,
   onOpenIntake,
+  onOpenBankImport,
   onOpenCommands,
 }: FabControlOverviewProps) {
   const { lang, copy, status, dateLocale } = useFabLocale();
@@ -237,6 +241,9 @@ export function FabControlOverview({
         <div className="fab-heading-actions">
           <button className="fab-secondary-button" onClick={onOpenIntake} disabled={commandPending || uploading}>
             <FileUp aria-hidden="true" /> {uploading ? copy("Adding...", "Toevoegen...") : copy("Add documents", "Documenten toevoegen")}
+          </button>
+          <button className="fab-secondary-button" onClick={onOpenBankImport} disabled={commandPending || bankImporting}>
+            <CircleDollarSign aria-hidden="true" /> {bankImporting ? copy("Importing...", "Importeren...") : copy("Bank statement", "Bankafschrift")}
           </button>
           <button className="fab-primary-button" onClick={primary.action} disabled={!connected || commandPending}>
             <Play aria-hidden="true" /> {primary.label}

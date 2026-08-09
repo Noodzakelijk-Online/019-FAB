@@ -33,7 +33,12 @@ from src.operations.local_backup import (
     RESTORE_MODE_LEDGER_ONLY,
     LocalBackupService,
 )
-from src.operations.local_bank_transactions import LocalBankTransactionImportService
+from src.operations.local_bank_transactions import (
+    BANK_STATEMENT_FILE_EXTENSIONS,
+    MAX_BANK_STATEMENT_BYTES,
+    SUPPORTED_BANK_STATEMENT_FORMATS,
+    LocalBankTransactionImportService,
+)
 from src.operations.local_bookkeeping_records import (
     BOOKKEEPING_RECORD_RESOLUTION_STATUSES,
     LocalBookkeepingRecordService,
@@ -7048,20 +7053,105 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.post("/api/bank-transactions/import")
     def import_bank_transactions():
-        payload = request.get_json(silent=True) or {}
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({
+                "error": "Bank import body must be a JSON object",
+                "externalSubmission": "not_executed",
+            }), 400
+        allowed_fields = {
+            "accountIdentifier",
+            "account_identifier",
+            "actor",
+            "bankTransactions",
+            "contentBase64",
+            "filename",
+            "format",
+            "source",
+            "statementText",
+            "statement_text",
+            "transactions",
+        }
+        unexpected = sorted(set(payload) - allowed_fields)
+        if unexpected:
+            return jsonify({
+                "error": f"Unsupported bank import field(s): {', '.join(unexpected)}",
+                "externalSubmission": "not_executed",
+            }), 400
         service = LocalBankTransactionImportService(ledger, config)
         account_identifier = payload.get("accountIdentifier") or payload.get("account_identifier") or "default"
         source = payload.get("source") or "api_import"
-        filename = payload.get("filename")
-        format_name = payload.get("format") or "json"
+        filename = secure_filename(str(payload.get("filename") or "")) or None
+        format_name = str(payload.get("format") or "json").strip().lower()
+        actor = str(payload.get("actor") or "local_api_bank_import")[:200]
+        if format_name not in SUPPORTED_BANK_STATEMENT_FORMATS:
+            return jsonify({
+                "error": f"Unsupported bank statement format: {format_name}",
+                "supportedFormats": sorted(SUPPORTED_BANK_STATEMENT_FORMATS),
+                "externalSubmission": "not_executed",
+            }), 400
+        encoded_content = payload.get("contentBase64")
+        statement_text = payload.get("statementText") or payload.get("statement_text")
+        if encoded_content is not None and statement_text is not None:
+            return jsonify({
+                "error": "Provide either contentBase64 or statementText, not both",
+                "externalSubmission": "not_executed",
+            }), 400
         try:
-            if payload.get("statementText") or payload.get("statement_text"):
-                result = service.import_statement_text(
-                    payload.get("statementText") or payload.get("statement_text") or "",
+            if encoded_content is not None:
+                if not filename or not isinstance(encoded_content, str):
+                    return jsonify({
+                        "error": "filename and contentBase64 are required for file import",
+                        "externalSubmission": "not_executed",
+                    }), 400
+                max_encoded_length = 4 * ((MAX_BANK_STATEMENT_BYTES + 2) // 3)
+                if len(encoded_content) > max_encoded_length:
+                    return jsonify({
+                        "error": "Bank statement exceeds the local import limit",
+                        "maxBytes": MAX_BANK_STATEMENT_BYTES,
+                        "externalSubmission": "not_executed",
+                    }), 413
+                extension = os.path.splitext(filename)[1].lower()
+                if extension not in BANK_STATEMENT_FILE_EXTENSIONS[format_name]:
+                    return jsonify({
+                        "error": f"File extension does not match the {format_name} bank statement format",
+                        "allowedExtensions": sorted(BANK_STATEMENT_FILE_EXTENSIONS[format_name]),
+                        "externalSubmission": "not_executed",
+                    }), 400
+                try:
+                    content = base64.b64decode(encoded_content, validate=True)
+                except (binascii.Error, ValueError):
+                    return jsonify({
+                        "error": "contentBase64 is not valid base64",
+                        "externalSubmission": "not_executed",
+                    }), 400
+                if not content or len(content) > MAX_BANK_STATEMENT_BYTES:
+                    return jsonify({
+                        "error": "Bank statement is empty or exceeds the local import limit",
+                        "maxBytes": MAX_BANK_STATEMENT_BYTES,
+                        "externalSubmission": "not_executed",
+                    }), 413
+                result = service.import_statement_bytes(
+                    content,
                     format=format_name,
                     account_identifier=account_identifier,
                     source=source,
                     filename=filename,
+                    actor=actor,
+                )
+            elif statement_text is not None:
+                if not isinstance(statement_text, str):
+                    return jsonify({
+                        "error": "statementText must be a string",
+                        "externalSubmission": "not_executed",
+                    }), 400
+                result = service.import_statement_text(
+                    statement_text,
+                    format=format_name,
+                    account_identifier=account_identifier,
+                    source=source,
+                    filename=filename,
+                    actor=actor,
                 )
             else:
                 transactions = payload.get("bankTransactions") or payload.get("transactions") or []
@@ -7073,9 +7163,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     source=source,
                     filename=filename,
                     format=format_name,
+                    actor=actor,
                 )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }), 400
         return jsonify(result)
 
     @app.post("/bank-transactions/import")

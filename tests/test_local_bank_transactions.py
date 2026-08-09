@@ -2,7 +2,10 @@ import os
 import tempfile
 import unittest
 
-from src.operations.local_bank_transactions import LocalBankTransactionImportService
+from src.operations.local_bank_transactions import (
+    MAX_BANK_STATEMENT_BYTES,
+    LocalBankTransactionImportService,
+)
 from src.operations.local_ledger import LocalOperationsLedger
 
 
@@ -118,6 +121,94 @@ class TestLocalBankTransactionImportService(unittest.TestCase):
             self.assertEqual(transaction["transaction_date"], "2026-06-28")
             self.assertEqual(transaction["amount"], -42.5)
             self.assertIn("Office Shop", transaction["description"])
+
+    def test_generated_ids_preserve_identical_legitimate_rows_and_remain_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBankTransactionImportService(ledger, {})
+            rows = [
+                {
+                    "date": "2026-06-28",
+                    "amount": "-12.50",
+                    "description": "Transit fare",
+                    "counterparty": "Transit BV",
+                },
+                {
+                    "date": "2026-06-28",
+                    "amount": "-12.50",
+                    "description": "Transit fare",
+                    "counterparty": "Transit BV",
+                },
+            ]
+
+            first = service.import_transactions(rows, account_identifier="checking")
+            second = service.import_transactions(rows, account_identifier="checking")
+            transactions = ledger.list_bank_transactions(account_identifier="checking")
+
+            self.assertEqual(first["rowsImported"], 2)
+            self.assertEqual(first["duplicates"], 0)
+            self.assertEqual(second["rowsImported"], 0)
+            self.assertEqual(second["duplicates"], 2)
+            self.assertEqual(len(transactions), 2)
+            generated_ids = sorted(item["transaction_id"] for item in transactions)
+            self.assertTrue(generated_ids[0].startswith("generated:"))
+            self.assertEqual(generated_ids[1], f"{generated_ids[0]}:2")
+
+    def test_empty_and_invalid_rows_are_not_reported_as_completed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBankTransactionImportService(ledger, {})
+
+            empty = service.import_transactions([], actor="fab_dashboard:4")
+            invalid = service.import_transactions([
+                {"date": "not-a-date", "amount": "-20", "description": "Invalid date"},
+                {"date": "2026-06-28", "description": "Missing amount"},
+            ])
+
+            self.assertEqual(empty["status"], "empty")
+            self.assertEqual(empty["rowsImported"], 0)
+            self.assertEqual(invalid["status"], "empty")
+            self.assertEqual(invalid["skipped"], 2)
+            self.assertEqual(ledger.list_bank_transactions(), [])
+            self.assertEqual(
+                ledger.list_audit_events(limit=10)[-1]["details"]["actor"],
+                "fab_dashboard:4",
+            )
+
+    def test_statement_bytes_support_windows_bank_exports_and_reject_binary_or_oversized_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBankTransactionImportService(ledger, {})
+
+            result = service.import_statement_bytes(
+                (
+                    "Datum;Omschrijving;Bedrag;Valuta\n"
+                    "28-06-2026;Café aankoop;-4,25;EUR\n"
+                ).encode("cp1252"),
+                format="csv",
+                filename="bank.csv",
+            )
+
+            self.assertEqual(result["rowsImported"], 1)
+            self.assertEqual(ledger.list_bank_transactions()[0]["description"], "Café aankoop")
+            with self.assertRaisesRegex(ValueError, "text-based"):
+                service.import_statement_bytes(b"date\x00amount", format="csv")
+            with self.assertRaisesRegex(ValueError, "text-based"):
+                service.import_statement_bytes(b"date,amount\n\x01,-20", format="csv")
+            with self.assertRaisesRegex(ValueError, "transaction date column"):
+                service.import_statement_bytes(b"description,amount\nLunch,-20", format="csv")
+            with self.assertRaisesRegex(ValueError, "amount, debit, or credit column"):
+                service.import_statement_bytes(b"date,description\n2026-06-28,Lunch", format="csv")
+            with self.assertRaisesRegex(ValueError, "import limit"):
+                service.import_statement_bytes(b"x" * (MAX_BANK_STATEMENT_BYTES + 1), format="csv")
+
+    def test_malformed_camt_returns_a_validation_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBankTransactionImportService(ledger, {})
+
+            with self.assertRaisesRegex(ValueError, "not valid XML"):
+                service.import_statement_text("<Document>", format="camt")
 
 
 if __name__ == "__main__":

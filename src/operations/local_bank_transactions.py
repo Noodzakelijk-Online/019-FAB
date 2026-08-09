@@ -13,6 +13,36 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 FINAL_RECONCILIATION_STATUSES = {"approved", "reconciled", "ignored"}
 OPEN_RECONCILIATION_STATUSES = ("not_started", "candidate", "missing_receipt", "needs_review", "rejected", "resolved")
+MAX_BANK_STATEMENT_BYTES = 4 * 1024 * 1024
+SUPPORTED_BANK_STATEMENT_FORMATS = {"csv", "json", "camt", "mt940"}
+BANK_STATEMENT_FILE_EXTENSIONS = {
+    "csv": {".csv"},
+    "json": {".json"},
+    "camt": {".camt", ".xml"},
+    "mt940": {".mt940", ".sta"},
+}
+CSV_DATE_FIELDS = {
+    "transactiondate",
+    "date",
+    "datum",
+    "bookingdate",
+    "boekingsdatum",
+    "booked",
+    "valuedate",
+    "valutadatum",
+}
+CSV_AMOUNT_FIELDS = {
+    "amount",
+    "transactionamount",
+    "bedrag",
+    "value",
+    "debit",
+    "af",
+    "withdrawal",
+    "credit",
+    "bij",
+    "deposit",
+}
 
 
 class LocalBankTransactionImportService:
@@ -29,18 +59,30 @@ class LocalBankTransactionImportService:
         account_identifier: str = "default",
         source: str = "manual_upload",
         filename: Optional[str] = None,
+        actor: str = "local_bank_import",
     ) -> Dict[str, Any]:
         format_name = str(format or "csv").strip().lower()
         text = statement_text or ""
         if not text.strip():
             raise ValueError("statementText is required")
+        if len(text.encode("utf-8")) > MAX_BANK_STATEMENT_BYTES:
+            raise ValueError(
+                f"Bank statement exceeds the {MAX_BANK_STATEMENT_BYTES}-byte import limit"
+            )
         if format_name == "json":
             parsed = json.loads(text)
             if isinstance(parsed, dict):
                 parsed = parsed.get("bankTransactions") or parsed.get("transactions") or []
             if not isinstance(parsed, list):
                 raise ValueError("JSON statement text must be a list or contain transactions")
-            return self.import_transactions(parsed, account_identifier, source, filename, "json")
+            return self.import_transactions(
+                parsed,
+                account_identifier,
+                source,
+                filename,
+                "json",
+                actor=actor,
+            )
         if format_name == "csv":
             return self.import_transactions(
                 _parse_csv_transactions(text),
@@ -48,6 +90,7 @@ class LocalBankTransactionImportService:
                 source,
                 filename,
                 "csv",
+                actor=actor,
             )
         if format_name in {"camt", "xml", "camt.053", "camt053"}:
             return self.import_transactions(
@@ -56,6 +99,7 @@ class LocalBankTransactionImportService:
                 source,
                 filename,
                 "camt",
+                actor=actor,
             )
         if format_name in {"mt940", "sta"}:
             return self.import_transactions(
@@ -64,8 +108,33 @@ class LocalBankTransactionImportService:
                 source,
                 filename,
                 "mt940",
+                actor=actor,
             )
         raise ValueError(f"Unsupported bank statement format: {format}")
+
+    def import_statement_bytes(
+        self,
+        statement_bytes: bytes,
+        format: str = "csv",
+        account_identifier: str = "default",
+        source: str = "manual_upload",
+        filename: Optional[str] = None,
+        actor: str = "local_bank_import",
+    ) -> Dict[str, Any]:
+        if not isinstance(statement_bytes, bytes) or not statement_bytes:
+            raise ValueError("Bank statement file is empty")
+        if len(statement_bytes) > MAX_BANK_STATEMENT_BYTES:
+            raise ValueError(
+                f"Bank statement exceeds the {MAX_BANK_STATEMENT_BYTES}-byte import limit"
+            )
+        return self.import_statement_text(
+            _decode_statement_bytes(statement_bytes),
+            format=format,
+            account_identifier=account_identifier,
+            source=source,
+            filename=filename,
+            actor=actor,
+        )
 
     def import_transactions(
         self,
@@ -74,10 +143,15 @@ class LocalBankTransactionImportService:
         source: str = "manual_json",
         filename: Optional[str] = None,
         format: str = "json",
+        actor: str = "local_bank_import",
     ) -> Dict[str, Any]:
         if not isinstance(transactions, list):
             transactions = list(transactions or [])
         account_identifier = str(account_identifier or "default").strip() or "default"
+        account_identifier = account_identifier[:200]
+        source = str(source or "manual_json").strip()[:120] or "manual_json"
+        filename = str(filename or "").strip()[:255] or None
+        actor = str(actor or "local_bank_import").strip()[:200] or "local_bank_import"
         import_id = self.ledger.create_bank_statement_import({
             "source": source,
             "accountIdentifier": account_identifier,
@@ -90,6 +164,7 @@ class LocalBankTransactionImportService:
         duplicates = 0
         skipped: List[Dict[str, Any]] = []
         bank_transaction_ids: List[int] = []
+        generated_occurrences: Dict[str, int] = {}
 
         for index, transaction in enumerate(transactions):
             if not isinstance(transaction, dict):
@@ -97,8 +172,17 @@ class LocalBankTransactionImportService:
                 continue
             normalized = normalize_bank_transaction(transaction, account_identifier, source)
             if not _has_financial_signal(normalized):
-                skipped.append({"row": index, "reason": "empty_transaction"})
+                skipped.append({"row": index, "reason": "missing_required_financial_fields"})
                 continue
+            if normalized["metadata"]["generatedTransactionId"]:
+                fingerprint = str(normalized["duplicateFingerprint"])
+                occurrence = generated_occurrences.get(fingerprint, 0) + 1
+                generated_occurrences[fingerprint] = occurrence
+                normalized["metadata"]["generatedOccurrence"] = occurrence
+                if occurrence > 1:
+                    normalized["transactionId"] = (
+                        f"{normalized['transactionId']}:{occurrence}"
+                    )
             existing = self.ledger.get_bank_transaction_by_identity(
                 normalized["accountIdentifier"],
                 normalized["transactionId"],
@@ -113,7 +197,7 @@ class LocalBankTransactionImportService:
             else:
                 imported += 1
 
-        status = "completed" if imported or duplicates or not skipped else "empty"
+        status = "completed" if imported or duplicates else "empty"
         self.ledger.update_bank_statement_import(import_id, {
             "status": status,
             "rowsSeen": len(transactions),
@@ -148,6 +232,7 @@ class LocalBankTransactionImportService:
                 "accountIdentifier": account_identifier,
                 "format": format,
                 "source": source,
+                "actor": actor,
                 "rowsSeen": summary["rowsSeen"],
                 "rowsImported": imported,
                 "duplicates": duplicates,
@@ -178,11 +263,14 @@ def normalize_bank_transaction(
             "transactionDate",
             "transaction_date",
             "date",
+            "datum",
             "bookingDate",
             "booking_date",
+            "boekingsdatum",
             "booked",
             "valueDate",
             "value_date",
+            "valutadatum",
         )
     )
     description = lookup.first(
@@ -202,8 +290,14 @@ def normalize_bank_transaction(
         "merchant",
         "tegenpartij",
         "rekeningnaam",
+        "naam tegenpartij",
+        "naam_tegenpartij",
+        "tegenrekeningnaam",
     )
-    currency = str(lookup.first("currency", "ccy", "currencyCode", "currency_code") or "EUR").strip() or "EUR"
+    currency = str(
+        lookup.first("currency", "ccy", "currencyCode", "currency_code", "valuta")
+        or "EUR"
+    ).strip() or "EUR"
     explicit_id = lookup.first(
         "transactionId",
         "transaction_id",
@@ -267,11 +361,21 @@ def _parse_csv_transactions(text: str) -> List[Dict[str, Any]]:
     except csv.Error:
         dialect = csv.excel
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    normalized_headers = {_key(field) for field in (reader.fieldnames or []) if field}
+    if not normalized_headers:
+        raise ValueError("CSV bank statement must contain a header row")
+    if not normalized_headers.intersection(CSV_DATE_FIELDS):
+        raise ValueError("CSV bank statement must contain a recognized transaction date column")
+    if not normalized_headers.intersection(CSV_AMOUNT_FIELDS):
+        raise ValueError("CSV bank statement must contain a recognized amount, debit, or credit column")
     return [dict(row) for row in reader if row]
 
 
 def _parse_camt_transactions(text: str) -> List[Dict[str, Any]]:
-    root = ET.fromstring(text)
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ValueError("CAMT/XML bank statement is not valid XML") from exc
     transactions: List[Dict[str, Any]] = []
     for entry in _iter_local(root, "Ntry"):
         amount_text = _first_local_text(entry, "Amt")
@@ -405,7 +509,7 @@ def _normalize_date(value: Any) -> Optional[str]:
             return datetime.strptime(text[:10], date_format).date().isoformat()
         except ValueError:
             continue
-    return text
+    return None
 
 
 def _mt940_date(value: str) -> Optional[str]:
@@ -437,10 +541,29 @@ def _transaction_for_reconciliation(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _has_financial_signal(transaction: Dict[str, Any]) -> bool:
-    return any(
-        transaction.get(key) not in (None, "")
-        for key in ("transactionDate", "amount", "description", "counterparty")
+    return (
+        transaction.get("transactionDate") not in (None, "")
+        and transaction.get("amount") is not None
     )
+
+
+def _decode_statement_bytes(content: bytes) -> str:
+    if b"\x00" in content:
+        raise ValueError("Bank statement must be a text-based CSV, JSON, CAMT, or MT940 file")
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            decoded = content.decode("cp1252")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Bank statement text encoding is not supported") from exc
+    disallowed_controls = sum(
+        1 for character in decoded
+        if ord(character) < 32 and character not in {"\t", "\n", "\r"}
+    )
+    if disallowed_controls:
+        raise ValueError("Bank statement must be a text-based CSV, JSON, CAMT, or MT940 file")
+    return decoded
 
 
 def _fingerprint(values: Iterable[Any]) -> str:

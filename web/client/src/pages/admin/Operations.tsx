@@ -9,6 +9,7 @@ import { FabControlOverview } from "@/components/fab/FabControlOverview";
 import { FabDeliveryQueue } from "@/components/fab/FabDeliveryQueue";
 import { FabAutomationPanel } from "@/components/fab/FabAutomationPanel";
 import { FabBackupCenter } from "@/components/fab/FabBackupCenter";
+import { FabBankImportDrawer } from "@/components/fab/FabBankImportDrawer";
 import { FabExceptionsPanel } from "@/components/fab/FabExceptionsPanel";
 import { FabGmailSetupDrawer } from "@/components/fab/FabGmailSetupDrawer";
 import { FabGoogleDriveSetupDrawer } from "@/components/fab/FabGoogleDriveSetupDrawer";
@@ -20,6 +21,7 @@ import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/F
 import { FabWaveReceiptExecutorDrawer } from "@/components/fab/FabWaveReceiptExecutorDrawer";
 import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
+import type { FabBankStatementFormat } from "@/components/fab/fabBankStatement";
 import { asRecord, count, humanize, records, text } from "@/components/fab/fabView";
 import { useFabLocale } from "@/components/fab/fabLocale";
 import { trpc } from "@/lib/trpc";
@@ -50,6 +52,7 @@ export default function AdminOperations() {
   const [search, setSearch] = useState("");
   const [commandDrawerOpen, setCommandDrawerOpen] = useState(false);
   const [intakeDrawerOpen, setIntakeDrawerOpen] = useState(false);
+  const [bankImportOpen, setBankImportOpen] = useState(false);
   const [gmailSetupOpen, setGmailSetupOpen] = useState(false);
   const [driveSetupOpen, setDriveSetupOpen] = useState(false);
   const [waveSetupOpen, setWaveSetupOpen] = useState(false);
@@ -138,6 +141,7 @@ export default function AdminOperations() {
     },
   });
   const uploadIntake = trpc.fab.uploadIntake.useMutation();
+  const importBankStatement = trpc.fab.importBankStatement.useMutation();
   const installGmailCredentials = trpc.fab.installGmailCredentials.useMutation();
   const startGmailAuthorization = trpc.fab.startGmailAuthorization.useMutation();
   const installGoogleDriveCredentials = trpc.fab.installGoogleDriveCredentials.useMutation();
@@ -167,6 +171,34 @@ export default function AdminOperations() {
     await controlCenter.refetch();
     executeCommand("process_imported");
   }, [controlCenter, executeCommand]);
+
+  const uploadBankStatement = useCallback(async (
+    file: File,
+    format: FabBankStatementFormat,
+    accountIdentifier: string,
+  ): Promise<FabRecord> => {
+    if (!controlCenter.data?.connection.connected) {
+      throw new Error(copy("FAB local API is disconnected.", "De lokale FAB-API is niet verbonden."));
+    }
+    return importBankStatement.mutateAsync({
+      filename: file.name,
+      format,
+      accountIdentifier,
+      contentBase64: await readFileBase64(file),
+    });
+  }, [controlCenter.data?.connection.connected, copy, importBankStatement]);
+
+  const finishBankImport = useCallback(async (result: FabRecord) => {
+    const imported = count(result.rowsImported);
+    const duplicates = count(result.duplicates);
+    const skipped = count(result.skipped);
+    toast.success(copy(
+      `Bank statement recorded: ${imported} new, ${duplicates} already present, ${skipped} skipped.`,
+      `Bankafschrift vastgelegd: ${imported} nieuw, ${duplicates} reeds aanwezig, ${skipped} overgeslagen.`,
+    ));
+    await controlCenter.refetch();
+    if (imported > 0) executeCommand("run_reconciliation");
+  }, [controlCenter, copy, executeCommand]);
 
   const installDriveCredentials = useCallback(async (file: File, replace: boolean) => {
     await installGoogleDriveCredentials.mutateAsync({
@@ -345,12 +377,14 @@ export default function AdminOperations() {
             reviewResource={data?.resourceStates.reviewQueue}
             checkedAt={data?.connection.checkedAt}
             latencyMs={data?.connection.latencyMs}
-            commandPending={Boolean(pendingCommand) || uploading}
+            commandPending={Boolean(pendingCommand) || uploading || importBankStatement.isPending}
             pendingCommand={pendingCommand}
             uploading={uploading}
+            bankImporting={importBankStatement.isPending}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
             onOpenIntake={() => setIntakeDrawerOpen(true)}
+            onOpenBankImport={() => setBankImportOpen(true)}
             onOpenCommands={() => setCommandDrawerOpen(true)}
           />
           <div className="fab-priority-grid">
@@ -438,7 +472,7 @@ export default function AdminOperations() {
           <FabConnections
             connections={data?.connections || []}
             search={search}
-            commandPending={Boolean(pendingCommand)}
+            commandPending={Boolean(pendingCommand) || importBankStatement.isPending}
             resource={data?.resourceStates.settings}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             onCommand={executeCommand}
@@ -447,6 +481,7 @@ export default function AdminOperations() {
               if (connectionId === "google_drive") setDriveSetupOpen(true);
               if (connectionId === "waveapps_business") setWaveSetupOpen(true);
               if (connectionId === "wave_receipt_executor") setWaveReceiptExecutorOpen(true);
+              if (connectionId === "banking_api") setBankImportOpen(true);
             }}
           />
         </>
@@ -467,6 +502,15 @@ export default function AdminOperations() {
         onUploadFile={uploadDocument}
         onFinished={finishIntake}
         onBusyChange={setUploading}
+      />
+      <FabBankImportDrawer
+        open={bankImportOpen}
+        connected={connected}
+        busy={importBankStatement.isPending}
+        recentImports={data?.banking?.recentImports || []}
+        onClose={() => setBankImportOpen(false)}
+        onImport={uploadBankStatement}
+        onFinished={finishBankImport}
       />
       <FabGmailSetupDrawer
         open={gmailSetupOpen}
