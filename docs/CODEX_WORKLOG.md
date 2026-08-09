@@ -1,5 +1,19 @@
 # Codex Worklog
 
+## 2026-08-09 - Consistent ledger snapshots and control-center latency
+
+- Reprofiled every one of the 29 operator control-center resources against the live 150-document ledger. Exception enrichment was the slowest remaining independent resource, and delivery work orders repeated trusted Gmail scanner path resolution while building one immutable response.
+- Added a context-local, query-only SQLite read snapshot for compound health, exception, and delivery projections. A compound read now uses one consistent database view and one connection; any accidental write inside the snapshot fails closed. Normal writes remain independently committed after the snapshot closes.
+- Replaced normalized bookkeeping-record line-item N+1 hydration with one bounded bulk query, and replaced per-exception full entity histories with one compact multi-entity snapshot. Source-connector exceptions now include a useful redacted source-account summary instead of a null entity and never expose the source identifier.
+- Reused the candidate source-verification result only within the same delivery read snapshot. A trusted Gmail scanner path is resolved once per work-order read, while individual work orders still validate once and every archival operation still rechecks policy, provider identity, source hash, destination, and post-move hash.
+- Direct real-ledger exception reads improved from 122.84 ms to 51.73 ms median; 150-work-order reads improved from 151.61 ms to 81.32 ms. After the production restart, authenticated HTTP exceptions improved from 308.57 ms to 85.28 ms, work orders from 222.81 ms to 125.52 ms, close readiness from 185.02 ms to 72.59 ms, and autonomy from 300.73 ms to 223.66 ms.
+- Five cold complete dashboard reads measured 612.64-858.23 ms with a 709.21 ms median; immediate cached reads measured 31.61 ms median. Gzip reduced the 418,948-byte control-center response to 59,729 bytes. All 29 resources returned HTTP 200.
+- Verification passed 93 focused health/ledger/exception/delivery tests, 801 backend tests with four optional-runtime skips, 165 web tests, TypeScript checking, production build budgets, dependency and peer audits, Python compilation, six PowerShell parsers, both Compose modes, and a read-only live-ledger integrity and foreign-key check.
+- Rebuilt the exact current API, worker, and dashboard images in an isolated standard Compose project on loopback ports 5512/3512. API/dashboard identity matched, all 29 control-center resources were live with zero partial errors, HAI was ready with 14 commands and eight resources, all services ran as non-root users, and no fatal log pattern appeared. The project containers, network, volumes, and images were removed afterward.
+- The restarted Windows runtime matched the current source fingerprint, all six process logs remained empty, HAI reported ready with 14 manifest commands, 13 currently allowlisted commands, and eight resources, and cloud access remained safely inactive with `endpoint_required`.
+- Fresh desktop and narrow in-app Browser acceptance showed connected live data, no horizontal or off-screen control overflow, and no new console warnings/errors. No provider record, review decision, source file, Drive archive, or external submission was changed.
+- Implementation commit `e55e7b2` is on `origin/main`; GitHub Actions run `31331321548` passed the frontend, Linux backend, and all four Windows backend jobs.
+
 ## 2026-08-09 - Compact duplicate reassessment and autonomy latency
 
 - Profiled all 29 operator control-center resources against the live 150-document ledger. The autonomy plan was the dominant warm path at 485.89 ms because its count projection reassessed duplicate candidates by loading two complete document histories for every open pair.

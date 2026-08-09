@@ -91,13 +91,24 @@ Audit date: 2026-08-09
   22.95 ms median, autonomy counts from 252.56 ms to 118.67 ms, and the
   restarted authenticated autonomy endpoint measured 217.94 ms median while
   retaining every duplicate, review, approval, and external-submission gate.
+- Added a context-local, query-only SQLite snapshot for compound health,
+  exception, and delivery reads. It provides one consistent database view,
+  collapses repeated Windows connection setup/teardown, rejects accidental
+  writes, and remains isolated per request. Normalized record line items and
+  exception entities now hydrate in bounded bulk queries instead of N+1 reads.
+- Reused trusted Gmail scanner containment validation only inside the current
+  delivery snapshot. Individual reads still validate the source and archival
+  execution retains all provider identity, source/destination, and pre/post
+  hash checks. Live exception latency fell from 308.57 ms to 85.28 ms median,
+  150-work-order latency from 222.81 ms to 125.52 ms, and the complete cold
+  control center to 709.21 ms median with a 31.61 ms immediate-repeat median.
 
 ## Remaining risks
 
 - Live Google and Wave acceptance depends on owner authorization and current provider state.
 - MijnGeldzaken remains a supervised master-ledger export, not an authenticated write connector.
 - Direct PSD2 bank feeds and SVB submissions are not implemented.
-- Compose configuration, both images, authenticated service health, dashboard access, a complete 24-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
+- Compose configuration, both images, authenticated service health, dashboard access, a complete 29-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
 - Recovery is implemented and locally verified without touching the live ledger. A production-sized restore rehearsal, recovery-time objective measurement, and accountant-approved evidence sampling remain required before unattended upgrades rely on it.
 - Formal penetration testing, DPIA approval, accountant validation, and production disaster-recovery exercises remain external work.
 - Production-looking Google Cloud Function, root workflow, standalone mobile
