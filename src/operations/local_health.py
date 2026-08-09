@@ -124,6 +124,20 @@ class LocalOperationsHealth:
         master_ledger: Optional[Dict[str, Any]] = None,
         issue_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
+        with self.ledger.read_snapshot():
+            return self._summarize(
+                metrics=metrics,
+                master_ledger=master_ledger,
+                issue_limit=issue_limit,
+            )
+
+    def _summarize(
+        self,
+        *,
+        metrics: Optional[Dict[str, Any]] = None,
+        master_ledger: Optional[Dict[str, Any]] = None,
+        issue_limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         if metrics is None:
             metrics = self.ledger.dashboard_metrics()

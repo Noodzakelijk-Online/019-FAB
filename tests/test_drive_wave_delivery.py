@@ -505,15 +505,44 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
                 "find_audit_event",
                 side_effect=AssertionError("per-document evidence lookup"),
             ),
+            patch.object(
+                self.ledger,
+                "_connect",
+                wraps=self.ledger._connect,
+            ) as connect,
         ):
             result = service.list_work_orders(limit=10)
 
+        self.assertEqual(connect.call_count, 1)
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["workOrders"][0]["documentId"], self.document_id)
         self.assertEqual(
             result["workOrders"][0]["wave"]["expectedFields"]["amount"],
             121.0,
         )
+
+    def test_work_orders_reuse_current_snapshot_source_verification(self):
+        document_id, _, _, _, config = self._register_gmail_scanner_document()
+        service = DriveWaveDeliveryService(self.ledger, config)
+
+        with patch.object(
+            service,
+            "_is_gmail_scanner_source",
+            wraps=service._is_gmail_scanner_source,
+        ) as validate_source:
+            result = service.list_work_orders(limit=10)
+
+            self.assertIn(
+                document_id,
+                {item["documentId"] for item in result["workOrders"]},
+            )
+            self.assertEqual(validate_source.call_count, 1)
+
+            validate_source.reset_mock()
+            order = service.work_order(document_id)
+
+            self.assertEqual(order["documentId"], document_id)
+            self.assertEqual(validate_source.call_count, 1)
 
     def test_work_order_transaction_url_uses_wave_dashboard_uuid(self):
         self.config["waveapps_business_id"] = (

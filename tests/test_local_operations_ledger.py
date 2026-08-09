@@ -11,6 +11,28 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_read_snapshot_reuses_one_query_only_connection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+
+            with patch.object(ledger, "_connect", wraps=ledger._connect) as connect:
+                with ledger.read_snapshot():
+                    ledger.dashboard_metrics()
+                    with ledger.read_snapshot():
+                        ledger.list_documents(limit=5)
+                    with self.assertRaises(sqlite3.OperationalError):
+                        ledger.record_audit_event({
+                            "action": "read_snapshot.write_rejected",
+                            "entityType": "test",
+                        })
+
+            self.assertEqual(connect.call_count, 1)
+            event_id = ledger.record_audit_event({
+                "action": "read_snapshot.closed",
+                "entityType": "test",
+            })
+            self.assertGreater(event_id, 0)
+
     def test_schema_history_is_versioned_and_current(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")
@@ -799,7 +821,12 @@ class TestLocalOperationsLedger(unittest.TestCase):
                 }
             ])
 
-            records = ledger.list_bookkeeping_records(export_status="draft_prepared")
+            with patch.object(
+                ledger,
+                "_bookkeeping_record_with_line_items",
+                side_effect=AssertionError("per-record line-item lookup"),
+            ):
+                records = ledger.list_bookkeeping_records(export_status="draft_prepared")
             detail = ledger.get_document(document_id)
             lines = ledger.list_bookkeeping_record_line_items(bookkeeping_record_id=record_id)
             metrics = ledger.dashboard_metrics()
@@ -1389,6 +1416,65 @@ class TestLocalOperationsLedger(unittest.TestCase):
                 resolved_id,
                 [item["id"] for item in documents[first_id]["review_items"]],
             )
+
+    def test_exception_entity_context_loads_compact_related_counts_and_steps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "exception-context-document",
+                "originalFilename": "receipt.pdf",
+                "processingStatus": "needs_review",
+            })
+            for reason in ("first_review", "second_review"):
+                ledger.create_review_item({
+                    "documentId": document_id,
+                    "reason": reason,
+                    "details": "Review evidence.",
+                })
+            workflow_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "test",
+            })
+            second_step_id = ledger.create_workflow_step({
+                "workflowRunId": workflow_id,
+                "stepKey": "second",
+                "stepOrder": 2,
+                "status": "failed",
+            })
+            first_step_id = ledger.create_workflow_step({
+                "workflowRunId": workflow_id,
+                "stepKey": "first",
+                "stepOrder": 1,
+                "status": "completed",
+            })
+            source_account_id = ledger.upsert_source_account({
+                "sourceType": "gmail",
+                "sourceIdentifier": "scanner@example.test",
+                "label": "Scanner inbox",
+                "status": "ready",
+            })
+
+            context = ledger.get_exception_entity_context({
+                "bookkeeping_document": [document_id, document_id, "invalid"],
+                "workflow_run": [workflow_id],
+                "source_account": [source_account_id],
+                "unsupported": [1],
+            })
+
+            self.assertEqual(
+                context["bookkeeping_document"][document_id]["review_item_count"],
+                2,
+            )
+            self.assertEqual(
+                [step["id"] for step in context["workflow_run"][workflow_id]["steps"]],
+                [first_step_id, second_step_id],
+            )
+            self.assertEqual(
+                context["source_account"][source_account_id]["label"],
+                "Scanner inbox",
+            )
+            self.assertNotIn("unsupported", context)
 
 
 if __name__ == "__main__":

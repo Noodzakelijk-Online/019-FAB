@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.operations.local_api import create_app
 from src.operations.local_exceptions import LocalExceptionQueueService
@@ -34,7 +35,10 @@ class TestLocalExceptionQueueService(unittest.TestCase):
                 "errorMessage": "Pipeline crashed",
             })
 
-            payload = LocalExceptionQueueService(ledger).list_exceptions()
+            with patch.object(ledger, "_connect", wraps=ledger._connect) as connect:
+                payload = LocalExceptionQueueService(ledger).list_exceptions()
+
+            self.assertEqual(connect.call_count, 1)
             exceptions = {item["id"]: item for item in payload["exceptions"]}
             failed_doc = exceptions[f"failed_document:bookkeeping_document:{document_id}"]
             failed_export = exceptions[f"failed_export_attempt:export_attempt:{export_id}"]
@@ -56,6 +60,56 @@ class TestLocalExceptionQueueService(unittest.TestCase):
             )
             self.assertEqual(workflow_action["path"], f"/api/workflows/{workflow_id}")
             self.assertEqual(workflow_action["dashboardPath"], "/#workflows")
+
+    def test_exception_queue_bulk_loads_entities_and_summarizes_source_accounts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "bulk-failed-doc",
+                "originalFilename": "failed.pdf",
+                "processingStatus": "failed",
+                "metadata": {"processingError": "OCR unavailable"},
+            })
+            source_account_id = ledger.upsert_source_account({
+                "sourceType": "google_drive",
+                "sourceIdentifier": "private-folder-id",
+                "label": "Bookkeeping inbox",
+                "status": "needs_authorization",
+                "documentsSeen": 4,
+            })
+
+            with patch.object(
+                ledger,
+                "get_exception_entity_context",
+                wraps=ledger.get_exception_entity_context,
+            ) as compact_context, patch.object(
+                ledger,
+                "get_document",
+                side_effect=AssertionError("full document history must not be loaded"),
+            ), patch.object(
+                ledger,
+                "get_review_item",
+                side_effect=AssertionError("review items must be bulk loaded"),
+            ), patch.object(
+                ledger,
+                "get_bookkeeping_record",
+                side_effect=AssertionError("records must be bulk loaded"),
+            ):
+                payload = LocalExceptionQueueService(ledger).list_exceptions()
+
+            compact_context.assert_called_once()
+            exceptions = {item["id"]: item for item in payload["exceptions"]}
+            failed_document = exceptions[
+                f"failed_document:bookkeeping_document:{document_id}"
+            ]
+            source_account = exceptions[
+                f"source_connector_unavailable:source_account:{source_account_id}"
+            ]
+            self.assertEqual(failed_document["entity"]["processingError"], "OCR unavailable")
+            self.assertEqual(source_account["entity"]["label"], "Bookkeeping inbox")
+            self.assertEqual(source_account["entity"]["documentsSeen"], 4)
+            self.assertNotIn("sourceIdentifier", source_account["entity"])
 
     def test_api_exposes_exception_queue_and_dashboard_section(self):
         with tempfile.TemporaryDirectory() as temp_dir:

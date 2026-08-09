@@ -21,6 +21,22 @@ class LocalExceptionQueueService:
         health: Optional[Dict[str, Any]] = None,
         master_ledger: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        with self.ledger.read_snapshot():
+            return self._list_exceptions(
+                limit=limit,
+                include_entities=include_entities,
+                health=health,
+                master_ledger=master_ledger,
+            )
+
+    def _list_exceptions(
+        self,
+        limit: int,
+        include_entities: bool,
+        *,
+        health: Optional[Dict[str, Any]],
+        master_ledger: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         if health is None:
             health = LocalOperationsHealth(self.ledger, self.config).summarize(
                 master_ledger=master_ledger,
@@ -35,8 +51,19 @@ class LocalExceptionQueueService:
             *LocalLedgerAnomalyService(self.ledger, self.config).list_issues(limit=bounded_limit),
         ]
         issues = _prioritized_issues(issues)[:bounded_limit]
+        entity_context = (
+            self.ledger.get_exception_entity_context(
+                _entity_references(issues),
+            )
+            if include_entities
+            else {}
+        )
         exceptions = [
-            self._exception_from_issue(issue, include_entities=include_entities)
+            self._exception_from_issue(
+                issue,
+                include_entities=include_entities,
+                entity_context=entity_context,
+            )
             for issue in issues
         ]
         return {
@@ -48,7 +75,12 @@ class LocalExceptionQueueService:
             "nextActions": health.get("nextActions") or [],
         }
 
-    def _exception_from_issue(self, issue: Dict[str, Any], include_entities: bool) -> Dict[str, Any]:
+    def _exception_from_issue(
+        self,
+        issue: Dict[str, Any],
+        include_entities: bool,
+        entity_context: Dict[str, Dict[int, Dict[str, Any]]],
+    ) -> Dict[str, Any]:
         exception = {
             "id": _exception_id(issue),
             "severity": issue.get("severity"),
@@ -63,7 +95,7 @@ class LocalExceptionQueueService:
             "externalSubmission": "not_executed",
         }
         if include_entities:
-            exception["entity"] = self._entity_summary(issue)
+            exception["entity"] = self._entity_summary(issue, entity_context)
         return exception
 
     def _master_ledger_row_issues(
@@ -83,7 +115,11 @@ class LocalExceptionQueueService:
                 break
         return issues
 
-    def _entity_summary(self, issue: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _entity_summary(
+        self,
+        issue: Dict[str, Any],
+        entity_context: Dict[str, Dict[int, Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
         entity_type = str(issue.get("entityType") or "")
         entity_id = issue.get("entityId")
         if entity_id in (None, ""):
@@ -92,25 +128,23 @@ class LocalExceptionQueueService:
             parsed_id = int(entity_id)
         except (TypeError, ValueError):
             parsed_id = None
-
-        if entity_type == "bookkeeping_document" and parsed_id is not None:
-            document = self.ledger.get_document(parsed_id)
-            return _document_summary(document) if document else None
-        if entity_type == "review_item" and parsed_id is not None:
-            item = self.ledger.get_review_item(parsed_id)
-            return _review_summary(item) if item else None
-        if entity_type == "bookkeeping_record" and parsed_id is not None:
-            record = self.ledger.get_bookkeeping_record(parsed_id)
-            return _bookkeeping_record_summary(record) if record else None
-        if entity_type == "export_attempt" and parsed_id is not None:
-            attempt = self.ledger.get_export_attempt(parsed_id)
-            return _export_summary(attempt) if attempt else None
-        if entity_type == "routing_attempt" and parsed_id is not None:
-            route = self.ledger.get_routing_attempt(parsed_id)
-            return _routing_summary(route) if route else None
-        if entity_type == "workflow_run" and parsed_id is not None:
-            run = self.ledger.get_workflow_run_with_steps(parsed_id)
-            return _workflow_summary(run) if run else None
+        if parsed_id is None:
+            return None
+        entity = (entity_context.get(entity_type) or {}).get(parsed_id)
+        if not entity:
+            return None
+        summarizers = {
+            "bookkeeping_document": _document_summary,
+            "review_item": _review_summary,
+            "bookkeeping_record": _bookkeeping_record_summary,
+            "export_attempt": _export_summary,
+            "routing_attempt": _routing_summary,
+            "workflow_run": _workflow_summary,
+            "source_account": _source_account_summary,
+        }
+        summarizer = summarizers.get(entity_type)
+        if summarizer:
+            return summarizer(entity)
         return None
 
 
@@ -377,6 +411,7 @@ def _action(
 
 
 def _document_summary(document: Dict[str, Any]) -> Dict[str, Any]:
+    review_item_count = document.get("review_item_count")
     return {
         "id": document.get("id"),
         "source": document.get("source"),
@@ -388,7 +423,11 @@ def _document_summary(document: Dict[str, Any]) -> Dict[str, Any]:
         "transactionDate": document.get("transaction_date"),
         "totalAmount": document.get("total_amount"),
         "confidenceScore": document.get("confidence_score"),
-        "reviewItemCount": len(document.get("review_items") or []),
+        "reviewItemCount": (
+            int(review_item_count)
+            if review_item_count is not None
+            else len(document.get("review_items") or [])
+        ),
         "processingError": (document.get("metadata") or {}).get("processingError"),
     }
 
@@ -476,11 +515,30 @@ def _workflow_summary(run: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _find_by_id(items: List[Dict[str, Any]], item_id: int) -> Optional[Dict[str, Any]]:
-    for item in items:
-        if int(item.get("id") or 0) == int(item_id):
-            return item
-    return None
+def _source_account_summary(account: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": account.get("id"),
+        "sourceType": account.get("source_type"),
+        "label": account.get("label"),
+        "status": account.get("status"),
+        "lastSeenAt": account.get("last_seen_at"),
+        "lastScanAt": account.get("last_scan_at"),
+        "documentsSeen": account.get("documents_seen"),
+        "documentsImported": account.get("documents_imported"),
+        "duplicatesDetected": account.get("duplicates_detected"),
+    }
+
+
+def _entity_references(issues: List[Dict[str, Any]]) -> Dict[str, List[int]]:
+    references: Dict[str, List[int]] = {}
+    for issue in issues:
+        entity_type = str(issue.get("entityType") or "")
+        try:
+            entity_id = int(issue.get("entityId"))
+        except (TypeError, ValueError):
+            continue
+        references.setdefault(entity_type, []).append(entity_id)
+    return references
 
 
 def _bounded_limit(value: Any) -> int:

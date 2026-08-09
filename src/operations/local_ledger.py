@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Sequence
 
@@ -45,6 +46,9 @@ class LocalOperationsLedger:
         if not path:
             raise ValueError("Local ledger path is required")
         self.path = os.path.abspath(os.path.expanduser(path))
+        self._read_snapshot_connection: ContextVar[Optional[sqlite3.Connection]] = (
+            ContextVar(f"fab_ledger_read_snapshot_{id(self)}", default=None)
+        )
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         self._last_schema_backup = self._prepare_schema_migration_backup()
         self._init_schema()
@@ -73,12 +77,39 @@ class LocalOperationsLedger:
 
     @contextmanager
     def _connection(self):
+        snapshot_connection = self._read_snapshot_connection.get()
+        if snapshot_connection is not None:
+            yield snapshot_connection
+            return
         connection = self._connect()
         try:
             yield connection
             connection.commit()
         finally:
             connection.close()
+
+    @contextmanager
+    def read_snapshot(self):
+        """Reuse one query-only SQLite snapshot across a compound read."""
+        active_connection = self._read_snapshot_connection.get()
+        if active_connection is not None:
+            yield self
+            return
+
+        connection = self._connect()
+        token = None
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            token = self._read_snapshot_connection.set(connection)
+            yield self
+        finally:
+            if token is not None:
+                self._read_snapshot_connection.reset(token)
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
 
     def _init_schema(self) -> None:
         with self._connection() as connection:
@@ -2344,7 +2375,7 @@ class LocalOperationsLedger:
         params.append(limit)
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
-            return [self._bookkeeping_record_with_line_items(connection, row) for row in rows]
+            return self._bookkeeping_records_with_line_items(connection, rows)
 
     def count_bookkeeping_records(
         self,
@@ -4233,6 +4264,116 @@ class LocalOperationsLedger:
             )
         return documents
 
+    def get_exception_entity_context(
+        self,
+        references: Dict[str, Sequence[int]],
+    ) -> Dict[str, Dict[int, Dict[str, Any]]]:
+        """Load compact exception entities through one bounded read snapshot."""
+        tables = {
+            "bookkeeping_document": "bookkeeping_documents",
+            "review_item": "review_items",
+            "bookkeeping_record": "bookkeeping_records",
+            "export_attempt": "export_attempts",
+            "routing_attempt": "routing_attempts",
+            "workflow_run": "workflow_runs",
+            "source_account": "source_accounts",
+        }
+        bounded_references: Dict[str, list] = {}
+        for entity_type, values in (references or {}).items():
+            if entity_type not in tables:
+                continue
+            entity_ids = []
+            seen_ids = set()
+            for value in values or []:
+                entity_id = self._optional_int(value)
+                if entity_id is None or entity_id in seen_ids:
+                    continue
+                seen_ids.add(entity_id)
+                entity_ids.append(entity_id)
+                if len(entity_ids) >= 500:
+                    break
+            if entity_ids:
+                bounded_references[entity_type] = entity_ids
+        if not bounded_references:
+            return {}
+
+        context: Dict[str, Dict[int, Dict[str, Any]]] = {
+            entity_type: {}
+            for entity_type in bounded_references
+        }
+        with self._connection() as connection:
+            for entity_type, entity_ids in bounded_references.items():
+                table = tables[entity_type]
+                for chunk_start in range(0, len(entity_ids), 500):
+                    chunk = entity_ids[chunk_start:chunk_start + 500]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows = connection.execute(
+                        f"SELECT * FROM {table} WHERE id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        entity = self._row_to_dict(row)
+                        context[entity_type][int(entity["id"])] = entity
+
+            document_ids = bounded_references.get("bookkeeping_document") or []
+            for document in context.get("bookkeeping_document", {}).values():
+                document["review_item_count"] = 0
+            for chunk_start in range(0, len(document_ids), 500):
+                chunk = document_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT document_id, COUNT(*) AS review_item_count
+                    FROM review_items
+                    WHERE document_id IN ({placeholders})
+                    GROUP BY document_id
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    document = context["bookkeeping_document"].get(
+                        int(row["document_id"])
+                    )
+                    if document is not None:
+                        document["review_item_count"] = int(
+                            row["review_item_count"] or 0
+                        )
+
+            workflow_ids = bounded_references.get("workflow_run") or []
+            for workflow in context.get("workflow_run", {}).values():
+                workflow["steps"] = []
+                workflow["step_count"] = 0
+            for chunk_start in range(0, len(workflow_ids), 500):
+                chunk = workflow_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT * FROM (
+                        SELECT
+                            workflow_steps.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY workflow_run_id
+                                ORDER BY step_order ASC, attempt ASC, id ASC
+                            ) AS exception_row_number
+                        FROM workflow_steps
+                        WHERE workflow_run_id IN ({placeholders})
+                    ) ranked_steps
+                    WHERE exception_row_number <= 500
+                    ORDER BY workflow_run_id DESC, step_order ASC, attempt ASC, id ASC
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    step = self._row_to_dict(row)
+                    step.pop("exception_row_number", None)
+                    workflow = context["workflow_run"].get(
+                        int(step["workflow_run_id"])
+                    )
+                    if workflow is not None:
+                        workflow["steps"].append(step)
+                        workflow["step_count"] += 1
+        return context
+
     def get_document_delivery_context(
         self,
         document_ids: Sequence[int],
@@ -6061,6 +6202,40 @@ class LocalOperationsLedger:
         record["line_items"] = [cls._row_to_dict(line_row) for line_row in line_rows]
         record["line_item_count"] = len(record["line_items"])
         return record
+
+    @classmethod
+    def _bookkeeping_records_with_line_items(
+        cls,
+        connection: sqlite3.Connection,
+        rows: Sequence[sqlite3.Row],
+    ) -> list[Dict[str, Any]]:
+        records = [cls._row_to_dict(row) for row in rows]
+        if not records:
+            return []
+
+        records_by_id = {}
+        for record in records:
+            record["line_items"] = []
+            record["line_item_count"] = 0
+            records_by_id[int(record["id"])] = record
+
+        record_ids = list(records_by_id)
+        placeholders = ", ".join("?" for _ in record_ids)
+        line_rows = connection.execute(
+            f"""
+            SELECT * FROM bookkeeping_record_line_items
+            WHERE bookkeeping_record_id IN ({placeholders})
+            ORDER BY bookkeeping_record_id ASC, line_index ASC, id ASC
+            """,
+            record_ids,
+        ).fetchall()
+        for row in line_rows:
+            line_item = cls._row_to_dict(row)
+            record = records_by_id.get(int(line_item["bookkeeping_record_id"]))
+            if record is not None:
+                record["line_items"].append(line_item)
+                record["line_item_count"] += 1
+        return records
 
     @classmethod
     def _document_group_with_members(

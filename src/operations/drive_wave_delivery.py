@@ -136,6 +136,10 @@ class DriveWaveDeliveryService:
         }
 
     def list_candidates(self, limit: int = 100) -> Dict[str, Any]:
+        with self.ledger.read_snapshot():
+            return self._list_candidates(limit)
+
+    def _list_candidates(self, limit: int) -> Dict[str, Any]:
         documents = self._candidate_documents(limit)
         contexts = self._delivery_contexts(documents)
         candidates = []
@@ -146,6 +150,7 @@ class DriveWaveDeliveryService:
                 context["record"],
                 context["exports"],
                 context["evidence_event"],
+                configured_source_verified=context["configured_source_verified"],
             )
             candidates.append({
                 "documentId": document["id"],
@@ -169,6 +174,15 @@ class DriveWaveDeliveryService:
         limit: int = 100,
         *,
         compact: bool = False,
+    ) -> Dict[str, Any]:
+        with self.ledger.read_snapshot():
+            return self._list_work_orders(limit, compact=compact)
+
+    def _list_work_orders(
+        self,
+        limit: int,
+        *,
+        compact: bool,
     ) -> Dict[str, Any]:
         documents = self._candidate_documents(limit)
         contexts = self._delivery_contexts(documents)
@@ -244,9 +258,11 @@ class DriveWaveDeliveryService:
                 "documentId": int(document_id),
                 "externalSubmission": "not_executed",
             }
+        context = self._context_from_loaded_document(document)
+        context["configured_source_verified"] = True
         return self._work_order(
             int(document_id),
-            context=self._context_from_loaded_document(document),
+            context=context,
         )
 
     def _candidate_documents(self, limit: int) -> list[Dict[str, Any]]:
@@ -275,6 +291,7 @@ class DriveWaveDeliveryService:
                 "record": related.get("bookkeeping_record"),
                 "exports": list(related.get("export_attempts") or []),
                 "evidence_event": related.get("evidence_event"),
+                "configured_source_verified": True,
             }
         return contexts
 
@@ -329,6 +346,9 @@ class DriveWaveDeliveryService:
             record,
             exports,
             evidence_event,
+            configured_source_verified=(
+                context.get("configured_source_verified") is True
+            ),
         )
         expected_fields = _expected_wave_fields(document, record)
         missing_expected_fields = [
@@ -699,6 +719,8 @@ class DriveWaveDeliveryService:
         record: Optional[Dict[str, Any]],
         exports: list[Dict[str, Any]],
         evidence_event: Optional[Dict[str, Any]],
+        *,
+        configured_source_verified: bool = False,
     ) -> Dict[str, Any]:
         if _source_provider(document) == "gmail":
             return self._plan_gmail_retention(
@@ -706,6 +728,7 @@ class DriveWaveDeliveryService:
                 record,
                 exports,
                 evidence_event,
+                configured_source_verified=configured_source_verified,
             )
         metadata = document.get("metadata") or {}
         lifecycle = metadata.get("driveWaveLifecycle") if isinstance(metadata.get("driveWaveLifecycle"), dict) else {}
@@ -951,10 +974,15 @@ class DriveWaveDeliveryService:
         record: Optional[Dict[str, Any]],
         exports: list[Dict[str, Any]],
         evidence_event: Optional[Dict[str, Any]],
+        *,
+        configured_source_verified: bool = False,
     ) -> Dict[str, Any]:
         document_id = int(document["id"])
         reasons = self._common_delivery_reasons(document, record)
-        if not self._is_gmail_scanner_source(document):
+        if (
+            not configured_source_verified
+            and not self._is_gmail_scanner_source(document)
+        ):
             reasons.append("gmail_scanner_source_not_trusted")
         evidence_event, evidence, evidence_reasons = self._wave_evidence_plan(
             document,
