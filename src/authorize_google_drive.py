@@ -5,12 +5,11 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from src.config_loader import ConfigLoader
-from src.document_fetchers.drive_archiver import DriveArchiveClient
 
 
 def authorize_google_drive(
     config: Optional[Dict[str, Any]] = None,
-    client_factory: Callable[[Dict[str, Any]], DriveArchiveClient] = DriveArchiveClient,
+    client_factory: Optional[Callable[[Dict[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     settings = dict(
         config
@@ -56,7 +55,7 @@ def authorize_google_drive(
     settings["google_drive_token_file"] = token_path
     settings["google_drive_interactive_auth"] = True
     try:
-        client = client_factory(settings)
+        client = (client_factory or _drive_client_factory())(settings)
         folder = client.inspect_file(folder_id)
     except Exception as exc:
         return {
@@ -105,6 +104,12 @@ def _absolute_config_path(value: Any) -> str:
 def _safe_error(error: Exception) -> str:
     message = " ".join(str(error or type(error).__name__).split())
     return message[:500] or type(error).__name__
+
+
+def _drive_client_factory() -> Callable[[Dict[str, Any]], Any]:
+    from src.document_fetchers.drive_archiver import DriveArchiveClient
+
+    return DriveArchiveClient
 
 
 if __name__ == "__main__":

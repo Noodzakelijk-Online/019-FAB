@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 from flask import Flask, Response, g, jsonify, redirect, render_template_string, request, session, url_for
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import BadRequest, HTTPException
 from werkzeug.utils import secure_filename
 
 from src.config_loader import ConfigLoader
@@ -84,6 +84,8 @@ from src.utils.runtime_identity import local_instance_id
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_LOCAL_UPLOAD_MAX_BYTES = 6 * 1024 * 1024
+DEFAULT_LOCAL_API_MAX_REQUEST_BYTES = 101 * 1024 * 1024
+MAX_LOCAL_API_MAX_REQUEST_BYTES = 128 * 1024 * 1024
 LOCAL_SOURCE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024
 LOCAL_SOURCE_PREVIEW_MIME_TYPES = {
     "application/json",
@@ -3880,6 +3882,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     app.config["FAB_LOCAL_API_HOST"] = host
     app.config["FAB_LOCAL_INTAKE_PATHS"] = intake_paths
     app.config["FAB_LOCAL_INTAKE_EXTENSIONS"] = intake_extensions
+    app.config["MAX_CONTENT_LENGTH"] = _bounded_positive_int(
+        config.get("fab_local_api_max_request_bytes")
+        or config.get("operations_api_max_request_bytes"),
+        default=DEFAULT_LOCAL_API_MAX_REQUEST_BYTES,
+        maximum=MAX_LOCAL_API_MAX_REQUEST_BYTES,
+    )
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = urlsplit(configured_base_url).scheme == "https"
@@ -3962,6 +3970,18 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             if not request.path.startswith("/api/"):
                 return redirect(url_for("login"))
             return jsonify({"error": "Unauthorized"}), 401
+        return None
+
+    @app.before_request
+    def validate_json_mutation_body():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.is_json:
+            return None
+        try:
+            payload = request.get_json(silent=False)
+        except BadRequest:
+            return jsonify({"error": "Request body must contain valid JSON"}), 400
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Request JSON body must be an object"}), 400
         return None
 
     @app.route("/login", methods=["GET", "POST"])
@@ -7624,10 +7644,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify({"auditEvents": ledger.list_audit_events(limit=_limit_arg())})
 
     def _limit_arg() -> int:
-        try:
-            return int(request.args.get("limit", 100))
-        except (TypeError, ValueError):
-            return 100
+        return _bounded_positive_int(
+            request.args.get("limit"),
+            default=100,
+            maximum=500,
+        )
 
     return app
 

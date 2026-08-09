@@ -156,12 +156,18 @@ class TestLocalExportAttemptService(unittest.TestCase):
 
             self.assertEqual(first["requested"], 1)
             self.assertEqual(first["prepared"], 1)
-            self.assertEqual(second["prepared"], 1)
+            self.assertEqual(second["prepared"], 0)
+            self.assertEqual(second["alreadyPrepared"], 1)
             exports = ledger.list_export_attempts()
             self.assertEqual(len(exports), 1)
             self.assertEqual(exports[0]["status"], "approval_required")
             self.assertEqual(exports[0]["external_submission"], "not_executed")
             self.assertEqual(ledger.dashboard_metrics()["export_attempts_needing_approval"], 1)
+            prepared_events = [
+                event for event in ledger.list_audit_events(limit=20)
+                if event["action"] == "local_export_attempt.prepared"
+            ]
+            self.assertEqual(len(prepared_events), 1)
 
     def test_prepare_ready_exports_preserves_approved_attempts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

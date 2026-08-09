@@ -8,17 +8,11 @@ from urllib.parse import urlparse
 import requests
 
 from src.document_fetchers.base import BaseFetcher
-
-
-LEGACY_025_REPOSITORY = "Noodzakelijk-Online/025-Scan-to-folder-automation"
-LEGACY_025_COMMIT = "e3078d92c214aa3b17d98a8687f16e73f52f71ba"
-LEGACY_025_PROFILE_ID = "scan_to_folder_v1"
-LEGACY_025_FINANCIAL_KEYWORDS = (
-    "rekening",
-    "ontvangstbewijs",
-    "facturering",
-    "uw bestelling",
-    "invoice",
+from src.document_fetchers.profiles import (
+    LEGACY_025_COMMIT,
+    LEGACY_025_FINANCIAL_KEYWORDS,
+    LEGACY_025_PROFILE_ID,
+    LEGACY_025_REPOSITORY,
 )
 
 

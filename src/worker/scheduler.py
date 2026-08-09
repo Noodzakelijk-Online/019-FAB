@@ -1,23 +1,66 @@
+import importlib
 import re
 import signal
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from src.data_entry.posting_executor import PostingExecutor
-from src.operations.local_autonomy import LocalAutonomousService
-from src.operations.local_backup import LocalBackupService
-from src.operations.local_compliance import LocalComplianceService
-from src.operations.local_connector_intake import LocalConnectorIntakeService
-from src.operations.drive_wave_delivery import DriveWaveDeliveryService
-from src.operations.local_exports import LocalExportAttemptService
-from src.operations.local_notifications import LocalNotificationService
-from src.operations.local_reporting import LocalScheduledReportService
-from src.operations.local_runtime import build_local_operations_ledger
-from src.operations.local_workflow_recovery import LocalWorkflowRecoveryScheduler
-from src.security.local_secret_store import apply_local_wave_settings
-from src.storage.database import Database
-from src.workflow.controller import WorkflowController
+
+_DEPENDENCY_PATHS = {
+    "PostingExecutor": ("src.data_entry.posting_executor", "PostingExecutor"),
+    "LocalAutonomousService": ("src.operations.local_autonomy", "LocalAutonomousService"),
+    "LocalBackupService": ("src.operations.local_backup", "LocalBackupService"),
+    "LocalComplianceService": ("src.operations.local_compliance", "LocalComplianceService"),
+    "LocalConnectorIntakeService": (
+        "src.operations.local_connector_intake",
+        "LocalConnectorIntakeService",
+    ),
+    "DriveWaveDeliveryService": (
+        "src.operations.drive_wave_delivery",
+        "DriveWaveDeliveryService",
+    ),
+    "LocalExportAttemptService": (
+        "src.operations.local_exports",
+        "LocalExportAttemptService",
+    ),
+    "LocalNotificationService": (
+        "src.operations.local_notifications",
+        "LocalNotificationService",
+    ),
+    "LocalScheduledReportService": (
+        "src.operations.local_reporting",
+        "LocalScheduledReportService",
+    ),
+    "build_local_operations_ledger": (
+        "src.operations.local_runtime",
+        "build_local_operations_ledger",
+    ),
+    "LocalWorkflowRecoveryScheduler": (
+        "src.operations.local_workflow_recovery",
+        "LocalWorkflowRecoveryScheduler",
+    ),
+    "apply_local_wave_settings": (
+        "src.security.local_secret_store",
+        "apply_local_wave_settings",
+    ),
+    "Database": ("src.storage.database", "Database"),
+    "WorkflowController": ("src.workflow.controller", "WorkflowController"),
+}
+
+# Keep these names patchable in worker tests while avoiding their import cost for
+# disabled stages. _dependency replaces each placeholder on first real use.
+for _dependency_name in _DEPENDENCY_PATHS:
+    globals()[_dependency_name] = None
+
+
+def _dependency(name: str):
+    dependency = globals().get(name)
+    if dependency is not None:
+        return dependency
+    module_name, attribute_name = _DEPENDENCY_PATHS[name]
+    dependency = getattr(importlib.import_module(module_name), attribute_name)
+    globals()[name] = dependency
+    return dependency
 
 
 class FabWorker:
@@ -29,7 +72,7 @@ class FabWorker:
         self.run_once = _as_bool(self.config.get("worker_run_once", False))
         self.process_postings = _as_bool(self.config.get("worker_process_approved_postings", True))
         self.process_retries = _as_bool(self.config.get("worker_process_due_retries", True))
-        self.operations_ledger = build_local_operations_ledger(self.config)
+        self.operations_ledger = _dependency("build_local_operations_ledger")(self.config)
         self.run_legacy_workflow = _as_bool(self.config.get("worker_run_legacy_workflow", True))
         self.sync_source_connectors = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_sync_source_connectors", True)
@@ -70,7 +113,11 @@ class FabWorker:
         self.process_legacy_postings = _as_bool(
             self.config.get("worker_process_legacy_postings", self.operations_ledger is None)
         )
-        self.database = Database(config) if self.process_legacy_postings or not self.operations_ledger else None
+        self.database = (
+            _dependency("Database")(config)
+            if self.process_legacy_postings or not self.operations_ledger
+            else None
+        )
         self._stop_requested = False
         self._recovery_held_connector_sources = set()
 
@@ -85,7 +132,7 @@ class FabWorker:
         self.install_signal_handlers()
         self._record_audit("started", {"intervalSeconds": self.interval_seconds}, "Worker started")
         while not self._stop_requested:
-            apply_local_wave_settings(self.config, mutate=True)
+            _dependency("apply_local_wave_settings")(self.config, mutate=True)
             started_at = self._now()
             self._recovery_held_connector_sources = set()
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")
@@ -139,12 +186,12 @@ class FabWorker:
     def _run_legacy_workflow(self) -> None:
         if not self.run_legacy_workflow:
             return
-        WorkflowController(self.config).run_workflow()
+        _dependency("WorkflowController")(self.config).run_workflow()
 
     def _sync_source_connectors(self) -> None:
         if not self.sync_source_connectors or not self.operations_ledger:
             return
-        service = LocalConnectorIntakeService(
+        service = _dependency("LocalConnectorIntakeService")(
             self.operations_ledger,
             self.config,
         )
@@ -191,7 +238,7 @@ class FabWorker:
     def _recover_workflows(self) -> None:
         if not self.recover_workflows or not self.operations_ledger:
             return
-        result = LocalWorkflowRecoveryScheduler(
+        result = _dependency("LocalWorkflowRecoveryScheduler")(
             self.operations_ledger,
             self.config,
             intake_paths=_list_config(
@@ -229,7 +276,7 @@ class FabWorker:
         autonomy_config = dict(self.config)
         # The worker's approved-export stage remains the sole external executor.
         autonomy_config["fab_autonomy_execute_approved_exports"] = False
-        result = LocalAutonomousService(
+        result = _dependency("LocalAutonomousService")(
             self.operations_ledger,
             autonomy_config,
             intake_paths=_list_config(
@@ -259,7 +306,10 @@ class FabWorker:
     def _process_operations_exports(self) -> None:
         if not self.operations_ledger:
             return
-        service = LocalExportAttemptService(self.operations_ledger, self.config)
+        service = _dependency("LocalExportAttemptService")(
+            self.operations_ledger,
+            self.config,
+        )
         preparation = service.prepare_ready_exports(limit=25)
         self._record_audit(
             "export_preparation_cycle",
@@ -277,7 +327,7 @@ class FabWorker:
     def _process_scheduled_backup(self) -> None:
         if not self.create_scheduled_backups or not self.operations_ledger:
             return
-        result = LocalBackupService(
+        result = _dependency("LocalBackupService")(
             self.operations_ledger,
             self.config,
         ).run_due(actor="local_worker")
@@ -292,7 +342,10 @@ class FabWorker:
     def _process_scheduled_reports(self) -> None:
         if not self.generate_scheduled_reports or not self.operations_ledger:
             return
-        result = LocalScheduledReportService(self.operations_ledger, self.config).run_due(
+        result = _dependency("LocalScheduledReportService")(
+            self.operations_ledger,
+            self.config,
+        ).run_due(
             actor="local_worker",
         )
         self._record_audit(
@@ -306,7 +359,10 @@ class FabWorker:
     def _archive_verified_drive_sources(self) -> None:
         if not self.archive_verified_drive_sources or not self.operations_ledger:
             return
-        result = DriveWaveDeliveryService(self.operations_ledger, self.config).archive_ready(
+        result = _dependency("DriveWaveDeliveryService")(
+            self.operations_ledger,
+            self.config,
+        ).archive_ready(
             limit=25,
             actor="local_worker",
         )
@@ -319,7 +375,10 @@ class FabWorker:
     def _refresh_notifications(self) -> None:
         if not self.refresh_notifications or not self.operations_ledger:
             return
-        result = LocalNotificationService(self.operations_ledger, self.config).refresh(
+        result = _dependency("LocalNotificationService")(
+            self.operations_ledger,
+            self.config,
+        ).refresh(
             actor="local_worker",
         )
         self._record_audit(
@@ -331,7 +390,10 @@ class FabWorker:
     def _assess_compliance(self) -> None:
         if not self.assess_compliance or not self.operations_ledger:
             return
-        result = LocalComplianceService(self.operations_ledger, self.config).assess(
+        result = _dependency("LocalComplianceService")(
+            self.operations_ledger,
+            self.config,
+        ).assess(
             actor="local_worker",
         )
         self._record_audit(
@@ -343,7 +405,7 @@ class FabWorker:
     def _process_legacy_queue(self) -> None:
         if not self.process_legacy_postings:
             return
-        posting_executor = PostingExecutor(self.config)
+        posting_executor = _dependency("PostingExecutor")(self.config)
         if self.process_retries:
             retry_result = posting_executor.process_due_retries()
             self._record_audit("legacy_retry_cycle", retry_result, "Legacy retry cycle completed")

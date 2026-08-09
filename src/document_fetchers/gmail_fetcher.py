@@ -18,10 +18,11 @@ from typing import List, Dict, Any
 import pickle
 
 from src.document_fetchers.base import BaseFetcher
-
-HP_EPRINT_SENDER = "eprintcenter@hp8.us"
-HP_EPRINT_PROFILE_ID = "hp_eprint_v1"
-CUSTOM_SCANNER_PROFILE_ID = "custom_scanner_v1"
+from src.document_fetchers.profiles import (
+    CUSTOM_SCANNER_PROFILE_ID,
+    HP_EPRINT_PROFILE_ID,
+    HP_EPRINT_SENDER,
+)
 
 
 class GmailFetcher(BaseFetcher):

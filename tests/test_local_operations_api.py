@@ -136,6 +136,59 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(missing.get_json()["requestId"], "fab-test-request-002")
             self.assertRegex(unsafe_id.headers["X-Request-ID"], r"^[0-9a-f]{24}$")
 
+    def test_api_rejects_malformed_and_non_object_json_mutations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            }).test_client()
+
+            malformed = client.post(
+                "/api/autonomy/run",
+                data=b'{"limit":',
+                content_type="application/json",
+            )
+            non_object = client.post("/api/autonomy/run", json=[{"limit": 1}])
+            null_body = client.post("/api/autonomy/run", data="null", content_type="application/json")
+
+            self.assertEqual(malformed.status_code, 400)
+            self.assertEqual(malformed.get_json()["errorCode"], "invalid_request")
+            self.assertEqual(malformed.get_json()["message"], "Request body must contain valid JSON")
+            self.assertEqual(non_object.status_code, 400)
+            self.assertEqual(non_object.get_json()["message"], "Request JSON body must be an object")
+            self.assertEqual(null_body.status_code, 400)
+            self.assertEqual(null_body.get_json()["message"], "Request JSON body must be an object")
+
+    def test_api_rejects_oversized_request_before_route_execution(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_max_request_bytes": 64,
+            }).test_client()
+
+            response = client.post(
+                "/api/autonomy/run",
+                json={"reason": "x" * 128},
+            )
+
+            self.assertEqual(response.status_code, 413)
+            self.assertEqual(response.get_json()["errorCode"], "payload_too_large")
+
+    def test_api_list_limits_are_positive_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            with patch.object(
+                LocalOperationsLedger,
+                "list_audit_events",
+                return_value=[],
+            ) as list_events:
+                client = app.test_client()
+                self.assertEqual(client.get("/api/audit?limit=-1").status_code, 200)
+                self.assertEqual(list_events.call_args.kwargs["limit"], 1)
+                self.assertEqual(client.get("/api/audit?limit=999999").status_code, 200)
+                self.assertEqual(list_events.call_args.kwargs["limit"], 500)
+
     def test_unhandled_api_error_is_generic_and_correlated(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

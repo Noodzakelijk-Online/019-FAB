@@ -5,12 +5,11 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from src.config_loader import ConfigLoader
-from src.document_fetchers.gmail_fetcher import GmailFetcher
 
 
 def authorize_gmail(
     config: Optional[Dict[str, Any]] = None,
-    fetcher_factory: Callable[[Dict[str, Any]], GmailFetcher] = GmailFetcher,
+    fetcher_factory: Optional[Callable[[Dict[str, Any]], Any]] = None,
 ) -> Dict[str, Any]:
     """Run supervised Gmail OAuth and verify read-only mailbox access."""
 
@@ -42,7 +41,7 @@ def authorize_gmail(
     settings["gmail_token_file"] = token_path
     settings["gmail_interactive_auth"] = True
     try:
-        fetcher = fetcher_factory(settings)
+        fetcher = (fetcher_factory or _gmail_fetcher)(settings)
         if fetcher.auth_error:
             raise fetcher.auth_error
         profile = fetcher.service.users().getProfile(userId="me").execute()
@@ -81,6 +80,12 @@ def main() -> int:
 
 def _absolute_config_path(value: Any) -> str:
     return os.path.abspath(os.path.expanduser(str(value or "")))
+
+
+def _gmail_fetcher(config: Dict[str, Any]):
+    from src.document_fetchers.gmail_fetcher import GmailFetcher
+
+    return GmailFetcher(config)
 
 
 def _safe_error(error: Exception) -> str:

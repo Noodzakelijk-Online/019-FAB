@@ -7,16 +7,18 @@ import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlsplit
 
-from src.document_fetchers.drive_archiver import DriveArchiveClient
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_wave_receipt_executor import (
     LocalWaveReceiptExecutorService,
     wave_business_uuid,
 )
 from src.operations.local_wave_setup import LocalWaveSetupService
+
+if TYPE_CHECKING:
+    from src.document_fetchers.drive_archiver import DriveArchiveClient
 
 
 EVIDENCE_ACTION = "drive_wave.attachment_verified"
@@ -53,7 +55,7 @@ class DriveWaveDeliveryService:
         self,
         ledger: LocalOperationsLedger,
         config: Optional[Dict[str, Any]] = None,
-        drive_archiver: Optional[DriveArchiveClient] = None,
+        drive_archiver: Optional["DriveArchiveClient"] = None,
     ):
         self.ledger = ledger
         self.config = config or {}
@@ -787,7 +789,11 @@ class DriveWaveDeliveryService:
         document = self.ledger.get_document(document_id) or {}
         provider_id = str(document.get("source_document_id") or "")
         source_sha256 = _source_sha256(document)
-        archiver = self.drive_archiver or DriveArchiveClient(self.config)
+        if self.drive_archiver is None:
+            from src.document_fetchers.drive_archiver import DriveArchiveClient
+
+            self.drive_archiver = DriveArchiveClient(self.config)
+        archiver = self.drive_archiver
         move_result = None
         try:
             current = archiver.inspect_file(provider_id)

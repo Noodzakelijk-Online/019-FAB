@@ -309,13 +309,6 @@ class LocalOperationsLedger:
                     created_at TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_local_routing_status
-                    ON routing_attempts(status);
-            CREATE INDEX IF NOT EXISTS idx_local_routing_target
-                ON routing_attempts(target);
-            CREATE INDEX IF NOT EXISTS idx_local_routing_record
-                ON routing_attempts(bookkeeping_record_id);
-
                 CREATE TABLE IF NOT EXISTS export_attempts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bookkeeping_record_id INTEGER,
@@ -342,21 +335,6 @@ class LocalOperationsLedger:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_exports_routing_unique
-                    ON export_attempts(routing_attempt_id)
-                    WHERE routing_attempt_id IS NOT NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_exports_operation_unique
-                    ON export_attempts(operation_id)
-                    WHERE operation_id IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_local_exports_status
-                    ON export_attempts(status);
-                CREATE INDEX IF NOT EXISTS idx_local_exports_external
-                    ON export_attempts(external_submission);
-                CREATE INDEX IF NOT EXISTS idx_local_exports_target
-                    ON export_attempts(target_system);
-                CREATE INDEX IF NOT EXISTS idx_local_exports_document
-                    ON export_attempts(document_id);
 
                 CREATE TABLE IF NOT EXISTS reconciliation_matches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -453,21 +431,6 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_records_document_unique
-                    ON bookkeeping_records(document_id)
-                    WHERE document_id IS NOT NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_records_bank_unique
-                    ON bookkeeping_records(bank_transaction_id)
-                    WHERE bank_transaction_id IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_local_records_status
-                    ON bookkeeping_records(status);
-                CREATE INDEX IF NOT EXISTS idx_local_records_target
-                    ON bookkeeping_records(target_system);
-                CREATE INDEX IF NOT EXISTS idx_local_records_export
-                    ON bookkeeping_records(export_status);
-                CREATE INDEX IF NOT EXISTS idx_local_records_reconciliation
-                    ON bookkeeping_records(reconciliation_status);
-
                 CREATE TABLE IF NOT EXISTS bookkeeping_record_line_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     bookkeeping_record_id INTEGER NOT NULL,
@@ -490,13 +453,6 @@ class LocalOperationsLedger:
                     UNIQUE(bookkeeping_record_id, line_index),
                     FOREIGN KEY(bookkeeping_record_id) REFERENCES bookkeeping_records(id) ON DELETE CASCADE
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_local_record_lines_record
-                    ON bookkeeping_record_line_items(bookkeeping_record_id);
-                CREATE INDEX IF NOT EXISTS idx_local_record_lines_account
-                    ON bookkeeping_record_line_items(account_name);
-                CREATE INDEX IF NOT EXISTS idx_local_record_lines_tax
-                    ON bookkeeping_record_line_items(tax_code);
 
                 CREATE TABLE IF NOT EXISTS wave_report_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -560,15 +516,6 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL,
                     UNIQUE(operation_id)
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_local_wave_ops_status
-                    ON wave_operation_snapshots(status);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_ops_surface
-                    ON wave_operation_snapshots(surface);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_ops_safety
-                    ON wave_operation_snapshots(safety);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_ops_workflow
-                    ON wave_operation_snapshots(workflow_id);
 
                 CREATE TABLE IF NOT EXISTS wave_sync_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -636,11 +583,6 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_local_wave_sync_target
-                    ON wave_sync_runs(target_system);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_sync_status
-                    ON wave_sync_runs(status);
-
                 CREATE TABLE IF NOT EXISTS wave_entities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     target_system TEXT NOT NULL,
@@ -663,13 +605,6 @@ class LocalOperationsLedger:
                     updated_at TEXT NOT NULL,
                     UNIQUE(target_system, entity_type, external_id)
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_target_type
-                    ON wave_entities(target_system, entity_type);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_presence
-                    ON wave_entities(presence_status);
-                CREATE INDEX IF NOT EXISTS idx_local_wave_entities_status
-                    ON wave_entities(status);
 
                 CREATE TABLE IF NOT EXISTS financial_report_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

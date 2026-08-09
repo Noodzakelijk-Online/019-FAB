@@ -71,6 +71,53 @@ class TestLocalOperationsLedger(unittest.TestCase):
             event = ledger.list_audit_events(limit=1)[0]
             self.assertEqual(event["action"], "local_ledger.pre_migration_backup_created")
 
+    def test_existing_routing_table_is_extended_before_new_index_is_created(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            connection = sqlite3.connect(ledger_path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE routing_attempts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document_id INTEGER,
+                        workflow_run_id INTEGER,
+                        target TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        external_id TEXT,
+                        message TEXT,
+                        metadata_json TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO routing_attempts
+                      (document_id, workflow_run_id, target, status, created_at)
+                    VALUES (1, 2, 'waveapps_business', 'draft_prepared', '2026-08-09')
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            ledger = LocalOperationsLedger(ledger_path)
+            connection = sqlite3.connect(ledger_path)
+            try:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(routing_attempts)")}
+                indexes = {row[1] for row in connection.execute("PRAGMA index_list(routing_attempts)")}
+                retained = connection.execute(
+                    "SELECT target, status FROM routing_attempts WHERE id = 1"
+                ).fetchone()
+            finally:
+                connection.close()
+
+            self.assertIn("bookkeeping_record_id", columns)
+            self.assertIn("idx_local_routing_record", indexes)
+            self.assertEqual(retained, ("waveapps_business", "draft_prepared"))
+            self.assertEqual(ledger.schema_status()["status"], "current")
+
     def test_future_or_tampered_schema_history_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             future_path = os.path.join(temp_dir, "future.sqlite3")

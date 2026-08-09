@@ -47,6 +47,7 @@ PRESERVED_EXPORT_STATUSES = {
     "failed",
     "rejected",
 }
+UNCHANGED_DRAFT_STATUSES = {"approval_required", "prepared"}
 
 
 class LocalExportAttemptService:
@@ -85,21 +86,27 @@ class LocalExportAttemptService:
         route_status = str(routing_attempt.get("status") or "")
         target_system = metadata.get("targetSystem") or _target_system_from_target(routing_attempt.get("target"))
         existing_attempt = _existing_export_attempt_for_route(self.ledger, routing_attempt, operation)
-        if existing_attempt and str(existing_attempt.get("status") or "") in PRESERVED_EXPORT_STATUSES:
-            self.ledger.record_audit_event({
-                "action": "local_export_attempt.prepare_preserved",
-                "entityType": "export_attempt",
-                "entityId": str(existing_attempt.get("id")),
-                "details": {
-                    "actor": actor,
-                    "routingAttemptId": routing_attempt.get("id"),
-                    "documentId": routing_attempt.get("document_id"),
-                    "bookkeepingRecordId": existing_attempt.get("bookkeeping_record_id"),
-                    "operationId": operation.get("operation_id"),
-                    "status": existing_attempt.get("status"),
-                    "externalSubmission": existing_attempt.get("external_submission"),
-                },
-            })
+        existing_status = str((existing_attempt or {}).get("status") or "")
+        unchanged_draft = (
+            existing_status in UNCHANGED_DRAFT_STATUSES
+            and _same_export_operation(existing_attempt, routing_attempt, operation)
+        )
+        if existing_attempt and (existing_status in PRESERVED_EXPORT_STATUSES or unchanged_draft):
+            if not unchanged_draft:
+                self.ledger.record_audit_event({
+                    "action": "local_export_attempt.prepare_preserved",
+                    "entityType": "export_attempt",
+                    "entityId": str(existing_attempt.get("id")),
+                    "details": {
+                        "actor": actor,
+                        "routingAttemptId": routing_attempt.get("id"),
+                        "documentId": routing_attempt.get("document_id"),
+                        "bookkeepingRecordId": existing_attempt.get("bookkeeping_record_id"),
+                        "operationId": operation.get("operation_id"),
+                        "status": existing_attempt.get("status"),
+                        "externalSubmission": existing_attempt.get("external_submission"),
+                    },
+                })
             return {
                 "success": True,
                 "status": "already_prepared",
@@ -1567,6 +1574,19 @@ def _existing_export_attempt_for_route(
         if operation_id and attempt.get("operation_id") == operation_id:
             return attempt
     return None
+
+
+def _same_export_operation(
+    existing_attempt: Optional[Dict[str, Any]],
+    routing_attempt: Dict[str, Any],
+    operation: Dict[str, Any],
+) -> bool:
+    if not existing_attempt:
+        return False
+    operation_id = str(operation.get("operation_id") or "").strip()
+    if operation_id:
+        return str(existing_attempt.get("operation_id") or "").strip() == operation_id
+    return existing_attempt.get("routing_attempt_id") == routing_attempt.get("id")
 
 
 def _master_ledger_checksum(metadata: Dict[str, Any]) -> Optional[str]:

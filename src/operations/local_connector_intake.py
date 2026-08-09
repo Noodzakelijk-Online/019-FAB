@@ -1,3 +1,4 @@
+import importlib
 import os
 import re
 import time
@@ -5,19 +6,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 from uuid import uuid4
 
-from src.document_fetchers.drive_fetcher import DriveFetcher
-from src.document_fetchers.freshdesk_fetcher import (
+from src.document_fetchers.profiles import (
+    CUSTOM_SCANNER_PROFILE_ID,
+    HP_EPRINT_PROFILE_ID,
+    HP_EPRINT_SENDER,
     LEGACY_025_COMMIT,
     LEGACY_025_FINANCIAL_KEYWORDS,
     LEGACY_025_PROFILE_ID,
     LEGACY_025_REPOSITORY,
-    FreshdeskFetcher,
-)
-from src.document_fetchers.gmail_fetcher import (
-    CUSTOM_SCANNER_PROFILE_ID,
-    HP_EPRINT_PROFILE_ID,
-    HP_EPRINT_SENDER,
-    GmailFetcher,
 )
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_intake import LocalFolderIntake
@@ -34,6 +30,38 @@ SOURCE_ALIASES = {
 CONNECTOR_TARGET_SYSTEMS = {"waveapps_business", "waveapps_personal", "mijngeldzaken"}
 
 
+def _default_fetcher_factories() -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+    return {
+        "gmail": _gmail_fetcher,
+        "google_drive": _drive_fetcher,
+        "freshdesk": _freshdesk_fetcher,
+    }
+
+
+def _gmail_fetcher(config: Dict[str, Any]):
+    fetcher_type = getattr(
+        importlib.import_module("src.document_fetchers.gmail_fetcher"),
+        "GmailFetcher",
+    )
+    return fetcher_type(config)
+
+
+def _drive_fetcher(config: Dict[str, Any]):
+    fetcher_type = getattr(
+        importlib.import_module("src.document_fetchers.drive_fetcher"),
+        "DriveFetcher",
+    )
+    return fetcher_type(config)
+
+
+def _freshdesk_fetcher(config: Dict[str, Any]):
+    fetcher_type = getattr(
+        importlib.import_module("src.document_fetchers.freshdesk_fetcher"),
+        "FreshdeskFetcher",
+    )
+    return fetcher_type(config)
+
+
 class LocalConnectorIntakeService:
     """Sync configured read-only document connectors into FAB's local ledger."""
 
@@ -45,11 +73,7 @@ class LocalConnectorIntakeService:
     ):
         self.ledger = ledger
         self.config = config or {}
-        self.fetcher_factories = fetcher_factories or {
-            "gmail": GmailFetcher,
-            "google_drive": DriveFetcher,
-            "freshdesk": FreshdeskFetcher,
-        }
+        self.fetcher_factories = fetcher_factories or _default_fetcher_factories()
 
     def plan(self) -> Dict[str, Any]:
         sources = [self._source_plan(source) for source in CONNECTOR_SOURCES]
