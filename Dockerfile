@@ -20,6 +20,9 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check -r requirem
 
 COPY src ./src
 COPY config/config_template.ini ./config/config_template.ini
+# Containers start from the reviewed fail-closed defaults; environment values
+# still override deployment-specific paths and secrets at runtime.
+COPY config/config_template.ini ./config/config.ini
 
 RUN groupadd --system --gid 10001 fab \
     && useradd --system --uid 10001 --gid fab --home-dir /app fab \

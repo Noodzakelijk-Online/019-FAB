@@ -32,6 +32,9 @@ Audit date: 2026-08-09
 - Added stable correlated JSON error envelopes across the local API, sanitized unexpected-error handling, and bounded HAI request identifiers without provider-detail leakage.
 - Added versioned SQLite migration history, fail-closed history validation, automatic integrity-checked pre-upgrade snapshots, restore-based rollback guidance, and schema status in health/doctor output.
 - Replaced per-failed-workflow recovery lookups in deep health with one bounded bulk query.
+- Bounded API and support health-detail serialization without weakening full-set status, metrics, counts, next actions, notifications, exception queues, close readiness, or autonomy gates.
+- Coalesced identical deep-health HTTP reads through a short bounded in-process cache while retaining `no-store` responses and uncached internal safety decisions.
+- On the real 441-issue ledger, bounded serialization reduced health payload bytes by 84.3% and doctor bytes by 68.3%; short concurrent acceptance improved health throughput 8.3x with exact counts in every response.
 
 ## Remaining risks
 
@@ -48,7 +51,7 @@ Audit date: 2026-08-09
 | --- | --- | --- |
 | High | Live provider acceptance | Reauthorize Google, validate the Wave business/token/mapping, and run a synthetic receipt through attachment readback before enabling archival. |
 | Medium | Image optimization | The OCR/PDF-capable API image is 1.52 GB; consider a separate lightweight API image and an OCR worker image if registry transfer or cold-start cost becomes material. |
-| Medium | Performance baseline | Repeat the bounded dashboard profile on an otherwise idle host and track cold backup-integrity scan time separately from warm refresh latency. |
+| Medium | Performance baseline | Run sustained idle-host and concurrent-refresh tests, and track cold backup-integrity scan time separately from warm bounded-health latency and payload size. |
 | Medium | Recovery rehearsal | Exercise the documented schema rollback and full source-evidence recovery process on a production-sized copy before unattended upgrades. |
 | Medium | Privacy governance | Complete a signed DPIA and data-processing inventory before multi-user production use. |
 | Low | Public product shell | Remove or hide pricing and roadmap surfaces that are not part of the local operator product before public release. |

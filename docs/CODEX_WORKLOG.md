@@ -9,9 +9,15 @@
 - Added an automatic SQLite backup, integrity check, atomic SHA-256 manifest, and private file permissions before any populated legacy ledger is upgraded.
 - Exposed persisted schema/backup status consistently through API health, doctor, and support diagnostics, including from a separate process.
 - Replaced the failed-workflow health N+1 lookup with one bounded bulk query.
+- Bounded serialized health/support issue details while retaining complete status, metrics, severity/type totals, next actions, notification materialization, exception queues, and autonomy/close safety decisions.
+- Added a bounded two-second single-flight cache for identical read-only health projections; browser/proxy caching stays disabled and all financial safety paths remain uncached.
+- Added configurable API/support diagnostic windows and fixed a mojibake separator in the legacy Wave operation table.
 - Verified the real 180,838,400-byte pre-upgrade ledger snapshot independently: manifest hash matched and both integrity checks returned `ok`.
-- Final verification passed 775 backend tests, 134 affected-path tests, 153 web tests, TypeScript checking, production web build, API image build, non-root Compose acceptance, and the native Windows runtime.
+- Final verification passed 779 backend tests, 143 affected-path tests, 153 web tests, TypeScript checking, production web build, API image build, non-root Compose acceptance, and the native Windows runtime.
 - Live native measurements: liveness 45 ms, five deep-health calls 259-412 ms, dashboard 310 ms, all with 441 real backlog issues retained as blockers rather than hidden.
+- Real-ledger payload verification reduced default health JSON from 118,102 to about 18,505 bytes (84.3%) and doctor JSON from 77,448 to 24,544 bytes (68.3%) while preserving all 441 issue totals and on-demand full detail.
+- Four-worker/20-request health acceptance improved from 3.14 to 26.11 requests/second; median latency improved from 1,006.6 to 8.1 ms and p95 from 2,226.5 to 703.5 ms, with one cache miss, 19 hits, and exact counts in every response.
+- Fixed the Python container runtime baseline so the reviewed fail-closed defaults are loaded even without a mounted host config; Docker acceptance confirmed that optional Freshdesk intake and the legacy workflow stay disabled and produced no error log matches.
 - No Wave/Google/provider record was changed, no Drive file was archived, and no external submission was performed.
 
 ## 2026-08-08 - Giant goal implementation audit

@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from src.config_loader import ConfigLoader
 from src.security.local_secret_store import LocalSecretStore
@@ -118,6 +119,20 @@ class TestConfigLoader(unittest.TestCase):
         self.assertTrue(config["freshdesk_financial_filter_enabled"])
         self.assertEqual(config["freshdesk_ticket_statuses"], "2,3")
         self.assertTrue(config["freshdesk_pdf_only"])
+
+    def test_python_container_installs_fail_closed_runtime_defaults(self):
+        project_root = Path(__file__).resolve().parents[1]
+        dockerfile = (project_root / "Dockerfile").read_text(encoding="utf-8")
+        template = ConfigLoader(
+            config_file=str(project_root / "config" / "config_template.ini")
+        ).get_all_config()
+
+        self.assertIn(
+            "COPY config/config_template.ini ./config/config.ini",
+            dockerfile,
+        )
+        self.assertFalse(template["worker_run_legacy_workflow"])
+        self.assertFalse(template["freshdesk_enabled"])
 
     def test_duplicate_option_names_do_not_overwrite_earlier_legacy_aliases(self):
         with tempfile.TemporaryDirectory() as temp_dir:

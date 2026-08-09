@@ -122,6 +122,7 @@ class LocalOperationsHealth:
         *,
         metrics: Optional[Dict[str, Any]] = None,
         master_ledger: Optional[Dict[str, Any]] = None,
+        issue_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         now = datetime.now(timezone.utc)
         if metrics is None:
@@ -598,6 +599,17 @@ class LocalOperationsHealth:
             ))
 
         severity_counts = _severity_counts(issues)
+        ordered_issues = sorted(issues, key=_issue_sort_key)
+        issue_count = len(ordered_issues)
+        issue_type_counts = _issue_type_counts(ordered_issues)
+        bounded_issue_limit = None
+        if issue_limit is not None:
+            bounded_issue_limit = max(1, min(int(issue_limit), 500))
+        returned_issues = (
+            ordered_issues
+            if bounded_issue_limit is None
+            else ordered_issues[:bounded_issue_limit]
+        )
         status = "ok"
         if severity_counts["high"]:
             status = "blocked"
@@ -670,7 +682,12 @@ class LocalOperationsHealth:
             },
             "rateLimits": rate_limits,
             "severityCounts": severity_counts,
-            "issues": sorted(issues, key=_issue_sort_key),
+            "issueCount": issue_count,
+            "issueTypeCounts": issue_type_counts,
+            "issueLimit": bounded_issue_limit,
+            "issuesReturned": len(returned_issues),
+            "issuesTruncated": len(returned_issues) < issue_count,
+            "issues": returned_issues,
             "nextActions": _next_actions(issues),
         }
 
@@ -711,6 +728,14 @@ def _severity_counts(issues: List[Dict[str, Any]]) -> Dict[str, int]:
 
 def _issue_count(issues: List[Dict[str, Any]], issue_type: str) -> int:
     return sum(1 for issue in issues if issue.get("type") == issue_type)
+
+
+def _issue_type_counts(issues: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for issue in issues:
+        issue_type = str(issue.get("type") or "unknown")
+        counts[issue_type] = counts.get(issue_type, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _next_actions(issues: List[Dict[str, Any]]) -> List[str]:

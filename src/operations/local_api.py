@@ -1,5 +1,6 @@
 import base64
 import binascii
+from collections import OrderedDict
 import hashlib
 import hmac
 import json
@@ -7,6 +8,8 @@ import mimetypes
 import os
 import re
 import secrets
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -2425,7 +2428,7 @@ DASHBOARD_TEMPLATE = """
             <tr>
               <td>
                 <strong>{{ snapshot.operation_id }}</strong>
-                <div class="muted">{{ snapshot.mode or "-" }} Â· workflow {{ snapshot.workflow_id or "-" }}</div>
+                <div class="muted">{{ snapshot.mode or "-" }} &middot; workflow {{ snapshot.workflow_id or "-" }}</div>
               </td>
               <td>{{ snapshot.action_id }}</td>
               <td>{{ snapshot.surface or "-" }}</td>
@@ -3884,6 +3887,23 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         if token
         else secrets.token_hex(32)
     )
+    health_cache_ttl_value = None
+    for key in (
+        "fab_health_cache_ttl_seconds",
+        "operations_health_cache_ttl_seconds",
+        "health_cache_ttl_seconds",
+    ):
+        candidate = config.get(key)
+        if candidate not in (None, ""):
+            health_cache_ttl_value = candidate
+            break
+    health_cache_ttl_seconds = _bounded_nonnegative_float(
+        health_cache_ttl_value,
+        default=2.0,
+        maximum=30.0,
+    )
+    health_cache: OrderedDict[int, tuple[float, Dict[str, Any]]] = OrderedDict()
+    health_cache_lock = threading.Lock()
 
     @app.before_request
     def assign_request_id():
@@ -4022,9 +4042,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return jsonify({"error": "Internal server error"}), 500
         return "Internal server error", 500
 
-    @app.get("/api/health")
-    def health():
-        operations_health = LocalOperationsHealth(ledger, config).summarize()
+    def build_health_payload(issue_limit: int) -> Dict[str, Any]:
+        operations_health = LocalOperationsHealth(ledger, config).summarize(issue_limit=issue_limit)
         readiness = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions).compact()
         wave_setup = LocalWaveSetupService(config).status(ledger, "waveapps_business")
         wave_activation = wave_setup.get("activation") if isinstance(wave_setup.get("activation"), dict) else {}
@@ -4046,7 +4065,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             operations_health.get("status"),
             readiness.get("status"),
         )
-        return jsonify({
+        return {
             "service": "fab-ledger-api",
             "apiVersion": "1",
             "instanceId": instance_id,
@@ -4058,7 +4077,44 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "intakeExtensions": app.config["FAB_LOCAL_INTAKE_EXTENSIONS"],
             "operations": operations_health,
             "readiness": readiness,
-        })
+        }
+
+    @app.get("/api/health")
+    def health():
+        default_issue_limit = _bounded_positive_int(
+            config.get("fab_health_api_issue_limit")
+            or config.get("operations_health_api_issue_limit")
+            or config.get("health_api_issue_limit"),
+            default=50,
+            maximum=500,
+        )
+        issue_limit = _bounded_positive_int(
+            request.args.get("issueLimit"),
+            default=default_issue_limit,
+            maximum=500,
+        )
+        cache_status = "disabled"
+        if health_cache_ttl_seconds > 0:
+            with health_cache_lock:
+                now = time.monotonic()
+                cached = health_cache.get(issue_limit)
+                if cached and now - cached[0] <= health_cache_ttl_seconds:
+                    payload = cached[1]
+                    health_cache.move_to_end(issue_limit)
+                    cache_status = "hit"
+                else:
+                    payload = build_health_payload(issue_limit)
+                    health_cache[issue_limit] = (time.monotonic(), payload)
+                    health_cache.move_to_end(issue_limit)
+                    while len(health_cache) > 8:
+                        health_cache.popitem(last=False)
+                    cache_status = "miss"
+        else:
+            payload = build_health_payload(issue_limit)
+        response = jsonify(payload)
+        response.headers["X-FAB-Health-Cache"] = cache_status
+        response.headers["X-FAB-Health-Cache-TTL"] = f"{health_cache_ttl_seconds:g}"
+        return response
 
     @app.get("/api/live")
     def live():
@@ -4073,7 +4129,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.get("/")
     def dashboard_page():
         metrics = ledger.dashboard_metrics()
-        operations_health = LocalOperationsHealth(ledger, config).summarize()
+        operations_health = LocalOperationsHealth(ledger, config).summarize(issue_limit=50)
         notification_service = LocalNotificationService(ledger, config)
         notifications = notification_service.list_notifications(
             status=ACTIVE_NOTIFICATION_STATUSES,
@@ -7914,6 +7970,16 @@ def _bounded_positive_int(value: Any, default: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(1, min(parsed, maximum))
+
+
+def _bounded_nonnegative_float(value: Any, default: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        parsed = default
+    return max(0.0, min(parsed, maximum))
 
 
 def _bool_value(value: Any, default: bool = False) -> bool:

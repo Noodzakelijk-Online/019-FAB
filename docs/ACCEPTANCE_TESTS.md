@@ -19,6 +19,8 @@ The final verification report records actual results. This file defines the rele
 | A13 | Verify desktop and mobile dashboard geometry | No horizontal page overflow, inaccessible controls, or clipped emergency/support actions. |
 | A14 | Run Python and web verification suites | Tests, type check, and production build pass. |
 | A15 | Inspect Git status and tracked files | No credentials, tokens, uploaded files, runtime databases, logs, or generated support ZIPs are tracked. |
+| A16 | Request bounded health detail with more open issues than `issueLimit` | Returned details are prioritized and truncated, while status, exact issue/severity/type counts, metrics, next actions, and internal safety decisions still reflect every issue. |
+| A17 | Request the same health projection concurrently | One request computes the read-only snapshot and near-simultaneous requests reuse it for at most the configured short TTL; responses remain `no-store`, projection keys stay isolated, and internal safety paths remain uncached. |
 
 ## Live provider acceptance
 

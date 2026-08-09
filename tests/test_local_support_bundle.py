@@ -26,9 +26,18 @@ class TestLocalSupportBundleService(unittest.TestCase):
                 "contentSha256": "a" * 64,
                 "processingStatus": "failed",
             })
+            ledger.register_document({
+                "source": "test",
+                "sourceDocumentId": "second-private-source-id",
+                "originalFilename": "second-private-file.pdf",
+                "mimeType": "application/pdf",
+                "contentSha256": "b" * 64,
+                "processingStatus": "failed",
+            })
             config = {
                 "fab_local_ledger_path": ledger_path,
                 "fab_support_bundle_dir": output_dir,
+                "fab_support_health_issue_limit": 1,
                 "waveapps_business_access_token": secret,
                 "waveapps_business_id": "private-business-id",
             }
@@ -57,6 +66,10 @@ class TestLocalSupportBundleService(unittest.TestCase):
             self.assertNotIn("private-source-id", rendered)
             self.assertFalse(doctor["privacy"]["containsFinancialDocuments"])
             self.assertFalse(doctor["privacy"]["containsCredentials"])
+            self.assertEqual(doctor["health"]["issueCount"], 2)
+            self.assertEqual(doctor["health"]["issuesReturned"], 1)
+            self.assertTrue(doctor["health"]["issuesTruncated"])
+            self.assertEqual(doctor["health"]["issueTypeCounts"]["failed_document"], 2)
             self.assertIn(
                 "support_bundle.created",
                 {event["action"] for event in ledger.list_audit_events(limit=10)},

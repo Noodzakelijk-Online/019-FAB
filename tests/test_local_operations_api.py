@@ -22,6 +22,81 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_health_api_bounds_issue_details_without_hiding_totals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            for index in range(3):
+                ledger.register_document({
+                    "source": "scanner",
+                    "sourceDocumentId": f"failed-api-health-{index}",
+                    "originalFilename": f"failed-api-health-{index}.pdf",
+                    "processingStatus": "failed",
+                })
+            client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_health_api_issue_limit": 2,
+            }).test_client()
+
+            default_health = client.get("/api/health").get_json()["operations"]
+            smaller_health = client.get("/api/health?issueLimit=1").get_json()["operations"]
+            complete_health = client.get("/api/health?issueLimit=500").get_json()["operations"]
+
+            self.assertEqual(default_health["issueCount"], 3)
+            self.assertEqual(default_health["issueTypeCounts"]["failed_document"], 3)
+            self.assertEqual(default_health["issuesReturned"], 2)
+            self.assertTrue(default_health["issuesTruncated"])
+            self.assertEqual(smaller_health["issuesReturned"], 1)
+            self.assertEqual(smaller_health["severityCounts"]["high"], 3)
+            self.assertEqual(complete_health["issuesReturned"], 3)
+            self.assertFalse(complete_health["issuesTruncated"])
+
+    def test_health_api_coalesces_identical_reads_without_caching_internal_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "health-cache-first",
+                "originalFilename": "first.pdf",
+                "processingStatus": "failed",
+            })
+            client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_health_api_issue_limit": 1,
+                "fab_health_cache_ttl_seconds": 30,
+            }).test_client()
+
+            first = client.get("/api/health")
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "health-cache-second",
+                "originalFilename": "second.pdf",
+                "processingStatus": "failed",
+            })
+            cached = client.get("/api/health")
+            different_projection = client.get("/api/health?issueLimit=2")
+
+            self.assertEqual(first.headers["X-FAB-Health-Cache"], "miss")
+            self.assertEqual(cached.headers["X-FAB-Health-Cache"], "hit")
+            self.assertEqual(cached.headers["Cache-Control"], "no-store, max-age=0")
+            self.assertEqual(first.get_json()["operations"]["issueCount"], 1)
+            self.assertEqual(cached.get_json()["operations"]["issueCount"], 1)
+            self.assertEqual(different_projection.headers["X-FAB-Health-Cache"], "miss")
+            self.assertEqual(different_projection.get_json()["operations"]["issueCount"], 2)
+            self.assertEqual(different_projection.get_json()["operations"]["issuesReturned"], 2)
+
+            uncached_client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_health_cache_ttl_seconds": 0,
+            }).test_client()
+            uncached_first = uncached_client.get("/api/health")
+            uncached_second = uncached_client.get("/api/health")
+
+            self.assertEqual(uncached_first.headers["X-FAB-Health-Cache"], "disabled")
+            self.assertEqual(uncached_second.headers["X-FAB-Health-Cache"], "disabled")
+            self.assertEqual(uncached_first.headers["X-FAB-Health-Cache-TTL"], "0")
+
     def test_api_errors_use_stable_envelope_and_request_ids(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             app = create_app({

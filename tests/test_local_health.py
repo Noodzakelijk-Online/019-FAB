@@ -61,6 +61,34 @@ class TestLocalOperationsHealth(unittest.TestCase):
             self.assertEqual(health["issues"], [])
             self.assertEqual(health["metrics"]["openReviewItems"], 0)
 
+    def test_issue_projection_preserves_full_health_totals_and_safety(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            for index in range(3):
+                ledger.register_document({
+                    "source": "scanner",
+                    "sourceDocumentId": f"failed-projection-{index}",
+                    "originalFilename": f"failed-{index}.pdf",
+                    "processingStatus": "failed",
+                })
+
+            full = LocalOperationsHealth(ledger).summarize()
+            bounded = LocalOperationsHealth(ledger).summarize(issue_limit=2)
+
+            self.assertEqual(full["issueCount"], 3)
+            self.assertEqual(full["issuesReturned"], 3)
+            self.assertFalse(full["issuesTruncated"])
+            self.assertIsNone(full["issueLimit"])
+            self.assertEqual(bounded["status"], full["status"])
+            self.assertEqual(bounded["severityCounts"], full["severityCounts"])
+            self.assertEqual(bounded["nextActions"], full["nextActions"])
+            self.assertEqual(bounded["issueCount"], 3)
+            self.assertEqual(bounded["issueTypeCounts"]["failed_document"], 3)
+            self.assertEqual(bounded["issueLimit"], 2)
+            self.assertEqual(bounded["issuesReturned"], 2)
+            self.assertTrue(bounded["issuesTruncated"])
+            self.assertEqual(len(bounded["issues"]), 2)
+
     def test_health_flags_completed_workflow_with_step_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

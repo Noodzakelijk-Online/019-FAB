@@ -55,7 +55,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 048 Provider failure simulation | Implemented | OAuth, API, rate, retry, ambiguous, and attachment failure tests. |
 | 049 Accessibility review | Partial | Semantic states and keyboard-native controls; full WCAG audit remains. |
 | 050 Responsive and browser compatibility | Partial | Responsive CSS and local browser QA; broad browser matrix remains. |
-| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, bulk review lookup, limits, and pagination are verified; sustained idle-host load testing remains. |
+| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, bulk recovery lookup, paginated queues, bounded health/support payloads, and short single-flight coalescing with uncached safety paths are verified; sustained idle-host load testing remains. |
 | 052 Large dataset and pagination testing | Partial | Bounded batch/limit tests exist; sustained production-scale test remains. |
 | 053 Backup and restore procedures | Implemented | Source-complete recovery packages and confirmation-gated restore. |
 | 054 Data reconciliation and repair commands | Implemented | Reconciliation, reprocessing, recovery, and close-readiness services. |

@@ -93,6 +93,9 @@ Local operating ledger and optional web operations API settings.
 *   `routing_stale_hours`: Age at which prepared routing drafts are flagged as waiting too long for approval/export. Default: `24`.
 *   `workflow_stale_hours`: Age at which a running workflow is treated as stale. Default: `6`.
 *   `source_stale_hours`: Age at which a previously ready connector is considered stale. Default: `24`.
+*   `health_api_issue_limit`: Maximum prioritized issue details serialized by `/api/health`; exact aggregate counts and safety status still cover every issue. Default: `50`, allowed range: `1-500`.
+*   `support_health_issue_limit`: Maximum sanitized issue details included in doctor/support output; type and severity totals remain complete. Default: `100`, allowed range: `1-500`.
+*   `health_cache_ttl_seconds`: Server-side single-flight window for identical `/api/health` projections. Default: `2`, allowed range: `0-30`; `0` disables it. This never caches internal autonomy, notification, close, exception, or external-execution safety decisions, and HTTP responses remain `no-store`.
 *   `worker_sync_source_connectors`: Run durable enabled-source intake before the autonomous cycle. Default: `true`.
 *   `worker_source_connectors`: Optional comma-separated allowlist of connector names; blank means all currently syncable unattended connectors.
 *   `connector_intake_lease_seconds`: Prevent overlapping API, worker, and recovery connector syncs. Default: `21600`.

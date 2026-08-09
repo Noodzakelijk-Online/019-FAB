@@ -6,7 +6,7 @@ The Flask API is the source of operational truth. Major endpoint groups are:
 
 | Group | Representative endpoints | Mutation policy |
 | --- | --- | --- |
-| Liveness/health/readiness | `/api/live`, `/api/health`, `/api/settings`, `/api/doctor` | `/api/live` is constant-time; deeper reports are read-only and secret-redacted. |
+| Liveness/health/readiness | `/api/live`, `/api/health`, `/api/settings`, `/api/doctor` | `/api/live` is constant-time; deeper reports are read-only and secret-redacted. Health detail is prioritized and bounded while exact totals remain available. |
 | Intake/documents | `/api/intake/upload`, `/api/intake/rescan`, `/api/documents/*` | Local evidence writes only. |
 | Reviews/categories | `/api/review`, `/api/review/<id>/resolve`, `/api/categories/*` | Operator decisions are audited. |
 | Autonomy/workflows | `/api/autonomy/plan`, `/api/autonomy/run`, `/api/workflows/*` | Lease, safety, recovery, and emergency-stop gated. |
@@ -38,3 +38,5 @@ The Express/tRPC gateway calls fixed local paths from `web/server/fabLocalGatewa
 ## Error contract
 
 Every JSON error below `/api/` has the same transport envelope: `success=false`, `status`, `errorCode`, `message`, and `requestId`. Route-specific fields such as `error`, validation details, or provider state are preserved. FAB accepts a caller-provided `X-Request-ID` only when it is a bounded safe identifier; otherwise it creates one and always returns the effective value in the response header and body. Unexpected exceptions return a generic message and create a sanitized correlated ledger audit event plus local log entry without exposing financial or provider details.
+
+`GET /api/health` computes the complete issue set before deriving status, severity counts, metrics, type counts, and next actions. It returns the highest-priority issue-detail window only: 50 by default and 1-500 through `issueLimit`. `issueCount`, `issueTypeCounts`, `issuesReturned`, and `issuesTruncated` distinguish complete aggregate evidence from the bounded detail array. Identical read-only projections are coalesced in an eight-entry, two-second server cache; `X-FAB-Health-Cache` reports `hit`, `miss`, or `disabled`, while browser/proxy caching remains `no-store`. Internal autonomy, notifications, close readiness, exception materialization, and every external-execution gate continue to read the ledger directly and never use this cache.

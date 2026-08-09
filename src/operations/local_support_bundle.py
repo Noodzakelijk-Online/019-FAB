@@ -33,7 +33,16 @@ class LocalSupportBundleService:
 
     def doctor(self) -> Dict[str, Any]:
         readiness = self.readiness.summarize()
-        health = LocalOperationsHealth(self.ledger, self.config).summarize()
+        health_issue_limit = _bounded_positive_int(
+            self.config.get("fab_support_health_issue_limit")
+            or self.config.get("operations_support_health_issue_limit")
+            or self.config.get("support_health_issue_limit"),
+            default=100,
+            maximum=500,
+        )
+        health = LocalOperationsHealth(self.ledger, self.config).summarize(
+            issue_limit=health_issue_limit,
+        )
         dependencies = [
             {
                 key: dependency.get(key)
@@ -108,6 +117,11 @@ class LocalSupportBundleService:
                 "generatedAt": health.get("generatedAt"),
                 "metrics": health.get("metrics") or {},
                 "severityCounts": health.get("severityCounts") or {},
+                "issueCount": health.get("issueCount", len(health_issues)),
+                "issueTypeCounts": health.get("issueTypeCounts") or {},
+                "issueLimit": health.get("issueLimit"),
+                "issuesReturned": len(health_issues),
+                "issuesTruncated": bool(health.get("issuesTruncated")),
                 "issues": health_issues,
             },
             "autonomy": {
@@ -195,6 +209,14 @@ class LocalSupportBundleService:
             "privacy": doctor["privacy"],
             "externalSubmission": "not_executed",
         }
+
+
+def _bounded_positive_int(value: Any, *, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
 
 
 def _json_bytes(value: Any) -> bytes:
