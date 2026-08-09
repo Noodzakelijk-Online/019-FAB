@@ -21,7 +21,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 014 No fake success and no mock production behavior | Implemented | Supported entrypoints use the authoritative ledger worker and explicit execution/readback states. Fake-success cloud/mobile/root/checkpoint entrypoints, synthetic learning, placeholder performance/migration helpers, and the dummy tax export are removed; tests prevent their accidental return. |
 | 015 Storage, files, uploads, and media safety | Implemented | Hashing, path validation, ignored runtime roots, and recovery evidence. |
 | 016 Background jobs, schedulers, and workers | Implemented | Worker, schedules, leases, recovery, reports, and notifications. |
-| 017 Idempotency and duplicate action prevention | Implemented | Content fingerprints, duplicate candidates, operation IDs, runtime leases. |
+| 017 Idempotency and duplicate action prevention | Implemented | Content fingerprints, duplicate candidates, operation IDs, runtime leases, and bounded compact duplicate reassessment without per-pair full-history reads. |
 | 018 Rate limits, cooldowns, and provider quotas | Implemented | Shared limiter state and operational health issues. |
 | 019 Audit logging and event history | Implemented | Persistent audit events across decisions and controls. |
 | 020 User-facing dashboard and next-action design | Implemented | Operator control center with blockers and next actions. |
@@ -39,7 +39,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, explicit host-reachable API/dashboard projections, authenticated health, HAI/cloud status, and local-operator acceptance passed. Clean-source Windows/Compose release archives are source-commit and checksum bound. A dedicated production endpoint is still an infrastructure activation gate. |
 | 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |
-| 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, workflow state, project-owned cloud status, and identity-verified operator/API access metadata. |
+| 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, workflow state, project-owned cloud status, identity-verified operator/API access metadata, and profiled autonomy latency. |
 | 036 Admin/operator diagnostics | Implemented | Dashboard diagnostics and sanitized support bundle. |
 | 037 Demo mode with explicit labelling | Not applicable | No production demo state is substituted for live financial data. |
 | 038 Fake provider lab for tests only | Partial | Mocks/fixtures are test-scoped; no dedicated provider simulator UI. |

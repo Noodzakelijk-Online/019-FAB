@@ -1,5 +1,15 @@
 # Codex Worklog
 
+## 2026-08-09 - Compact duplicate reassessment and autonomy latency
+
+- Profiled all 29 operator control-center resources against the live 150-document ledger. The autonomy plan was the dominant warm path at 485.89 ms because its count projection reassessed duplicate candidates by loading two complete document histories for every open pair.
+- Added a bounded, chunked ledger snapshot that loads only the requested document rows and selected review items through one SQLite connection. Duplicate reassessment now uses that snapshot instead of repeated `get_document` calls that also loaded groups, extracted fields, routing/export history, reconciliation, corrections, bookkeeping lines, and every document audit event.
+- Preserved duplicate identity decisions, canonicalization, open-review ordering, review gates, and the permanent `externalSubmission=not_executed` planning boundary. Added tests that prove review filtering/ordering and fail if the planning path returns to full-history N+1 reads.
+- On the real ledger, duplicate reassessment improved from about 206 ms to 22.95 ms median, autonomy counts from 252.56 ms to 118.67 ms, and the complete direct autonomy plan from 485.89 ms to 336.69 ms. After the Windows production restart, 15 authenticated autonomy HTTP reads returned 200 at 217.94 ms warm median and 262.25 ms p95.
+- Verification passed 91 focused ledger/processing/autonomy tests, 797 backend tests with four optional-runtime skips, 165 web tests, TypeScript checking, production build budgets, dependency and peer audits, Python compilation, five PowerShell parsers, and standard/maintenance Compose parsing. API, worker, and web error logs remained empty; HAI reported 14 commands and eight resources.
+- The dashboard remained live at `http://127.0.0.1:3005/admin/operations`. The in-app Browser listed that tab but returned a stale tab identifier when asked for a repeat DOM snapshot, so the latest backend-only change relies on the unchanged 165-test/build frontend contract and live HTTP identity rather than claiming a new manual browser capture.
+- Implementation commit `a6ce7c4` is on `origin/main`; GitHub Actions run `31329640244` passed the frontend, Linux backend, and all four Windows backend jobs. No provider record, review decision, source file, Drive archive, or external submission was changed.
+
 ## 2026-08-09 - App-owned readiness lifecycle and dependency efficiency
 
 - Found that each readiness summary discovered Python modules, Tesseract languages, Poppler, and optional model files twice: once for dependency output and again while deriving OCR source readiness.

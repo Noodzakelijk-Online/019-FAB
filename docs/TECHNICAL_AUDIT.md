@@ -84,6 +84,13 @@ Audit date: 2026-08-09
   copies and preserves prompt change detection. One hundred live authenticated
   settings reads improved from 39.41 ms median / 54.81 ms p95 to 2.48 ms /
   3.02 ms after the production restart.
+- Removed the duplicate-reassessment N+1 path that loaded two complete document
+  histories for every open candidate pair. A bounded, chunked snapshot now
+  loads only core document rows and selected open reviews through one SQLite
+  connection. On the live ledger, reassessment improved from about 206 ms to
+  22.95 ms median, autonomy counts from 252.56 ms to 118.67 ms, and the
+  restarted authenticated autonomy endpoint measured 217.94 ms median while
+  retaining every duplicate, review, approval, and external-submission gate.
 
 ## Remaining risks
 
