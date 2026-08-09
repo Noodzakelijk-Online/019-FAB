@@ -9,6 +9,7 @@ x-fab-python: &fab-python
     FAB_LOCAL_API_HOST: 0.0.0.0
     FAB_LOCAL_API_PORT: 5001
     FAB_LOCAL_API_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}
+    FAB_MAINTENANCE_MODE: "false"
     FAB_LOCAL_LEDGER_PATH: /app/data/fab_operations.sqlite3
     FAB_LOCAL_INTAKE_PATHS: /app/downloads/sort-out
     FAB_LOCAL_BACKUP_DIR: /app/data/backups
@@ -61,6 +62,7 @@ services:
       FAB_OPERATOR_TRUST_DOCKER_GATEWAY: "true"
       FAB_INSTANCE_ROOT: /app
       FAB_LOCAL_API_URL: http://api:5001
+      FAB_LOCAL_API_PUBLIC_URL: http://127.0.0.1:${FAB_API_HOST_PORT:-5001}
       FAB_LOCAL_API_INSECURE_HOSTS: api
       FAB_LOCAL_API_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}
       FAB_OPERATIONS_SERVICE_TOKEN: ${FAB_LOCAL_API_TOKEN:?Set FAB_LOCAL_API_TOKEN before starting FAB}

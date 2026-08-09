@@ -11,7 +11,11 @@ from unittest.mock import MagicMock, patch
 
 from src import run_worker as worker_entrypoint
 from src.utils.runtime_identity import local_instance_id
-from src.worker.runtime import WorkerAlreadyRunningError, managed_worker_runtime
+from src.worker.runtime import (
+    WorkerAlreadyRunningError,
+    managed_worker_maintenance,
+    managed_worker_runtime,
+)
 
 
 class TestWorkerRuntime(unittest.TestCase):
@@ -52,6 +56,69 @@ class TestWorkerRuntime(unittest.TestCase):
                 with self.assertRaises(WorkerAlreadyRunningError):
                     with managed_worker_runtime(Path(temp_dir)):
                         self.fail("A second worker unexpectedly acquired the runtime lock.")
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+                if child.stdout:
+                    child.stdout.close()
+                if child.stderr:
+                    child.stderr.close()
+
+    def test_maintenance_lock_rejects_an_active_worker_process(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script = (
+                "import sys,time\n"
+                "from pathlib import Path\n"
+                "from src.worker.runtime import managed_worker_runtime\n"
+                "with managed_worker_runtime(Path(sys.argv[1])):\n"
+                " print('ready', flush=True)\n"
+                " time.sleep(30)\n"
+            )
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, temp_dir],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                with self.assertRaisesRegex(WorkerAlreadyRunningError, "stop it before maintenance"):
+                    with managed_worker_maintenance(Path(temp_dir)):
+                        self.fail("Maintenance unexpectedly acquired an active worker runtime.")
+            finally:
+                child.terminate()
+                child.wait(timeout=10)
+                if child.stdout:
+                    child.stdout.close()
+                if child.stderr:
+                    child.stderr.close()
+
+    def test_worker_process_rejects_an_active_maintenance_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = root / "data" / "fab-worker-runtime.json"
+            script = (
+                "import sys,time\n"
+                "from pathlib import Path\n"
+                "from src.worker.runtime import managed_worker_maintenance\n"
+                "with managed_worker_maintenance(Path(sys.argv[1])):\n"
+                " print('ready', flush=True)\n"
+                " time.sleep(30)\n"
+            )
+            child = subprocess.Popen(
+                [sys.executable, "-c", script, temp_dir],
+                cwd=Path(__file__).resolve().parents[1],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+                self.assertFalse(runtime_path.exists())
+                with self.assertRaises(WorkerAlreadyRunningError):
+                    with managed_worker_runtime(root):
+                        self.fail("Worker unexpectedly acquired the maintenance runtime.")
             finally:
                 child.terminate()
                 child.wait(timeout=10)

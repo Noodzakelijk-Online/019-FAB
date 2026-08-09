@@ -3,6 +3,7 @@ import {
   createFabBackup,
   createFabSupportBundle,
   fabLocalRequest,
+  getFabBrowserApiBaseUrl,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
   resetFabControlCenterCacheForTests,
@@ -31,6 +32,23 @@ describe("FAB local API gateway", () => {
     expect(getFabLocalApiBaseUrl("http://api:5001", ["api"]).hostname).toBe("api");
     expect(() => getFabLocalApiBaseUrl("http://worker:5001", ["api"]))
       .toThrow("must use https");
+  });
+
+  it("only exposes clean browser-reachable API origins", () => {
+    expect(getFabBrowserApiBaseUrl("http://127.0.0.1:5511").origin)
+      .toBe("http://127.0.0.1:5511");
+    expect(getFabBrowserApiBaseUrl("https://fab.example.test/").origin)
+      .toBe("https://fab.example.test");
+    expect(() => getFabBrowserApiBaseUrl("http://api:5001"))
+      .toThrow("must use https");
+    expect(() => getFabBrowserApiBaseUrl("https://operator:secret@fab.example.test"))
+      .toThrow("must not contain credentials");
+    expect(() => getFabBrowserApiBaseUrl("https://fab.example.test/private"))
+      .toThrow("without a path");
+    expect(() => getFabBrowserApiBaseUrl("https://fab.example.test?token=secret"))
+      .toThrow("without a path");
+    expect(() => getFabBrowserApiBaseUrl("https://fab.example.test#private"))
+      .toThrow("without a path");
   });
 
   it("keeps the local API token server-side", async () => {
@@ -129,6 +147,17 @@ describe("FAB local API gateway", () => {
       "/api/backups": {
         backupDir: "C:\\private\\backups",
         restoreConfirmationPhrase: "RESTORE FAB LOCAL LEDGER",
+        fullRestoreConfirmationPhrase: "RESTORE FAB LEDGER AND SOURCE EVIDENCE",
+        restorePolicy: {
+          status: "maintenance_required",
+          maintenanceMode: false,
+          ledgerRestoreSupported: true,
+          sourceEvidenceRestoreSupported: true,
+          sourceRestoreRoot: "C:\\private\\restored-source-evidence",
+          workerMustBeStopped: true,
+          nextAction: "Stop FAB before recovery.",
+          externalSubmission: "not_executed",
+        },
         verificationMode: "manifest_only",
         schedule: {
           status: "current",
@@ -413,6 +442,7 @@ describe("FAB local API gateway", () => {
     const result = await getFabControlCenter();
 
     expect(result.connection.connected).toBe(true);
+    expect(result.connection.endpoint).toBe("http://127.0.0.1:5001");
     expect(result.metrics).toMatchObject({
       documents: 18,
       pendingReview: 4,
@@ -476,6 +506,14 @@ describe("FAB local API gateway", () => {
     expect(result.recovery).toMatchObject({ dueCount: 1 });
     expect(result.backups).toMatchObject({
       verificationMode: "manifest_only",
+      restorePolicy: {
+        status: "maintenance_required",
+        maintenanceMode: false,
+        ledgerRestoreSupported: true,
+        sourceEvidenceRestoreSupported: true,
+        workerMustBeStopped: true,
+        externalSubmission: "not_executed",
+      },
       schedule: {
         status: "current",
         integrityVerification: "manifest_only",
@@ -641,6 +679,8 @@ describe("FAB local API gateway", () => {
     expect(serialized).not.toContain("privatePeriodEvidence");
     expect(serialized).not.toContain("privateComplianceEvidence");
     expect(serialized).not.toContain("RESTORE FAB LOCAL LEDGER");
+    expect(serialized).not.toContain("RESTORE FAB LEDGER AND SOURCE EVIDENCE");
+    expect(serialized).not.toContain("C:\\private\\restored-source-evidence");
   });
 
   it("does not turn unavailable resources into reassuring zeroes", async () => {

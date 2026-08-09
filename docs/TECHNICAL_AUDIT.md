@@ -57,6 +57,21 @@ Audit date: 2026-08-09
 - Prevented local-operator requests from needlessly verifying unrelated browser
   cookies and made the Windows launcher provision a stable encrypted dashboard
   signing secret through the current-user DPAPI-backed FAB secret store.
+- Added a quiescent maintenance runtime across Windows and Compose. It omits the
+  worker, locks normal mutations, disables cloud access and HAI commands, and
+  keeps only the authenticated API/dashboard recovery surface available.
+- Replaced ledger-file-copy recovery with SQLite backup-based ledger recovery
+  and complete v2 source-evidence recovery. The latter validates archive
+  topology, manifest/ledger coverage, immutable content-addressed targets,
+  rewritten paths, every restored byte, database integrity, and audit state.
+- Bound recovery to the authoritative worker ownership lock, exact confirmation,
+  a verified source-complete pre-restore package, rollback state, and fail-closed
+  tamper, collision, reparse-point, concurrent-owner, and final-verification
+  behavior.
+- Split private service traffic from browser-facing API origins. Docker's
+  internal `api` hostname is accepted only server-side; operator links allow
+  loopback HTTP or a clean HTTPS origin and reject credentials, paths, queries,
+  fragments, and insecure non-loopback hosts.
 
 ## Remaining risks
 
@@ -64,7 +79,7 @@ Audit date: 2026-08-09
 - MijnGeldzaken remains a supervised master-ledger export, not an authenticated write connector.
 - Direct PSD2 bank feeds and SVB submissions are not implemented.
 - Compose configuration, both images, authenticated service health, dashboard access, a complete 24-resource control-center response, local-operator authorization, server-operations authentication, production headers, compression, and non-root execution are locally verified. Live cloud-host acceptance remains environment-specific.
-- SQLite rollback is restore-based by design. Operational recovery still requires a rehearsed restore using the prior compatible FAB release.
+- Recovery is implemented and locally verified without touching the live ledger. A production-sized restore rehearsal, recovery-time objective measurement, and accountant-approved evidence sampling remain required before unattended upgrades rely on it.
 - Formal penetration testing, DPIA approval, accountant validation, and production disaster-recovery exercises remain external work.
 - Production-looking Google Cloud Function, root workflow, standalone mobile
   upload, checkpoint controller, synthetic learning, generic performance,

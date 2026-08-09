@@ -1,0 +1,9 @@
+services:
+  api:
+    environment:
+      FAB_MAINTENANCE_MODE: "true"
+      FAB_MAINTENANCE_CONTAINER_BIND: "true"
+
+  worker:
+    profiles:
+      - standard

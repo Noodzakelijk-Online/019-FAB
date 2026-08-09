@@ -14,6 +14,7 @@ The operator dashboard is a functional control surface, not a mock dashboard. It
 | Reviews | Approve/reject/correct | `/api/review/<id>/resolve` | Corrections and learned rules are audited; posting remains separately gated. |
 | Recovery | Create verified backup | `/api/backups` | Incomplete source evidence prevents a complete status. |
 | Recovery | Create support bundle | `/api/support-bundles` | Generated ZIP is sanitized and ignored by Git. |
+| Recovery | Open advanced recovery | Local maintenance console | Standard mode is restore-locked. Maintenance suppresses worker/HAI/cloud/normal mutations; exact confirmation and verified package evidence are required. |
 | Delivery | Open work order/document | Local delivery/document endpoints | Shows missing attachment evidence; cannot imply archive completion. |
 | Connections | Gmail/Drive setup | Credential install and OAuth authorization endpoints | Owner consent required; state is explicit. |
 | Connections | Wave setup | Encrypted settings and validation endpoints | Business identity and account mapping must validate. |

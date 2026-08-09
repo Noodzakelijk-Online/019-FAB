@@ -16,6 +16,7 @@ FAB's protected path is:
 8. The operator emergency stop prevents any new autonomous step from starting.
 9. Reports and close packs disclose incomplete, provisional, and unreconciled state.
 10. A complete recovery package requires checksum-matching source evidence; otherwise the backup remains incomplete.
+11. Restore runs only under the worker ownership lock in local maintenance mode. Full restore never overwrites source evidence: it verifies or creates an immutable content-addressed tree, rewrites ledger paths, verifies the live result, and rolls the ledger back if post-restore validation fails.
 
 ## Smoke-test evidence
 

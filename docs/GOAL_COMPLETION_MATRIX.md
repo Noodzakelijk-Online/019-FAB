@@ -73,7 +73,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 066 Supply chain and dependency review | Implemented | Frozen web lockfile, pinned CI actions, production bundle budgets, high-severity dependency audit, peer-contract checks, tracked-only release manifests, and retired unused Cloud Function dependencies run locally and in CI; license/legal review remains phase 067. |
 | 067 License and third-party service review | Partial | License/dependency docs exist; legal review remains external. |
 | 068 CI/CD quality gates | Implemented | Linux/Windows backend plus web audit, peer check, type check, test, and production build-budget workflow. |
-| 069 Release process, canary, and rollback | Partial | Verification/backup rollback exists; production canary environment does not. |
+| 069 Release process, canary, and rollback | Partial | Checksum-bound releases plus quiescent ledger/source recovery and automatic ledger rollback are implemented; a production canary environment and signed recovery rehearsal remain external. |
 | 070 Operator runbook | Implemented | `OPERATOR_RUNBOOK.md`. |
 | 071 User guide and help system | Implemented | `user_guide.md`, dashboard next actions, setup drawers. |
 | 072 Troubleshooting guide and error catalog | Partial | Runbook/readiness next actions exist; one centralized error catalog remains. |
@@ -97,7 +97,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 090 No vanity work rule | Implemented | Changes address safety, diagnostics, truthfulness, and operations. |
 | 091 Feature-level definition of done | Implemented | Status definition and acceptance contract in this matrix. |
 | 092 Fresh-clone dry run | Implemented | Clean clone of `76e5fff` passed exact remote identity, clean status, Python compilation, Compose parsing, frozen install, dependency audit, TypeScript, all 161 web tests, and production build budgets. |
-| 093 Manual verification evidence | Partial | Local browser, Windows, HAI, and container evidence passed; live provider acceptance remains blocked. |
+| 093 Manual verification evidence | Partial | Local browser, Windows, HAI, container, and isolated recovery evidence passed; production-sized recovery rehearsal and live provider acceptance remain external. |
 | 094 Final no-excuses search | Implemented | Code search, staged runtime-path scan, secret-pattern scan, release archive inventory/checksum verification, and `git diff --check` passed. |
 | 095 Completion matrix | Implemented | This document includes every phase. |
 | 096 Final verification report | Implemented | `FINAL_VERIFICATION_REPORT.md` records local, browser, container, fresh-clone, safety, and provider-boundary results. |
@@ -107,7 +107,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 100 Real-provider cleanup and account safety | Partial | No real mutation in this audit; live account acceptance requires the owner. |
 | 101 Support/debug bundle design | Implemented | Sanitized CLI/API/dashboard ZIP with privacy tests. |
 | 102 Data retention and archival policy | Implemented | Retention/compliance services and evidence-gated Drive archival. |
-| 103 Migration from prototype to production | Partial | Local operational product works and duplicate prototype launchers and placeholder helpers are retired. Live deployment, provider, accountant, and legal acceptance gates remain. |
+| 103 Migration from prototype to production | Partial | Local operational product, maintenance recovery, and supported release packages work; duplicate prototype launchers and placeholder helpers are retired. Live deployment, provider, accountant, and legal acceptance gates remain. |
 | 104 Operator safety stop and emergency controls | Implemented | Persistent audited stop, per-step checks, dashboard/API/HAI policy. |
 | 105 User onboarding and first-run wizard | Partial | Activation checklist/setup drawers exist; end-to-end guided wizard remains. |
 | 106 Role-based settings and team permissions | Partial | Admin/operator gating exists; granular multi-user team permissions remain. |

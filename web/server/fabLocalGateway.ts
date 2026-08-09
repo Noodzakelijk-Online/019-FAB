@@ -89,6 +89,7 @@ export type FabControlCenter = {
   backups: {
     backups: JsonRecord[];
     schedule: JsonRecord;
+    restorePolicy: JsonRecord;
     verificationMode: string | null;
   };
   reporting: {
@@ -205,6 +206,25 @@ export function getFabLocalApiBaseUrl(
   return parsed;
 }
 
+export function getFabBrowserApiBaseUrl(
+  rawUrl = ENV.fabLocalApiPublicUrl,
+): URL {
+  const parsed = new URL((rawUrl || DEFAULT_FAB_LOCAL_API_URL).trim().replace(/\/+$/, ""));
+  if (!new Set(["http:", "https:"]).has(parsed.protocol)) {
+    throw new Error("FAB_LOCAL_API_PUBLIC_URL must use http or https");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("FAB_LOCAL_API_PUBLIC_URL must not contain credentials");
+  }
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("FAB_LOCAL_API_PUBLIC_URL must be an origin without a path, query, or fragment");
+  }
+  if (parsed.protocol !== "https:" && !LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new Error("Non-loopback FAB_LOCAL_API_PUBLIC_URL values must use https");
+  }
+  return parsed;
+}
+
 export async function fabLocalRequest(
   path: string,
   init: RequestInit = {},
@@ -297,7 +317,16 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
   const startedAt = Date.now();
   let endpoint = DEFAULT_FAB_LOCAL_API_URL;
   try {
-    endpoint = getFabLocalApiBaseUrl().toString().replace(/\/$/, "");
+    endpoint = getFabBrowserApiBaseUrl().toString().replace(/\/$/, "");
+  } catch (error) {
+    return disconnectedControlCenter(
+      endpoint,
+      checkedAt,
+      error instanceof Error ? error.message : "Invalid FAB public API configuration",
+    );
+  }
+  try {
+    getFabLocalApiBaseUrl();
   } catch (error) {
     return disconnectedControlCenter(
       endpoint,
@@ -774,7 +803,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     connections: [],
     workflows: [],
     recovery: {},
-    backups: { backups: [], schedule: {}, verificationMode: null },
+    backups: { backups: [], schedule: {}, restorePolicy: {}, verificationMode: null },
     reporting: { scheduleStatus: {}, reportRuns: [], externalSubmission: null },
     compliance: {
       summary: {},
@@ -834,6 +863,15 @@ function projectBackups(value: unknown): FabControlCenter["backups"] {
   const payload = asRecord(value) || {};
   return {
     verificationMode: stringValue(payload.verificationMode) || null,
+    restorePolicy: selectFields(payload.restorePolicy, [
+      "externalSubmission",
+      "ledgerRestoreSupported",
+      "maintenanceMode",
+      "nextAction",
+      "sourceEvidenceRestoreSupported",
+      "status",
+      "workerMustBeStopped",
+    ]),
     backups: arrayValue(payload.backups).map((backup) => selectFields(backup, [
       "backupFilename",
       "createdAt",

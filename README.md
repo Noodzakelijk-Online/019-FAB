@@ -150,7 +150,7 @@ The governed cutover from repository 025's Apps Script is documented in [docs/sc
 
 ### Docker Installation
 
-Use `docker-compose.yml` so the API, authoritative worker, and dashboard share the same ledger and service identity. Set strong `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` environment values, then run `docker compose up --build`. The Compose definition binds dashboard/API ports to loopback and refuses to render when either required secret is absent. See `docs/deployment_guide.md` for volumes, health checks, and managed-cloud requirements.
+Use `docker-compose.yml` so the API, authoritative worker, and dashboard share the same ledger and service identity. Set strong `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` environment values, then run `docker compose up --build`. The Compose definition binds dashboard/API ports to loopback, separates the internal API address from browser-facing operator links, and refuses to render when either required secret is absent. See `docs/deployment_guide.md` for volumes, health checks, recovery mode, and managed-cloud requirements.
 
 ## Usage
 
@@ -170,6 +170,11 @@ data and Poppler PDF tools when `winget` is available, starts the ledger API,
 autonomous worker, and a current production build of the dashboard on loopback,
 then opens the control room. Use `.\Start-FAB.ps1 -Development` only when
 actively changing dashboard source code.
+Use `Start-FAB-Maintenance.cmd` only for local recovery. It switches the same
+checkout into a quiescent mode with no autonomous worker, locks normal API and
+HAI mutations, disables ngrok, and exposes the confirmation-gated advanced
+recovery console. Stop maintenance with `Stop-FAB.cmd`, then run
+`Start-FAB.cmd` to resume standard operation.
 Double-click `Stop-FAB.cmd` to stop only processes whose service identity and
 project root match this FAB checkout. Runtime logs are written under `logs/`.
 

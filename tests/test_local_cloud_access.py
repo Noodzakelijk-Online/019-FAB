@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -172,6 +173,34 @@ class TestLocalCloudAccessService(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "not_running")
         self.assertEqual(response.get_json()["authMode"], "bearer_token")
+
+    def test_api_disables_cloud_access_during_local_maintenance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = create_app({
+                "fab_local_ledger_path": str(root / "fab.sqlite3"),
+                "fab_maintenance_mode": True,
+                "fab_ngrok_runtime_path": str(root / "missing-runtime.json"),
+                "fab_ngrok_shared_inspector_url": "http://127.0.0.1:1/api/tunnels",
+            }).test_client()
+
+            response = client.get("/api/cloud/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "disabled_for_maintenance")
+        self.assertTrue(response.get_json()["maintenanceMode"])
+        self.assertFalse(response.get_json()["active"])
+        self.assertIsNone(response.get_json()["publicUrl"])
+
+    def test_maintenance_api_refuses_non_loopback_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "local-only"):
+                create_app({
+                    "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                    "fab_local_api_host": "0.0.0.0",
+                    "fab_local_api_token": "configured-token",
+                    "fab_maintenance_mode": True,
+                })
 
     @staticmethod
     def _write_runtime(root: Path) -> Path:

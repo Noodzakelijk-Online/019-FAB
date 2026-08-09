@@ -5,7 +5,9 @@ import {
   FileCheck2,
   LifeBuoy,
   Loader2,
+  LockKeyhole,
   ShieldCheck,
+  Wrench,
 } from "lucide-react";
 import { FabDataStatus, FabPanelStateMessage } from "./FabDataState";
 import { useFabLocale } from "./fabLocale";
@@ -25,6 +27,7 @@ type FabBackupCenterProps = {
   backups: {
     backups: FabRecord[];
     schedule: FabRecord;
+    restorePolicy: FabRecord;
     verificationMode: string | null;
   };
   resource?: FabResourceState;
@@ -49,6 +52,7 @@ export function FabBackupCenter({
   const { copy, dateLocale } = useFabLocale();
   const items = records(backups.backups);
   const schedule = backups.schedule || {};
+  const restorePolicy = backups.restorePolicy || {};
   const state = panelState(resource, items.length);
   const scheduleStatus = text(schedule.status, "unavailable");
   const evidenceStatus = text(schedule.sourceEvidenceStatus, "unavailable");
@@ -58,6 +62,8 @@ export function FabBackupCenter({
   const evidenceFiles = count(schedule.sourceEvidenceFiles);
   const evidenceGaps = count(schedule.sourceEvidenceGaps);
   const verificationMode = text(backups.verificationMode, "unavailable");
+  const maintenanceMode = restorePolicy.maintenanceMode === true;
+  const recoveryStatus = text(restorePolicy.status, "maintenance_required");
 
   return (
     <section className="fab-section fab-backup-center" id="backups">
@@ -77,7 +83,7 @@ export function FabBackupCenter({
           <button
             className="fab-secondary-button"
             type="button"
-            disabled={!connected || supportPending}
+            disabled={!connected || supportPending || maintenanceMode}
             onClick={onCreateSupportBundle}
             title={copy("Create a sanitized diagnostic ZIP", "Maak een opgeschoonde diagnostische ZIP")}
           >
@@ -89,7 +95,7 @@ export function FabBackupCenter({
           <button
             className="fab-primary-button"
             type="button"
-            disabled={!connected || pending}
+            disabled={!connected || pending || maintenanceMode}
             onClick={onCreate}
           >
             {pending ? <Loader2 className="is-spinning" aria-hidden="true" /> : <DatabaseBackup aria-hidden="true" />}
@@ -105,6 +111,26 @@ export function FabBackupCenter({
       )}
       {resource?.state !== "live" && resource?.state !== "stale" && (
         <FabPanelStateMessage resource={resource} title={copy("Recovery packages", "Herstelpakketten")} />
+      )}
+
+      {showData && (
+        <div className={`fab-backup-alert ${maintenanceMode ? "tone-warn" : "tone-info"}`} role="status">
+          {maintenanceMode ? <Wrench aria-hidden="true" /> : <LockKeyhole aria-hidden="true" />}
+          <div>
+            <strong>{maintenanceMode
+              ? copy("Local recovery mode is active", "Lokale herstelmodus is actief")
+              : copy("Recovery is locked during standard operation", "Herstel is vergrendeld tijdens normaal gebruik")}</strong>
+            <span>{maintenanceMode
+              ? copy(
+                "Automation, cloud access, and normal changes are paused. Use advanced recovery to inspect or restore a verified package.",
+                "Automatisering, cloudtoegang en normale wijzigingen zijn gepauzeerd. Gebruik geavanceerd herstel om een geverifieerd pakket te controleren of herstellen.",
+              )
+              : copy(
+                "The autonomous worker must be stopped before a recovery package can change the ledger or source evidence.",
+                "De autonome worker moet zijn gestopt voordat een herstelpakket het grootboek of bronbewijs kan wijzigen.",
+              )}</span>
+          </div>
+        </div>
       )}
 
       {showData && items.length > 0 && (
@@ -220,8 +246,8 @@ export function FabBackupCenter({
           {copy("Open advanced recovery", "Geavanceerd herstel openen")} <ArrowUpRight aria-hidden="true" />
         </a>
         <span>{copy(
-          "Recovery creation reads source files only. Support bundles exclude documents, OCR, amounts, paths, and credentials. Restore remains confirmation-gated.",
-          "Herstelpakketten lezen bronbestanden alleen. Supportpakketten sluiten documenten, OCR, bedragen, paden en inloggegevens uit. Herstel blijft beveiligd met bevestiging.",
+          `Recovery status: ${humanize(recoveryStatus)}. Support bundles exclude documents, OCR, amounts, paths, and credentials.`,
+          `Herstelstatus: ${humanize(recoveryStatus)}. Supportpakketten sluiten documenten, OCR, bedragen, paden en inloggegevens uit.`,
         )}</span>
       </div>
     </section>

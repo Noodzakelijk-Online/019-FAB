@@ -179,6 +179,36 @@ class TestLocalHaiConnector(unittest.TestCase):
             self.assertEqual(manifest["authentication"], "bearer_token")
             self.assertNotIn("configured-secret", str(manifest))
 
+    def test_maintenance_mode_disables_all_hai_execution_but_keeps_recovery_status_readable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            connector = LocalHaiConnector(
+                ledger,
+                {
+                    "fab_hai_connector_enabled": True,
+                    "fab_hai_allowed_commands": "refresh_notifications",
+                    "fab_maintenance_mode": True,
+                },
+                executors={"refresh_notifications": lambda payload, actor: {}},
+            )
+
+            manifest = connector.manifest()
+            status = connector.status()
+            plan = connector.plan("refresh_notifications")
+
+            self.assertEqual(manifest["status"], "maintenance")
+            self.assertTrue(manifest["configuredEnabled"])
+            self.assertFalse(manifest["enabled"])
+            self.assertTrue(manifest["maintenanceMode"])
+            self.assertTrue(all(not command["allowed"] for command in manifest["commands"]))
+            self.assertEqual(status["allowedCommandIds"], [])
+            self.assertEqual(plan["status"], "maintenance_locked")
+            self.assertIn(
+                "backup_recovery_status",
+                {resource["resourceId"] for resource in manifest["resources"]},
+            )
+            self.assertIn("restore_backups", manifest["excludedCapabilities"])
+
     def test_payload_validation_rejects_unknown_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
@@ -303,7 +333,8 @@ class TestLocalHaiConnector(unittest.TestCase):
             resources = {
                 item["resourceId"] for item in manifest.get_json()["resources"]
             }
-            self.assertEqual(len(resources), 7)
+            self.assertEqual(len(resources), 8)
+            self.assertIn("backup_recovery_status", resources)
             self.assertIn("google_drive_binary_relay", resources)
             self.assertIn("wave_attachment_work_orders", resources)
             self.assertIn("wave_attachment_binary_readback", resources)

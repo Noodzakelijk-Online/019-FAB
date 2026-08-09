@@ -222,7 +222,16 @@ class LocalHaiConnector:
         self.ledger = ledger
         self.config = config or {}
         self.executors = executors or {}
-        self.enabled = _bool_config(self.config.get("fab_hai_connector_enabled"), default=False)
+        self.configured_enabled = _bool_config(
+            self.config.get("fab_hai_connector_enabled"),
+            default=False,
+        )
+        self.maintenance_mode = _bool_config(
+            self.config.get("fab_maintenance_mode")
+            or self.config.get("operations_maintenance_mode"),
+            default=False,
+        )
+        self.enabled = self.configured_enabled and not self.maintenance_mode
         self.api_token_configured = bool(
             self.config.get("fab_local_api_token")
             or self.config.get("fab_operations_api_token")
@@ -236,7 +245,13 @@ class LocalHaiConnector:
             "connector": "hai",
             "version": HAI_CONNECTOR_VERSION,
             "enabled": self.enabled,
-            "status": "ready" if self.enabled else "prepared_disabled",
+            "configuredEnabled": self.configured_enabled,
+            "maintenanceMode": self.maintenance_mode,
+            "status": (
+                "maintenance"
+                if self.maintenance_mode
+                else "ready" if self.enabled else "prepared_disabled"
+            ),
             "transport": "authenticated_local_http" if self.api_token_configured else "loopback_local_http",
             "authentication": "bearer_token" if self.api_token_configured else "loopback_origin_controls",
             "sourceOfTruth": "fab_local_ledger",
@@ -244,10 +259,21 @@ class LocalHaiConnector:
             "idempotencyPolicy": "single_execution_fail_closed",
             "executionPolicy": "explicit_allowlist",
             "commands": [
-                command.as_dict(command.command_id in self.allowed_command_ids)
+                command.as_dict(
+                    self.enabled and command.command_id in self.allowed_command_ids
+                )
                 for command in HAI_COMMANDS
             ],
             "resources": [
+                {
+                    "resourceId": "backup_recovery_status",
+                    "label": "Backup recovery status",
+                    "description": "Read redacted package verification, source-evidence coverage, and maintenance readiness without exposing recovery phrases or executing a restore.",
+                    "method": "GET",
+                    "path": "/api/backups?verify=false",
+                    "mode": "read_only_recovery_status",
+                    "externalSubmission": "not_executed",
+                },
                 {
                     "resourceId": "google_drive_binary_relay",
                     "label": "Google Drive binary relay",
@@ -335,7 +361,7 @@ class LocalHaiConnector:
             "version": manifest["version"],
             "enabled": manifest["enabled"],
             "status": manifest["status"],
-            "allowedCommandIds": sorted(self.allowed_command_ids),
+            "allowedCommandIds": sorted(self.allowed_command_ids) if self.enabled else [],
             "availableExecutors": sorted(self.executors),
             "commandCount": len(manifest["commands"]),
             "resourceCount": len(manifest["resources"]),
@@ -353,6 +379,14 @@ class LocalHaiConnector:
             )
         except ValueError as exc:
             return self._blocked_plan(command.command_id, "invalid", str(exc), command=command)
+        if self.maintenance_mode:
+            return self._blocked_plan(
+                command.command_id,
+                "maintenance_locked",
+                "HAI command execution is locked while FAB is in local maintenance mode.",
+                command=command,
+                payload=normalized_payload,
+            )
         if not self.enabled:
             return self._blocked_plan(
                 command.command_id,

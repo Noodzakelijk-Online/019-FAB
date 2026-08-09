@@ -16,6 +16,7 @@ class TestNgrokWindowsScripts(unittest.TestCase):
         self.assertIn("/api/live", script)
         self.assertIn("/api/hai/manifest", script)
         self.assertIn("authRequired", script)
+        self.assertIn("maintenanceMode", script)
         self.assertIn("Test-CleanHttpsOrigin -Uri $publicUri", script)
         self.assertIn("Write-JsonAtomic", script)
         self.assertNotIn("pooling-enabled", script.lower())
@@ -52,6 +53,15 @@ class TestNgrokWindowsScripts(unittest.TestCase):
         self.assertIn("Stop-FAB-Ngrok.ps1", stop_cmd)
         self.assertIn("%*", start_cmd)
         self.assertIn("%*", stop_cmd)
+
+    def test_managed_and_verification_tunnels_refuse_maintenance_mode(self):
+        managed = (ROOT / "Start-FAB-Ngrok.ps1").read_text(encoding="utf-8")
+        verification = (ROOT / "Test-FAB-Ngrok.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("disabled during maintenance", managed)
+        self.assertIn("localLive.maintenanceMode", managed)
+        self.assertIn("disabled during maintenance", verification)
+        self.assertIn("localLive.maintenanceMode", verification)
 
 
 if __name__ == "__main__":

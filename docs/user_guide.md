@@ -84,7 +84,8 @@ Local operating ledger and optional web operations API settings.
 *   `api_token`: Bearer token required by the optional local operations API and optional web operations API. Configure this before using ngrok or any non-loopback host.
 *   `local_intake_paths`: Comma- or semicolon-separated local folders to scan from the dashboard, such as a Google Drive-synced `sort out` folder.
 *   `local_intake_extensions`: File extensions accepted by local intake. Default document types include PDF, image, text, and CSV files.
-*   `backup_dir`: Folder where the local dashboard/API stores SQLite ledger backups. Keep this outside Git-tracked folders for real financial metadata.
+*   `backup_dir`: Folder where the local dashboard/API stores recovery packages. Keep this outside Git-tracked folders for real financial metadata.
+*   `backup_restore_source_root`: Immutable local root used for checksum-verified source evidence recovered from a version 2 package. Keep it on durable storage and outside `backup_dir`.
 *   `categorization_review_confidence_threshold`: Minimum category confidence before FAB can keep a processed document out of manual review.
 *   `waveapps_default_account`: Default Wave account name used when preparing local transaction draft payloads.
 *   `review_stale_hours`: Age at which open review items are flagged in Operations Health. Default: `48`.
@@ -299,7 +300,9 @@ Settings for backup and restore.
 *   `backup_paths`: Comma-separated list of files/directories to include in backups. (e.g., `data,config/config.ini`)
 *   `backup_config`: JSON string defining backup type. Example: `{"type": "zip"}`
 
-The local operations dashboard has a ledger-specific recovery flow under `[operations] backup_dir`. Version 2 recovery packages contain a SQLite snapshot plus content-addressed copies of every safe source document, with manifest counts and SHA-256 verification for the ledger and each unique source file. `worker_create_scheduled_backups=true` checks the schedule during each worker cycle; `backup_schedule_interval_hours` defaults to 24. Keep `backup_require_complete_source_evidence=true` so missing, unsafe, or checksum-drifted evidence fails closed instead of producing a false-complete package. The React operator dashboard shows redacted package health and can create a strict package without exposing filesystem paths. Restore remains in the local recovery console, creates a pre-restore package, and requires the exact phrase before replacing the active ledger.
+The local operations dashboard has a recovery flow under `[operations] backup_dir`. Version 2 recovery packages contain a SQLite snapshot plus content-addressed copies of every safe source document, with manifest counts and SHA-256 verification for the ledger and each unique source file. `worker_create_scheduled_backups=true` checks the schedule during each worker cycle; `backup_schedule_interval_hours` defaults to 24. Keep `backup_require_complete_source_evidence=true` so missing, unsafe, or checksum-drifted evidence fails closed instead of producing a false-complete package. The React operator dashboard shows redacted package and recovery readiness without exposing filesystem paths or confirmation phrases.
+
+On Windows, stop normal operation and launch `Start-FAB-Maintenance.cmd`. Maintenance mode is local-only: the worker does not start, ngrok and HAI execution are disabled, and every normal mutation is locked. Open **Advanced recovery**. Ledger-only recovery requires `RESTORE FAB LOCAL LEDGER`. A source-complete version 2 package also offers full recovery with `RESTORE FAB LEDGER AND SOURCE EVIDENCE`; FAB restores source bytes without overwriting an existing tree, rewrites recovered ledger paths, validates the live ledger and each file, and rolls the ledger back if validation fails. When finished, run `Stop-FAB.cmd` and then `Start-FAB.cmd` to resume automation. Rehearse this procedure on a copy before relying on it for production disaster recovery.
 
 ### 4.17. `[error_handling]` Section
 

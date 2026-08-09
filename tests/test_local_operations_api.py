@@ -9,7 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.operations.local_backup import RESTORE_CONFIRMATION_PHRASE
+from src.operations.local_backup import (
+    FULL_RESTORE_CONFIRMATION_PHRASE,
+    LocalBackupService,
+    RESTORE_CONFIRMATION_PHRASE,
+    RESTORE_MODE_FULL,
+)
 from src.operations.local_api import create_app
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
@@ -2557,22 +2562,51 @@ class TestLocalOperationsApi(unittest.TestCase):
                 "backupPath": backup_path,
                 "confirmation": "wrong",
             })
-            restored = client.post("/api/backups/restore", json={
+            maintenance_required = client.post("/api/backups/restore", json={
                 "backupPath": backup_path,
                 "confirmation": RESTORE_CONFIRMATION_PHRASE,
             })
 
             self.assertEqual(blocked.status_code, 400)
             self.assertEqual(blocked.get_json()["status"], "requires_confirmation")
+            self.assertEqual(maintenance_required.status_code, 423)
+            self.assertEqual(maintenance_required.get_json()["status"], "blocked")
+            self.assertEqual(
+                maintenance_required.get_json()["blockers"][0]["code"],
+                "maintenance_required",
+            )
+
+            maintenance_client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_backup_dir": backup_dir,
+                "fab_maintenance_mode": True,
+            }).test_client()
+            mutation_locked = maintenance_client.post("/api/backups", json={})
+            plan = maintenance_client.get(
+                "/api/backups/restore-plan",
+                query_string={"backupPath": backup_path},
+            )
+            restored = maintenance_client.post("/api/backups/restore", json={
+                "backupPath": backup_path,
+                "confirmation": RESTORE_CONFIRMATION_PHRASE,
+            })
+
+            self.assertEqual(mutation_locked.status_code, 423)
+            self.assertEqual(mutation_locked.get_json()["status"], "maintenance_locked")
+            self.assertEqual(plan.status_code, 200)
+            self.assertTrue(plan.get_json()["canRestore"])
             self.assertEqual(restored.status_code, 200)
             self.assertTrue(restored.get_json()["success"])
-            documents = client.get("/api/documents").get_json()["documents"]
+            documents = maintenance_client.get("/api/documents").get_json()["documents"]
             self.assertEqual([document["id"] for document in documents], [original_id])
-            backups = client.get("/api/backups").get_json()
+            live = maintenance_client.get("/api/live").get_json()
+            self.assertTrue(live["maintenanceMode"])
+            self.assertEqual(live["runtimeMode"], "maintenance")
+            backups = maintenance_client.get("/api/backups").get_json()
             self.assertGreaterEqual(len(backups["backups"]), 2)
             self.assertIn(backups["schedule"]["status"], {"current", "due"})
             self.assertEqual(backups["verificationMode"], "deep")
-            manifest_only = client.get("/api/backups?verify=false").get_json()
+            manifest_only = maintenance_client.get("/api/backups?verify=false").get_json()
             self.assertEqual(manifest_only["verificationMode"], "manifest_only")
             self.assertEqual(
                 manifest_only["schedule"]["integrityVerification"],
@@ -2612,6 +2646,100 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertIn("Last backup action", html)
             self.assertIn("fab-recovery-package", html)
             self.assertIn(RESTORE_CONFIRMATION_PHRASE, html)
+
+    def test_api_plans_and_executes_full_recovery_in_maintenance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            backup_dir = os.path.join(temp_dir, "backups")
+            restore_root = os.path.join(temp_dir, "restored")
+            original_path = os.path.join(temp_dir, "original.pdf")
+            current_path = os.path.join(temp_dir, "current.pdf")
+            original_bytes = b"API full recovery source"
+            current_bytes = b"API current rollback source"
+            with open(original_path, "wb") as handle:
+                handle.write(original_bytes)
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "api-full-recovery",
+                "originalFilename": "original.pdf",
+                "storagePath": original_path,
+                "contentSha256": hashlib.sha256(original_bytes).hexdigest(),
+            })
+            backup = LocalBackupService(ledger, {
+                "fab_local_backup_dir": backup_dir,
+            }).create_backup(require_complete_source_evidence=True)
+            with open(current_path, "wb") as handle:
+                handle.write(current_bytes)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "api-full-recovery",
+                "originalFilename": "current.pdf",
+                "storagePath": current_path,
+                "contentSha256": hashlib.sha256(current_bytes).hexdigest(),
+            })
+            client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_backup_dir": backup_dir,
+                "fab_backup_restore_source_root": restore_root,
+                "fab_maintenance_mode": True,
+            }).test_client()
+
+            plan = client.get("/api/backups/restore-plan", query_string={
+                "backupPath": backup["backupPath"],
+                "restoreMode": RESTORE_MODE_FULL,
+            })
+            restored = client.post("/api/backups/restore", json={
+                "backupPath": backup["backupPath"],
+                "restoreMode": RESTORE_MODE_FULL,
+                "confirmation": FULL_RESTORE_CONFIRMATION_PHRASE,
+                "actor": "api-recovery-test",
+            })
+
+            self.assertEqual(plan.status_code, 200)
+            self.assertTrue(plan.get_json()["canRestore"])
+            self.assertEqual(plan.get_json()["sourceRestoreTargetStatus"], "ready")
+            self.assertEqual(restored.status_code, 200)
+            self.assertTrue(restored.get_json()["sourceTargetCreated"])
+            document = ledger.get_document(document_id)
+            self.assertTrue(str(document["storage_path"]).startswith(restore_root))
+            with open(document["storage_path"], "rb") as handle:
+                self.assertEqual(handle.read(), original_bytes)
+
+    def test_maintenance_dashboard_exposes_full_recovery_only_for_complete_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            backup_dir = os.path.join(temp_dir, "backups")
+            source_path = os.path.join(temp_dir, "receipt.pdf")
+            source_bytes = b"maintenance dashboard recovery evidence"
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
+            ledger = LocalOperationsLedger(ledger_path)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "dashboard-full-recovery",
+                "originalFilename": "receipt.pdf",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+            })
+            LocalBackupService(ledger, {
+                "fab_local_backup_dir": backup_dir,
+            }).create_backup(require_complete_source_evidence=True)
+            client = create_app({
+                "fab_local_ledger_path": ledger_path,
+                "fab_local_backup_dir": backup_dir,
+                "fab_maintenance_mode": True,
+            }).test_client()
+
+            page = client.get("/")
+            html = page.data.decode("utf-8")
+
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("Maintenance mode is local-only", html)
+            self.assertIn("Restore ledger", html)
+            self.assertIn("Restore ledger and files", html)
+            self.assertIn(FULL_RESTORE_CONFIRMATION_PHRASE, html)
+            self.assertIn(f'value="{RESTORE_MODE_FULL}"', html)
 
     def test_api_blocks_strict_backup_when_source_evidence_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:

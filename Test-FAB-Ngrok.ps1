@@ -26,6 +26,10 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
+$maintenanceProperty = $runtime.PSObject.Properties["maintenanceMode"]
+if ($maintenanceProperty -and [bool]$maintenanceProperty.Value) {
+    throw "FAB cloud verification is disabled during maintenance. Restart FAB in standard mode first."
+}
 $apiBaseUrl = [string]$runtime.apiBaseUrl
 $apiUri = [System.Uri]$apiBaseUrl
 if ($apiUri.Host -notin @("127.0.0.1", "localhost", "::1")) {
@@ -52,6 +56,10 @@ if ($LASTEXITCODE -ne 0 -or ([string]$apiToken).Length -lt 32) {
     throw "Configure a strong FAB API token before using ngrok."
 }
 $apiToken = [string]$apiToken
+$localLive = Invoke-RestMethod -Uri "$apiBaseUrl/api/live" -Headers @{ Authorization = "Bearer $apiToken" } -TimeoutSec 5
+if ([string]$localLive.service -ne "fab-ledger-api" -or [bool]$localLive.maintenanceMode) {
+    throw "FAB cloud verification requires the standard local runtime."
+}
 
 if (-not $Url) {
     try {

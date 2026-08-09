@@ -14,6 +14,37 @@ class WorkerAlreadyRunningError(RuntimeError):
 
 
 @contextmanager
+def managed_worker_maintenance(project_root: Path) -> Iterator[dict]:
+    """Hold the worker ownership boundary without starting a worker.
+
+    Destructive local maintenance uses the same mutex/file lock as the worker,
+    closing the race between a quiescence check and a new worker process.
+    """
+    root = project_root.resolve()
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / "fab-worker.lock"
+    try:
+        lock_handle = _acquire_worker_lock(root, lock_path)
+    except OSError as exc:
+        raise WorkerAlreadyRunningError(
+            "The FAB autonomous worker is active; stop it before maintenance."
+        ) from exc
+    payload = {
+        "service": "fab-worker-maintenance-lock",
+        "apiVersion": "1",
+        "pid": os.getpid(),
+        "instanceId": local_instance_id(root),
+        "instanceRoot": str(root),
+        "startedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        yield payload
+    finally:
+        _release_worker_lock(lock_handle)
+
+
+@contextmanager
 def managed_worker_runtime(project_root: Path) -> Iterator[dict]:
     root = project_root.resolve()
     data_dir = root / "data"

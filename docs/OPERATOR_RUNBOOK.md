@@ -44,12 +44,13 @@ Never archive a Drive source merely because a Wave record exists. FAB must verif
 .\.venv\Scripts\python.exe -m src.run_fab_doctor --json
 .\.venv\Scripts\python.exe -m src.run_fab_doctor --support-bundle
 .\Stop-FAB.ps1
+.\Start-FAB-Maintenance.cmd
 .\Test-FAB-Ngrok.ps1
 ```
 
 For persistent supervised remote API and HAI access, use `Start-FAB-Ngrok.cmd` and `Stop-FAB-Ngrok.cmd`. FAB never reuses or stops an unrelated ngrok endpoint; provide `-Url https://your-reserved-endpoint.example` when another endpoint is already online. The operator dashboard remains local.
 
-Create a verified recovery package from the dashboard. Restore remains confirmation-gated in the local recovery console. Preserve the current database before repair and verify the restored checksum and source-evidence coverage.
+Create a verified recovery package from the dashboard. Restore only after starting `Start-FAB-Maintenance.cmd`; the worker, normal mutations, HAI execution, and ngrok are then locked. Inspect the package first. Ledger-only recovery requires `RESTORE FAB LOCAL LEDGER`; a source-complete version 2 package can also recover exact source bytes with `RESTORE FAB LEDGER AND SOURCE EVIDENCE`. FAB creates a pre-restore package, refuses source overwrite or checksum drift, verifies rewritten paths and bytes, and rolls the ledger back after a failed final check. When recovery is complete, run `Stop-FAB.cmd` and `Start-FAB.cmd`, then verify standard liveness and worker ownership.
 
 ### Schema upgrades and rollback
 

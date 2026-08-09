@@ -9,10 +9,13 @@ from unittest.mock import patch
 from src.operations.local_backup import (
     BACKUP_FORMAT_V1,
     BACKUP_FORMAT_V2,
+    FULL_RESTORE_CONFIRMATION_PHRASE,
     LocalBackupService,
     RESTORE_CONFIRMATION_PHRASE,
+    RESTORE_MODE_FULL,
 )
 from src.operations.local_ledger import LocalOperationsLedger
+from src.worker.runtime import WorkerAlreadyRunningError
 
 
 class TestLocalBackupService(unittest.TestCase):
@@ -57,7 +60,10 @@ class TestLocalBackupService(unittest.TestCase):
                 "sourceDocumentId": "scan-original",
                 "originalFilename": "original.pdf",
             })
-            service = LocalBackupService(ledger, {"fab_local_backup_dir": backup_dir})
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": backup_dir,
+                "fab_maintenance_mode": True,
+            })
             backup = service.create_backup(note="restore test")
             ledger.register_document({
                 "source": "scanner",
@@ -75,6 +81,265 @@ class TestLocalBackupService(unittest.TestCase):
             self.assertEqual([document["id"] for document in documents], [original_id])
             self.assertEqual(ledger.list_audit_events()[0]["action"], "local_backup.restored")
             self.assertTrue(os.path.exists(restored["preRestoreBackupPath"]))
+
+    def test_full_restore_recovers_source_bytes_and_rewrites_ledger_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            backup_dir = os.path.join(temp_dir, "backups")
+            restore_root = os.path.join(temp_dir, "restored-evidence")
+            original_path = os.path.join(temp_dir, "original.pdf")
+            current_path = os.path.join(temp_dir, "current.pdf")
+            original_bytes = b"original recovery package evidence"
+            current_bytes = b"current rollback evidence"
+            with open(original_path, "wb") as handle:
+                handle.write(original_bytes)
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "full-restore-1",
+                "originalFilename": "original.pdf",
+                "storagePath": original_path,
+                "contentSha256": hashlib.sha256(original_bytes).hexdigest(),
+            })
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": backup_dir,
+                "fab_backup_restore_source_root": restore_root,
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup(require_complete_source_evidence=True)
+            with open(current_path, "wb") as handle:
+                handle.write(current_bytes)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "full-restore-1",
+                "originalFilename": "current.pdf",
+                "storagePath": current_path,
+                "contentSha256": hashlib.sha256(current_bytes).hexdigest(),
+            })
+            os.remove(original_path)
+
+            restored = service.restore_backup(
+                backup["backupPath"],
+                FULL_RESTORE_CONFIRMATION_PHRASE,
+                restore_mode=RESTORE_MODE_FULL,
+                actor="recovery-test",
+            )
+
+            self.assertTrue(restored["success"])
+            self.assertTrue(restored["sourceTargetCreated"])
+            document = ledger.get_document(document_id)
+            self.assertTrue(str(document["storage_path"]).startswith(restore_root))
+            self.assertEqual(document["content_sha256"], hashlib.sha256(original_bytes).hexdigest())
+            with open(document["storage_path"], "rb") as handle:
+                self.assertEqual(handle.read(), original_bytes)
+            self.assertTrue(os.path.exists(restored["preRestoreBackupPath"]))
+
+            repeated = service.restore_backup(
+                backup["backupPath"],
+                FULL_RESTORE_CONFIRMATION_PHRASE,
+                restore_mode=RESTORE_MODE_FULL,
+            )
+            self.assertTrue(repeated["success"])
+            self.assertFalse(repeated["sourceTargetCreated"])
+            self.assertEqual(repeated["sourceRestoreTarget"], restored["sourceRestoreTarget"])
+
+    def test_full_restore_blocks_tampered_existing_immutable_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "receipt.pdf")
+            source_bytes = b"immutable source evidence"
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "immutable-restore-1",
+                "originalFilename": "receipt.pdf",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+            })
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                "fab_backup_restore_source_root": os.path.join(temp_dir, "restored"),
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup(require_complete_source_evidence=True)
+            ready = service.plan_restore(backup["backupPath"], restore_mode=RESTORE_MODE_FULL)
+            entry = ready["manifest"]["sourceEvidence"]
+            inspected = service.inspect_backup(backup["backupPath"])
+            archive_path = inspected["manifest"]["sourceEvidence"]["entries"][0]["archivePath"]
+            target_path = os.path.join(ready["sourceRestoreTarget"], *archive_path.split("/"))
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            with open(target_path, "wb") as handle:
+                handle.write(b"tampered")
+
+            blocked = service.restore_backup(
+                backup["backupPath"],
+                FULL_RESTORE_CONFIRMATION_PHRASE,
+                restore_mode=RESTORE_MODE_FULL,
+            )
+
+            self.assertEqual(entry["coverageStatus"], "complete")
+            self.assertFalse(blocked["success"])
+            self.assertEqual(blocked["status"], "blocked")
+            self.assertEqual(blocked["blockers"][0]["code"], "source_restore_target_blocked")
+
+    def test_full_restore_rejects_manifest_to_ledger_document_mismatch_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "receipt.pdf")
+            source_bytes = b"covered restore evidence"
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "coverage-mismatch-1",
+                "originalFilename": "receipt.pdf",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+            })
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                "fab_backup_restore_source_root": os.path.join(temp_dir, "restored"),
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup(require_complete_source_evidence=True)
+            with zipfile.ZipFile(backup["backupPath"], "r") as archive:
+                members = {name: archive.read(name) for name in archive.namelist()}
+            altered_ledger_path = os.path.join(temp_dir, "altered.sqlite3")
+            with open(altered_ledger_path, "wb") as handle:
+                handle.write(members["fab_operations.sqlite3"])
+            LocalOperationsLedger(altered_ledger_path).register_document({
+                "source": "scanner",
+                "sourceDocumentId": "uncovered-restore-row",
+                "originalFilename": "uncovered.pdf",
+            })
+            with open(altered_ledger_path, "rb") as handle:
+                members["fab_operations.sqlite3"] = handle.read()
+            manifest = json.loads(members["manifest.json"].decode("utf-8"))
+            manifest["ledgerBytes"] = len(members["fab_operations.sqlite3"])
+            manifest["ledgerSha256"] = hashlib.sha256(
+                members["fab_operations.sqlite3"]
+            ).hexdigest()
+            members["manifest.json"] = json.dumps(manifest).encode("utf-8")
+            with zipfile.ZipFile(backup["backupPath"], "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, content in members.items():
+                    archive.writestr(name, content)
+
+            with self.assertRaisesRegex(ValueError, "does not cover every restored ledger document"):
+                service.restore_backup(
+                    backup["backupPath"],
+                    FULL_RESTORE_CONFIRMATION_PHRASE,
+                    restore_mode=RESTORE_MODE_FULL,
+                )
+
+            self.assertEqual([item["id"] for item in ledger.list_documents(limit=10)], [document_id])
+
+    def test_full_restore_rejects_dangling_link_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = os.path.join(temp_dir, "receipt.pdf")
+            source_bytes = b"link-safe evidence"
+            with open(source_path, "wb") as handle:
+                handle.write(source_bytes)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "link-restore-1",
+                "originalFilename": "receipt.pdf",
+                "storagePath": source_path,
+                "contentSha256": hashlib.sha256(source_bytes).hexdigest(),
+            })
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                "fab_backup_restore_source_root": os.path.join(temp_dir, "restored"),
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup(require_complete_source_evidence=True)
+            ready = service.plan_restore(backup["backupPath"], restore_mode=RESTORE_MODE_FULL)
+            os.makedirs(os.path.dirname(ready["sourceRestoreTarget"]), exist_ok=True)
+            try:
+                os.symlink(
+                    os.path.join(temp_dir, "missing-link-target"),
+                    ready["sourceRestoreTarget"],
+                    target_is_directory=True,
+                )
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"Directory symlinks are unavailable: {exc}")
+
+            blocked = service.plan_restore(
+                backup["backupPath"],
+                restore_mode=RESTORE_MODE_FULL,
+            )
+
+            self.assertFalse(blocked["canRestore"])
+            self.assertEqual(blocked["blockers"][0]["code"], "source_restore_target_blocked")
+
+    def test_full_restore_rolls_back_ledger_when_post_restore_verification_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            original_path = os.path.join(temp_dir, "original.pdf")
+            current_path = os.path.join(temp_dir, "current.pdf")
+            original_bytes = b"older evidence"
+            current_bytes = b"newer evidence"
+            with open(original_path, "wb") as handle:
+                handle.write(original_bytes)
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "rollback-restore-1",
+                "originalFilename": "original.pdf",
+                "storagePath": original_path,
+                "contentSha256": hashlib.sha256(original_bytes).hexdigest(),
+            })
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                "fab_backup_restore_source_root": os.path.join(temp_dir, "restored"),
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup(require_complete_source_evidence=True)
+            with open(current_path, "wb") as handle:
+                handle.write(current_bytes)
+            ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "rollback-restore-1",
+                "originalFilename": "current.pdf",
+                "storagePath": current_path,
+                "contentSha256": hashlib.sha256(current_bytes).hexdigest(),
+            })
+
+            with patch.object(
+                service,
+                "_verify_live_restore",
+                side_effect=ValueError("forced verification failure"),
+            ):
+                with self.assertRaisesRegex(ValueError, "forced verification failure"):
+                    service.restore_backup(
+                        backup["backupPath"],
+                        FULL_RESTORE_CONFIRMATION_PHRASE,
+                        restore_mode=RESTORE_MODE_FULL,
+                    )
+
+            document = ledger.get_document(document_id)
+            self.assertEqual(document["storage_path"], current_path)
+            self.assertEqual(document["content_sha256"], hashlib.sha256(current_bytes).hexdigest())
+
+    def test_restore_reports_worker_ownership_conflict(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBackupService(ledger, {
+                "fab_local_backup_dir": os.path.join(temp_dir, "backups"),
+                "fab_maintenance_mode": True,
+            })
+            backup = service.create_backup()
+            with patch(
+                "src.operations.local_backup.managed_worker_maintenance",
+                side_effect=WorkerAlreadyRunningError("worker active"),
+            ):
+                blocked = service.restore_backup(
+                    backup["backupPath"],
+                    RESTORE_CONFIRMATION_PHRASE,
+                )
+
+            self.assertFalse(blocked["success"])
+            self.assertEqual(blocked["status"], "worker_active")
 
     def test_inspect_rejects_unsafe_archive_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:

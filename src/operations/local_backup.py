@@ -9,17 +9,23 @@ import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from src.operations.local_ledger import LocalOperationsLedger
+from src.worker.runtime import WorkerAlreadyRunningError, managed_worker_maintenance
 
 
 BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_LEDGER_NAME = "fab_operations.sqlite3"
 RESTORE_CONFIRMATION_PHRASE = "RESTORE FAB LOCAL LEDGER"
+FULL_RESTORE_CONFIRMATION_PHRASE = "RESTORE FAB LEDGER AND SOURCE EVIDENCE"
+RESTORE_MODE_LEDGER_ONLY = "ledger_only"
+RESTORE_MODE_FULL = "ledger_and_source_evidence"
 BACKUP_FORMAT_V1 = "fab-local-ledger-backup-v1"
 BACKUP_FORMAT_V2 = "fab-recovery-package-v2"
 SOURCE_EVIDENCE_PREFIX = "source_evidence/"
+RESTORED_SOURCE_DIR_PREFIX = "fab-source-evidence-"
 SCHEDULED_BACKUP_LEASE_NAME = "local_scheduled_backup"
 MAX_BACKUP_ARCHIVE_FILES = 10_000
 MAX_BACKUP_EVIDENCE_FILE_BYTES = 250 * 1024 * 1024
@@ -36,6 +42,7 @@ class LocalBackupService:
         self.ledger = ledger
         self.config = config or {}
         self.ledger_path = os.path.abspath(ledger.path)
+        self.project_root = _project_root(self.ledger_path, self.config)
         self.backup_dir = self._backup_dir()
         os.makedirs(self.backup_dir, exist_ok=True)
 
@@ -173,6 +180,8 @@ class LocalBackupService:
         return {
             "backupDir": self.backup_dir,
             "restoreConfirmationPhrase": RESTORE_CONFIRMATION_PHRASE,
+            "fullRestoreConfirmationPhrase": FULL_RESTORE_CONFIRMATION_PHRASE,
+            "restorePolicy": self.restore_policy(),
             "backups": backups[: _bounded_limit(limit)],
             "schedule": self.schedule_status(deep_verify=deep_verify),
             "verificationMode": "deep" if deep_verify else "manifest_only",
@@ -436,48 +445,396 @@ class LocalBackupService:
                 owner_token,
             )
 
-    def restore_backup(self, backup_path: str, confirmation: str) -> Dict[str, Any]:
-        if confirmation != RESTORE_CONFIRMATION_PHRASE:
+    def restore_policy(self) -> Dict[str, Any]:
+        maintenance_mode = _bool_config(
+            self.config,
+            "fab_maintenance_mode",
+            "operations_maintenance_mode",
+            default=False,
+        )
+        source_root = self._source_restore_base()
+        return {
+            "status": "maintenance_ready" if maintenance_mode else "maintenance_required",
+            "maintenanceMode": maintenance_mode,
+            "ledgerRestoreSupported": True,
+            "sourceEvidenceRestoreSupported": True,
+            "sourceRestoreRoot": source_root,
+            "workerMustBeStopped": True,
+            "externalSubmission": "not_executed",
+            "nextAction": (
+                "Inspect a verified package and enter the exact restore confirmation."
+                if maintenance_mode
+                else "Stop FAB and restart it with Start-FAB-Maintenance.cmd before restoring."
+            ),
+        }
+
+    def plan_restore(
+        self,
+        backup_path: str,
+        *,
+        restore_mode: str = RESTORE_MODE_LEDGER_ONLY,
+    ) -> Dict[str, Any]:
+        mode = _restore_mode(restore_mode)
+        inspected = self.inspect_backup(backup_path)
+        manifest = inspected["manifest"]
+        source_evidence = manifest.get("sourceEvidence") or {}
+        policy = self.restore_policy()
+        blockers = []
+        source_target = None
+        target_status = "not_applicable"
+        if not policy["maintenanceMode"]:
+            blockers.append({
+                "code": "maintenance_required",
+                "message": "Restore is locked while the normal FAB runtime is active.",
+            })
+        if mode == RESTORE_MODE_FULL:
+            if manifest.get("format") != BACKUP_FORMAT_V2:
+                blockers.append({
+                    "code": "source_evidence_unavailable",
+                    "message": "Legacy ledger-only packages cannot restore source evidence.",
+                })
+            elif source_evidence.get("coverageStatus") != "complete":
+                blockers.append({
+                    "code": "source_evidence_incomplete",
+                    "message": "Full recovery requires a source-complete package with zero evidence gaps.",
+                })
+            else:
+                try:
+                    source_target = self._source_restore_target(manifest)
+                    if os.path.lexists(source_target):
+                        self._verify_restored_source_root(source_target, source_evidence)
+                        target_status = "existing_verified"
+                    else:
+                        self._validate_source_restore_base(create=False)
+                        target_status = "ready"
+                except (OSError, ValueError) as exc:
+                    blockers.append({
+                        "code": "source_restore_target_blocked",
+                        "message": str(exc),
+                    })
+                    target_status = "blocked"
+        return {
+            "success": not blockers,
+            "status": "ready" if not blockers else "blocked",
+            "canRestore": not blockers,
+            "restoreMode": mode,
+            "confirmationPhrase": (
+                FULL_RESTORE_CONFIRMATION_PHRASE
+                if mode == RESTORE_MODE_FULL
+                else RESTORE_CONFIRMATION_PHRASE
+            ),
+            "backupFilename": inspected["backupFilename"],
+            "backupPath": inspected["backupPath"],
+            "manifest": _restore_manifest_summary(manifest),
+            "sourceRestoreTarget": source_target,
+            "sourceRestoreTargetStatus": target_status,
+            "blockers": blockers,
+            "externalSubmission": "not_executed",
+        }
+
+    def restore_backup(
+        self,
+        backup_path: str,
+        confirmation: str,
+        *,
+        restore_mode: str = RESTORE_MODE_LEDGER_ONLY,
+        actor: str = "local_backup_restore",
+    ) -> Dict[str, Any]:
+        mode = _restore_mode(restore_mode)
+        required_confirmation = (
+            FULL_RESTORE_CONFIRMATION_PHRASE
+            if mode == RESTORE_MODE_FULL
+            else RESTORE_CONFIRMATION_PHRASE
+        )
+        if confirmation != required_confirmation:
             return {
                 "success": False,
                 "status": "requires_confirmation",
-                "error": f"Restore requires exact confirmation: {RESTORE_CONFIRMATION_PHRASE}",
+                "error": f"Restore requires exact confirmation: {required_confirmation}",
+                "externalSubmission": "not_executed",
+            }
+        plan = self.plan_restore(backup_path, restore_mode=mode)
+        if not plan.get("canRestore"):
+            return {
+                **plan,
+                "success": False,
+                "error": (plan.get("blockers") or [{}])[0].get("message")
+                or "Restore is blocked.",
+            }
+        try:
+            with managed_worker_maintenance(Path(self.project_root)):
+                return self._restore_backup_locked(plan, actor=actor)
+        except WorkerAlreadyRunningError as exc:
+            return {
+                "success": False,
+                "status": "worker_active",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
             }
 
-        inspected = self.inspect_backup(backup_path)
-        resolved_path = inspected["backupPath"]
-        pre_restore = self.create_backup(note=f"Automatic pre-restore backup before {os.path.basename(resolved_path)}")
-
+    def _restore_backup_locked(
+        self,
+        plan: Dict[str, Any],
+        *,
+        actor: str,
+    ) -> Dict[str, Any]:
+        resolved_path = str(plan["backupPath"])
+        mode = str(plan["restoreMode"])
+        inspected = self.inspect_backup(resolved_path)
+        manifest = inspected["manifest"]
+        source_evidence = manifest.get("sourceEvidence") or {}
+        pre_restore = self.create_backup(
+            note=f"Automatic pre-restore backup before {os.path.basename(resolved_path)}",
+            require_complete_source_evidence=mode == RESTORE_MODE_FULL,
+            actor=actor,
+        )
+        source_target = None
+        source_target_created = False
         with tempfile.TemporaryDirectory() as temp_dir:
-            restored_ledger_path = os.path.join(temp_dir, BACKUP_LEDGER_NAME)
+            rollback_ledger_path = os.path.join(temp_dir, "pre-restore-live.sqlite3")
+            prepared_ledger_path = os.path.join(temp_dir, "prepared-restore.sqlite3")
+            self._snapshot_ledger(rollback_ledger_path)
             with zipfile.ZipFile(resolved_path, "r") as archive:
-                with archive.open(BACKUP_LEDGER_NAME) as source, open(restored_ledger_path, "wb") as target:
-                    shutil.copyfileobj(source, target)
-            expected_sha256 = inspected["manifest"].get("ledgerSha256")
-            actual_sha256 = _sha256_file(restored_ledger_path)
-            if expected_sha256 and actual_sha256 != expected_sha256:
-                raise ValueError("Backup ledger checksum does not match manifest")
-            shutil.copy2(restored_ledger_path, self.ledger_path)
+                self._prepare_restored_ledger(
+                    archive,
+                    manifest,
+                    prepared_ledger_path,
+                    source_target=(
+                        self._source_restore_target(manifest)
+                        if mode == RESTORE_MODE_FULL
+                        else None
+                    ),
+                )
+                if mode == RESTORE_MODE_FULL:
+                    source_target = self._source_restore_target(manifest)
+                    source_target_created = self._restore_source_evidence(
+                        archive,
+                        source_evidence,
+                        source_target,
+                    )
+            try:
+                _sqlite_backup(prepared_ledger_path, self.ledger_path)
+                self._verify_live_restore(
+                    manifest,
+                    source_target=source_target,
+                )
+            except Exception:
+                _sqlite_backup(rollback_ledger_path, self.ledger_path)
+                raise
 
+        verified_ledger_sha256 = _sha256_file(self.ledger_path)
         restored_ledger = LocalOperationsLedger(self.ledger_path)
         restored_ledger.record_audit_event({
             "action": "local_backup.restored",
             "entityType": "backup",
             "entityId": os.path.basename(resolved_path),
             "details": {
-                "backupPath": resolved_path,
-                "preRestoreBackupPath": pre_restore["backupPath"],
-                "restoredLedgerSha256": inspected["manifest"].get("ledgerSha256"),
+                "actor": str(actor or "local_backup_restore")[:200],
+                "backupFilename": os.path.basename(resolved_path),
+                "preRestoreBackupFilename": pre_restore["backupFilename"],
+                "restoreMode": mode,
+                "sourceLedgerSha256": manifest.get("ledgerSha256"),
+                "verifiedLedgerSha256BeforeAudit": verified_ledger_sha256,
+                "sourceEvidenceDocuments": source_evidence.get("includedDocuments", 0),
+                "sourceEvidenceFiles": source_evidence.get("includedFiles", 0),
+                "sourceEvidenceBytes": source_evidence.get("includedBytes", 0),
+                "sourceTargetCreated": source_target_created,
+                "externalSubmission": "not_executed",
             },
         })
+        live_ledger_sha256 = _sha256_file(self.ledger_path)
         return {
             "success": True,
             "status": "restored",
+            "restoreMode": mode,
             "backupPath": resolved_path,
             "backupFilename": os.path.basename(resolved_path),
             "preRestoreBackupPath": pre_restore["backupPath"],
-            "manifest": inspected["manifest"],
+            "preRestoreBackupFilename": pre_restore["backupFilename"],
+            "sourceRestoreTarget": source_target,
+            "sourceTargetCreated": source_target_created,
+            "sourceLedgerSha256": manifest.get("ledgerSha256"),
+            "verifiedLedgerSha256BeforeAudit": verified_ledger_sha256,
+            "liveLedgerSha256": live_ledger_sha256,
+            "manifest": _restore_manifest_summary(manifest),
+            "externalSubmission": "not_executed",
         }
+
+    def _prepare_restored_ledger(
+        self,
+        archive: zipfile.ZipFile,
+        manifest: Dict[str, Any],
+        destination_path: str,
+        *,
+        source_target: Optional[str],
+    ) -> None:
+        digest = hashlib.sha256()
+        with archive.open(BACKUP_LEDGER_NAME) as source, open(destination_path, "xb") as target:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                target.write(chunk)
+        if digest.hexdigest() != str(manifest.get("ledgerSha256") or ""):
+            raise ValueError("Backup ledger checksum does not match manifest")
+        connection = sqlite3.connect(destination_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            if not integrity or str(integrity[0]).lower() != "ok":
+                raise ValueError("Prepared restore ledger failed SQLite integrity validation")
+            if source_target is not None:
+                source_evidence = manifest.get("sourceEvidence") or {}
+                entries = source_evidence.get("entries") or []
+                rows = connection.execute(
+                    "SELECT id, content_sha256 FROM bookkeeping_documents ORDER BY id ASC"
+                ).fetchall()
+                entries_by_id = {int(entry["documentId"]): entry for entry in entries}
+                row_ids = {int(row["id"]) for row in rows}
+                if row_ids != set(entries_by_id):
+                    raise ValueError(
+                        "Source-evidence manifest does not cover every restored ledger document"
+                    )
+                for row in rows:
+                    document_id = int(row["id"])
+                    entry = entries_by_id[document_id]
+                    expected_sha256 = str(entry["sha256"]).lower()
+                    ledger_sha256 = str(row["content_sha256"] or "").strip().lower()
+                    if ledger_sha256 and ledger_sha256 != expected_sha256:
+                        raise ValueError(
+                            f"Restored document #{document_id} checksum conflicts with source evidence"
+                        )
+                    storage_path = _safe_restore_member_path(
+                        source_target,
+                        str(entry["archivePath"]),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE bookkeeping_documents
+                        SET storage_path = ?, content_sha256 = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (storage_path, expected_sha256, _now(), document_id),
+                    )
+                connection.commit()
+                integrity = connection.execute("PRAGMA quick_check").fetchone()
+                if not integrity or str(integrity[0]).lower() != "ok":
+                    raise ValueError("Rewritten restore ledger failed SQLite integrity validation")
+        finally:
+            connection.close()
+
+    def _restore_source_evidence(
+        self,
+        archive: zipfile.ZipFile,
+        source_evidence: Dict[str, Any],
+        target_root: str,
+    ) -> bool:
+        if os.path.lexists(target_root):
+            self._verify_restored_source_root(target_root, source_evidence)
+            return False
+        base_root = self._validate_source_restore_base(create=True)
+        staging_root = tempfile.mkdtemp(prefix=".fab-source-restore-", dir=base_root)
+        try:
+            unique_entries = {
+                str(entry["archivePath"]): entry
+                for entry in source_evidence.get("entries") or []
+            }
+            for archive_path, entry in sorted(unique_entries.items()):
+                destination = _safe_restore_member_path(staging_root, archive_path)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                digest = hashlib.sha256()
+                byte_count = 0
+                with archive.open(archive_path) as source, open(destination, "xb") as target:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                        target.write(chunk)
+                        byte_count += len(chunk)
+                if (
+                    digest.hexdigest() != str(entry["sha256"]).lower()
+                    or byte_count != int(entry["bytes"])
+                ):
+                    raise ValueError("Extracted source evidence failed checksum verification")
+                try:
+                    os.chmod(destination, 0o600)
+                except OSError:
+                    pass
+            self._verify_restored_source_root(staging_root, source_evidence)
+            if os.path.lexists(target_root):
+                raise ValueError("Source restore target appeared during extraction")
+            os.replace(staging_root, target_root)
+            staging_root = ""
+            self._verify_restored_source_root(target_root, source_evidence)
+            return True
+        finally:
+            if staging_root and os.path.isdir(staging_root):
+                shutil.rmtree(staging_root)
+
+    def _verify_restored_source_root(
+        self,
+        target_root: str,
+        source_evidence: Dict[str, Any],
+    ) -> None:
+        _assert_no_reparse_points(target_root)
+        if not os.path.isdir(target_root):
+            raise ValueError("Source restore target is not a directory")
+        expected = {
+            str(entry["archivePath"]): {
+                "sha256": str(entry["sha256"]).lower(),
+                "bytes": int(entry["bytes"]),
+            }
+            for entry in source_evidence.get("entries") or []
+        }
+        actual = set()
+        for root, directories, files in os.walk(target_root, followlinks=False):
+            for name in [*directories, *files]:
+                _assert_not_reparse_point(os.path.join(root, name))
+            for filename in files:
+                path = os.path.join(root, filename)
+                relative = os.path.relpath(path, target_root).replace("\\", "/")
+                actual.add(relative)
+        if actual != set(expected):
+            raise ValueError("Source restore target has missing or unexpected files")
+        for relative, declaration in expected.items():
+            path = _safe_restore_member_path(target_root, relative)
+            if os.path.getsize(path) != declaration["bytes"]:
+                raise ValueError("Restored source evidence size does not match manifest")
+            if _sha256_file(path) != declaration["sha256"]:
+                raise ValueError("Restored source evidence checksum does not match manifest")
+
+    def _verify_live_restore(
+        self,
+        manifest: Dict[str, Any],
+        *,
+        source_target: Optional[str],
+    ) -> None:
+        connection = sqlite3.connect(self.ledger_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            integrity = connection.execute("PRAGMA quick_check").fetchone()
+            if not integrity or str(integrity[0]).lower() != "ok":
+                raise ValueError("Restored FAB ledger failed SQLite integrity validation")
+            if source_target is not None:
+                source_evidence = manifest.get("sourceEvidence") or {}
+                self._verify_restored_source_root(source_target, source_evidence)
+                rows = connection.execute(
+                    "SELECT id, storage_path, content_sha256 FROM bookkeeping_documents"
+                ).fetchall()
+                entries = {
+                    int(entry["documentId"]): entry
+                    for entry in source_evidence.get("entries") or []
+                }
+                if {int(row["id"]) for row in rows} != set(entries):
+                    raise ValueError("Restored ledger document coverage changed during restore")
+                for row in rows:
+                    entry = entries[int(row["id"])]
+                    expected_path = _safe_restore_member_path(
+                        source_target,
+                        str(entry["archivePath"]),
+                    )
+                    if os.path.abspath(str(row["storage_path"] or "")) != expected_path:
+                        raise ValueError("Restored ledger source path does not match verified evidence")
+                    if str(row["content_sha256"] or "").lower() != str(entry["sha256"]).lower():
+                        raise ValueError("Restored ledger source checksum does not match evidence")
+        finally:
+            connection.close()
 
     def _snapshot_ledger(self, destination_path: str) -> None:
         source = sqlite3.connect(self.ledger_path)
@@ -499,6 +856,50 @@ class LocalBackupService:
         if not value:
             value = os.path.join(os.path.dirname(self.ledger_path), "backups")
         return os.path.abspath(os.path.expanduser(str(value)))
+
+    def _source_restore_base(self) -> str:
+        value = _config_value(
+            self.config,
+            "fab_backup_restore_source_root",
+            "operations_backup_restore_source_root",
+            "backup_restore_source_root",
+        )
+        if not value:
+            value = os.path.join(
+                os.path.dirname(self.ledger_path),
+                "restored-source-evidence",
+            )
+        expanded = os.path.expanduser(str(value))
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(self.project_root, expanded)
+        return os.path.abspath(expanded)
+
+    def _validate_source_restore_base(self, *, create: bool) -> str:
+        base_root = self._source_restore_base()
+        try:
+            if os.path.commonpath([base_root, self.backup_dir]) == self.backup_dir:
+                raise ValueError("Source restore root cannot be inside the backup directory")
+        except ValueError:
+            raise ValueError("Source restore root is on an incompatible filesystem") from None
+        _assert_no_reparse_points(base_root)
+        if os.path.lexists(base_root) and not os.path.isdir(base_root):
+            raise ValueError("Source restore root is not a directory")
+        if create:
+            os.makedirs(base_root, exist_ok=True)
+            _assert_no_reparse_points(base_root)
+        return base_root
+
+    def _source_restore_target(self, manifest: Dict[str, Any]) -> str:
+        ledger_sha256 = str(manifest.get("ledgerSha256") or "").strip().lower()
+        if not _valid_sha256(ledger_sha256):
+            raise ValueError("Recovery package has no valid ledger checksum")
+        base_root = self._source_restore_base()
+        target = os.path.abspath(
+            os.path.join(base_root, f"{RESTORED_SOURCE_DIR_PREFIX}{ledger_sha256[:16]}")
+        )
+        if os.path.commonpath([target, base_root]) != base_root:
+            raise ValueError("Source restore target escaped the configured root")
+        return target
 
     def _resolve_backup_path(self, backup_path: str) -> str:
         if not backup_path:
@@ -819,6 +1220,104 @@ class LocalBackupService:
             if value not in (None, ""):
                 summary[key] = value
         return summary
+
+
+def _restore_mode(value: Any) -> str:
+    normalized = str(value or RESTORE_MODE_LEDGER_ONLY).strip().lower()
+    aliases = {
+        "ledger": RESTORE_MODE_LEDGER_ONLY,
+        "ledger_only": RESTORE_MODE_LEDGER_ONLY,
+        "full": RESTORE_MODE_FULL,
+        "ledger_and_source_evidence": RESTORE_MODE_FULL,
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"restoreMode must be {RESTORE_MODE_LEDGER_ONLY} or {RESTORE_MODE_FULL}"
+        )
+    return aliases[normalized]
+
+
+def _restore_manifest_summary(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    source_evidence = manifest.get("sourceEvidence") or {}
+    return {
+        "format": manifest.get("format"),
+        "createdAt": manifest.get("createdAt"),
+        "ledgerBytes": manifest.get("ledgerBytes"),
+        "ledgerSha256": manifest.get("ledgerSha256"),
+        "sourceEvidence": {
+            "coverageStatus": source_evidence.get("coverageStatus", "legacy_ledger_only"),
+            "totalDocuments": source_evidence.get("totalDocuments", 0),
+            "includedDocuments": source_evidence.get("includedDocuments", 0),
+            "includedFiles": source_evidence.get("includedFiles", 0),
+            "includedBytes": source_evidence.get("includedBytes", 0),
+            "gapCount": source_evidence.get("gapCount", 0),
+        },
+    }
+
+
+def _safe_restore_member_path(root: str, archive_path: str) -> str:
+    normalized = str(archive_path or "").replace("\\", "/")
+    if (
+        not normalized.startswith(SOURCE_EVIDENCE_PREFIX)
+        or os.path.normpath(normalized).replace("\\", "/") != normalized
+        or os.path.isabs(normalized)
+    ):
+        raise ValueError("Source restore member has an unsafe path")
+    root_path = os.path.abspath(root)
+    destination = os.path.abspath(os.path.join(root_path, *normalized.split("/")))
+    if os.path.commonpath([destination, root_path]) != root_path:
+        raise ValueError("Source restore member escaped the target root")
+    return destination
+
+
+def _assert_not_reparse_point(path: str) -> None:
+    try:
+        stat = os.lstat(path)
+    except FileNotFoundError:
+        return
+    file_attributes = int(getattr(stat, "st_file_attributes", 0) or 0)
+    if os.path.islink(path) or file_attributes & 0x400:
+        raise ValueError("Source restore paths cannot contain links or reparse points")
+
+
+def _assert_no_reparse_points(path: str) -> None:
+    candidate = Path(os.path.abspath(path))
+    existing = candidate
+    while not os.path.lexists(str(existing)) and existing.parent != existing:
+        existing = existing.parent
+    chain = [existing]
+    while chain[-1].parent != chain[-1]:
+        chain.append(chain[-1].parent)
+    for item in reversed(chain):
+        if os.path.lexists(str(item)):
+            _assert_not_reparse_point(str(item))
+    if os.path.lexists(str(candidate)):
+        _assert_not_reparse_point(str(candidate))
+
+
+def _project_root(ledger_path: str, config: Dict[str, Any]) -> str:
+    configured = _config_value(
+        config,
+        "fab_instance_root",
+        "operations_instance_root",
+        "instance_root",
+    )
+    if configured:
+        return os.path.abspath(os.path.expanduser(str(configured)))
+    ledger_parent = Path(ledger_path).resolve().parent
+    return str(ledger_parent.parent if ledger_parent.name.lower() == "data" else ledger_parent)
+
+
+def _sqlite_backup(source_path: str, destination_path: str) -> None:
+    source = sqlite3.connect(f"file:{Path(source_path).as_posix()}?mode=ro", uri=True)
+    destination = sqlite3.connect(destination_path, timeout=30.0)
+    try:
+        destination.execute("PRAGMA busy_timeout = 30000")
+        source.backup(destination)
+        destination.commit()
+    finally:
+        destination.close()
+        source.close()
 
 
 def _config_value(config: Dict[str, Any], *keys: str) -> Any:

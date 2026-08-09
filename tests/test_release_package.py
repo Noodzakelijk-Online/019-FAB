@@ -40,6 +40,7 @@ class ReleasePackageTests(unittest.TestCase):
             names = release.namelist()
             manifest = json.loads(release.read("FAB/RELEASE-MANIFEST.json"))
         self.assertIn("FAB/Start-FAB.ps1", names)
+        self.assertIn("FAB/Start-FAB-Maintenance.cmd", names)
         self.assertIn("FAB/config/config_template.ini", names)
         self.assertNotIn("FAB/tests/development_only.py", names)
         self.assertNotIn("FAB/config/config.ini", names)
@@ -134,6 +135,7 @@ class ReleasePackageTests(unittest.TestCase):
     def _write_required_sources(self):
         files = {
             "Start-FAB.ps1": "Write-Output 'start'\n",
+            "Start-FAB-Maintenance.cmd": "@echo off\n",
             "Stop-FAB.ps1": "Write-Output 'stop'\n",
             "config/config_template.ini": "[operations]\nenabled=false\n",
             "requirements.txt": "Flask\n",
@@ -143,6 +145,7 @@ class ReleasePackageTests(unittest.TestCase):
             "web/Dockerfile": "FROM node:22-slim\n",
             "Dockerfile": "FROM python:3.13-slim\n",
             "docker-compose.yml": "services: {}\n",
+            "docker-compose.maintenance.yml": "services: {}\n",
             "README.md": "# FAB\n",
             "tests/development_only.py": "assert True\n",
         }

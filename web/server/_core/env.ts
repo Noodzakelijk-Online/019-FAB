@@ -12,6 +12,9 @@ export const ENV = {
     ? ["1", "true", "yes", "on"].includes(process.env.FAB_BILLING_ENABLED.toLowerCase())
     : process.env.NODE_ENV === "test",
   fabLocalApiUrl: process.env.FAB_LOCAL_API_URL ?? "http://127.0.0.1:5001",
+  fabLocalApiPublicUrl: process.env.FAB_LOCAL_API_PUBLIC_URL
+    ?? process.env.FAB_LOCAL_API_URL
+    ?? "http://127.0.0.1:5001",
   fabLocalApiToken: process.env.FAB_LOCAL_API_TOKEN ?? "",
   fabInstanceRoot: process.env.FAB_INSTANCE_ROOT ?? "",
   fabLocalApiInsecureHosts: (process.env.FAB_LOCAL_API_INSECURE_HOSTS ?? "")

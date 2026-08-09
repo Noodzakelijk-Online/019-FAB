@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$NoBrowser,
-    [switch]$Development
+    [switch]$Development,
+    [switch]$Maintenance
 )
 
 Set-StrictMode -Version Latest
@@ -13,6 +14,7 @@ $dataRoot = Join-Path $root "data"
 $logsRoot = Join-Path $root "logs"
 $runtimePath = Join-Path $dataRoot "fab-runtime.json"
 $workerRuntimePath = Join-Path $dataRoot "fab-worker-runtime.json"
+$requestedMaintenanceMode = [bool]$Maintenance
 $defaultApiPort = 5001
 $defaultWebPort = 3000
 
@@ -39,7 +41,8 @@ function Test-FabEndpoint {
         [Parameter(Mandatory = $true)][string]$ExpectedService,
         [string]$ApiToken = "",
         [string]$ExpectedLocalApiEndpoint = "",
-        [string]$ExpectedInstanceRoot = ""
+        [string]$ExpectedInstanceRoot = "",
+        [AllowNull()][Nullable[bool]]$ExpectedMaintenanceMode = $null
     )
 
     try {
@@ -62,6 +65,12 @@ function Test-FabEndpoint {
             $actualInstanceId = [string]$response.instanceId
             $expectedInstanceId = Get-FabInstanceId -Path $ExpectedInstanceRoot
             if (-not $actualInstanceId -or $actualInstanceId -ne $expectedInstanceId) {
+                return $false
+            }
+        }
+        if ($null -ne $ExpectedMaintenanceMode) {
+            $maintenanceProperty = $response.PSObject.Properties["maintenanceMode"]
+            if (-not $maintenanceProperty -or [bool]$maintenanceProperty.Value -ne [bool]$ExpectedMaintenanceMode) {
                 return $false
             }
         }
@@ -305,7 +314,8 @@ function Test-FabWebBuildCurrent {
 function Find-RunningFabApi {
     param(
         [Parameter(Mandatory = $true)][string]$ExpectedRoot,
-        [string]$ApiToken = ""
+        [string]$ApiToken = "",
+        [Parameter(Mandatory = $true)][bool]$ExpectedMaintenanceMode
     )
 
     $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -321,7 +331,7 @@ function Find-RunningFabApi {
             Sort-Object LocalPort -Unique
         foreach ($listener in $listeners) {
             $url = "http://127.0.0.1:$($listener.LocalPort)/api/live"
-            if (Test-FabEndpoint -Url $url -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot) {
+            if (Test-FabEndpoint -Url $url -ExpectedService "fab-ledger-api" -ApiToken $ApiToken -ExpectedInstanceRoot $ExpectedRoot -ExpectedMaintenanceMode $ExpectedMaintenanceMode) {
                 return [PSCustomObject]@{
                     ProcessId = [int]$process.ProcessId
                     Url = $url
@@ -363,12 +373,13 @@ function Wait-FabEndpoint {
         [string]$ApiToken = "",
         [string]$ExpectedLocalApiEndpoint = "",
         [string]$ExpectedInstanceRoot = "",
+        [AllowNull()][Nullable[bool]]$ExpectedMaintenanceMode = $null,
         [int]$TimeoutSeconds = 45
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
-        if (Test-FabEndpoint -Url $Url -ExpectedService $ExpectedService -ApiToken $ApiToken -ExpectedLocalApiEndpoint $ExpectedLocalApiEndpoint -ExpectedInstanceRoot $ExpectedInstanceRoot) {
+        if (Test-FabEndpoint -Url $Url -ExpectedService $ExpectedService -ApiToken $ApiToken -ExpectedLocalApiEndpoint $ExpectedLocalApiEndpoint -ExpectedInstanceRoot $ExpectedInstanceRoot -ExpectedMaintenanceMode $ExpectedMaintenanceMode) {
             return
         }
         Start-Sleep -Milliseconds 500
@@ -613,6 +624,22 @@ if (Test-Path -LiteralPath $runtimePath) {
         Write-Warning "Ignoring unreadable runtime metadata at $runtimePath."
     }
 }
+if ($savedRuntime) {
+    $savedMaintenanceMode = $false
+    $savedMaintenanceProperty = $savedRuntime.PSObject.Properties["maintenanceMode"]
+    if ($savedMaintenanceProperty) {
+        $savedMaintenanceMode = [bool]$savedMaintenanceProperty.Value
+    }
+    if ($savedMaintenanceMode -ne $requestedMaintenanceMode) {
+        $requestedLabel = if ($requestedMaintenanceMode) { "maintenance" } else { "standard" }
+        Write-Host "Switching FAB to $requestedLabel mode; restarting the local services..."
+        & (Join-Path $root "Stop-FAB.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            throw "FAB could not stop the previous runtime mode."
+        }
+        $savedRuntime = $null
+    }
+}
 & $python.Source -m pip check
 if ($LASTEXITCODE -ne 0) {
     throw "FAB's isolated Python dependency integrity check failed with exit code $LASTEXITCODE."
@@ -648,7 +675,7 @@ $dashboardUrl = $null
 if ($savedRuntime) {
     $apiPid = Get-FabProcessId -ProcessId $savedRuntime.apiPid -CommandMarker "src.operations.local_api"
     $workerPid = Get-FabProcessId -ProcessId $savedRuntime.workerPid -CommandMarker "src.run_worker"
-    if ($apiPid -and $savedRuntime.apiUrl -and (Test-FabEndpoint -Url $savedRuntime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root)) {
+    if ($apiPid -and $savedRuntime.apiUrl -and (Test-FabEndpoint -Url $savedRuntime.apiUrl -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root -ExpectedMaintenanceMode $requestedMaintenanceMode)) {
         $apiUrl = [string]$savedRuntime.apiUrl
     }
     else {
@@ -657,18 +684,30 @@ if ($savedRuntime) {
 }
 
 if (-not $apiPid) {
-    $runningApi = Find-RunningFabApi -ExpectedRoot $root -ApiToken $apiToken
+    $runningApi = Find-RunningFabApi -ExpectedRoot $root -ApiToken $apiToken -ExpectedMaintenanceMode $requestedMaintenanceMode
     if ($runningApi) {
         $apiPid = [int]$runningApi.ProcessId
         $apiUrl = [string]$runningApi.Url
     }
 }
+if (-not $apiPid) {
+    $oppositeModeApi = Find-RunningFabApi -ExpectedRoot $root -ApiToken $apiToken -ExpectedMaintenanceMode (-not $requestedMaintenanceMode)
+    if ($oppositeModeApi) {
+        throw "A FAB API for this checkout is already running in the other runtime mode. Run Stop-FAB.cmd before switching modes."
+    }
+}
 
 $managedWorkerPid = Get-FabWorkerRuntimeProcessId -Path $workerRuntimePath -ExpectedRoot $root
-if ($managedWorkerPid) {
+if ($requestedMaintenanceMode -and $managedWorkerPid) {
+    throw "The FAB autonomous worker is still active. Run Stop-FAB.cmd, then start maintenance again."
+}
+if (-not $requestedMaintenanceMode -and $managedWorkerPid) {
     $workerPid = $managedWorkerPid
 }
 elseif (Test-Path -LiteralPath $workerRuntimePath) {
+    $workerPid = $null
+}
+if ($requestedMaintenanceMode) {
     $workerPid = $null
 }
 
@@ -676,8 +715,10 @@ if (-not $apiPid) {
     $apiPort = Find-AvailableFabPort -StartPort $defaultApiPort
     $apiUrl = "http://127.0.0.1:$apiPort/api/live"
     $previousApiPort = $env:FAB_LOCAL_API_PORT
+    $previousMaintenanceMode = $env:FAB_MAINTENANCE_MODE
     try {
         $env:FAB_LOCAL_API_PORT = [string]$apiPort
+        $env:FAB_MAINTENANCE_MODE = if ($requestedMaintenanceMode) { "true" } else { "false" }
         $apiProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.operations.local_api") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "local-api.out.log") -RedirectStandardError (Join-Path $logsRoot "local-api.err.log") -PassThru
         $apiPid = $apiProcess.Id
     }
@@ -687,6 +728,12 @@ if (-not $apiPid) {
         }
         else {
             $env:FAB_LOCAL_API_PORT = $previousApiPort
+        }
+        if ($null -eq $previousMaintenanceMode) {
+            Remove-Item Env:FAB_MAINTENANCE_MODE -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_MAINTENANCE_MODE = $previousMaintenanceMode
         }
     }
 }
@@ -732,7 +779,7 @@ if (-not $webPid) {
     }
 }
 
-if (-not $workerPid) {
+if (-not $requestedMaintenanceMode -and -not $workerPid) {
     $workerProcess = Start-Process -FilePath $python.Source -ArgumentList @("-m", "src.run_worker") -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "worker.out.log") -RedirectStandardError (Join-Path $logsRoot "worker.err.log") -PassThru
     $workerPid = $workerProcess.Id
 }
@@ -751,6 +798,7 @@ if (-not $webPid) {
     }
     $previousWebPort = $env:PORT
     $previousLocalApiUrl = $env:FAB_LOCAL_API_URL
+    $previousLocalApiPublicUrl = $env:FAB_LOCAL_API_PUBLIC_URL
     $previousLocalApiToken = $env:FAB_LOCAL_API_TOKEN
     $previousOperationsServiceToken = $env:FAB_OPERATIONS_SERVICE_TOKEN
     $previousNodeEnvironment = $env:NODE_ENV
@@ -758,6 +806,7 @@ if (-not $webPid) {
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
+        $env:FAB_LOCAL_API_PUBLIC_URL = $apiBaseUrl
         $env:JWT_SECRET = $webJwtSecret
         if ($apiToken) {
             $env:FAB_LOCAL_API_TOKEN = $apiToken
@@ -792,6 +841,12 @@ if (-not $webPid) {
         else {
             $env:FAB_LOCAL_API_URL = $previousLocalApiUrl
         }
+        if ($null -eq $previousLocalApiPublicUrl) {
+            Remove-Item Env:FAB_LOCAL_API_PUBLIC_URL -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_LOCAL_API_PUBLIC_URL = $previousLocalApiPublicUrl
+        }
         if ($null -eq $previousLocalApiToken) {
             Remove-Item Env:FAB_LOCAL_API_TOKEN -ErrorAction SilentlyContinue
         }
@@ -823,7 +878,7 @@ else {
     $webIdentityUrl = "$($dashboardUri.GetLeftPart([System.UriPartial]::Authority))/api/fab/runtime"
 }
 
-Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root -TimeoutSeconds 120
+Wait-FabEndpoint -Url $apiUrl -Name "FAB ledger API" -ExpectedService "fab-ledger-api" -ApiToken $apiToken -ExpectedInstanceRoot $root -ExpectedMaintenanceMode $requestedMaintenanceMode -TimeoutSeconds 120
 Wait-FabEndpoint -Url $webIdentityUrl -Name "FAB operator dashboard" -ExpectedService "fab-operator-dashboard" -ExpectedLocalApiEndpoint $apiBaseUrl -ExpectedInstanceRoot $root -TimeoutSeconds 120
 $webListenerPid = Get-FabListenerProcessId -Url $webIdentityUrl
 if (-not $webListenerPid) {
@@ -832,10 +887,11 @@ if (-not $webListenerPid) {
 if (-not (Test-FabProcessAncestor -AncestorProcessId $webPid -DescendantProcessId $webListenerPid)) {
     $webPid = Get-FabDashboardProcessRoot -ListenerProcessId $webListenerPid -ExpectedWebRoot $webRoot
 }
-if (-not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker")) {
+if (-not $requestedMaintenanceMode -and -not (Get-FabProcessId -ProcessId $workerPid -CommandMarker "src.run_worker")) {
     throw "FAB autonomous worker exited during startup. Check logs\worker.err.log."
 }
 
+if (-not $requestedMaintenanceMode) {
 try {
     $activationStatusRequest = @{
         UseBasicParsing = $true
@@ -871,6 +927,7 @@ try {
 catch {
     Write-Warning "FAB could not read provider activation status during startup."
 }
+}
 
 [ordered]@{
     startedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -886,13 +943,25 @@ catch {
     dashboardUrl = $dashboardUrl
     webIdentityUrl = $webIdentityUrl
     sourceFingerprint = $sourceFingerprint
+    maintenanceMode = $requestedMaintenanceMode
 } | ConvertTo-Json | Set-Content -LiteralPath $runtimePath -Encoding utf8
 
 Write-Host ""
-Write-Host "FAB is ready." -ForegroundColor Green
+if ($requestedMaintenanceMode) {
+    Write-Host "FAB maintenance is ready." -ForegroundColor Yellow
+    Write-Host "The autonomous worker, normal mutations, HAI commands, and cloud access are locked."
+}
+else {
+    Write-Host "FAB is ready." -ForegroundColor Green
+}
 Write-Host "Dashboard: $dashboardUrl"
 Write-Host "Detailed ledger: $apiBaseUrl/"
-Write-Host "Use Stop-FAB.cmd to stop the local services."
+if ($requestedMaintenanceMode) {
+    Write-Host "Use Stop-FAB.cmd when recovery is complete, then Start-FAB.cmd to resume standard operation."
+}
+else {
+    Write-Host "Use Stop-FAB.cmd to stop the local services."
+}
 
 if (-not $NoBrowser) {
     Start-Process $dashboardUrl

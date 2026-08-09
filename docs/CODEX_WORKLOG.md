@@ -1,5 +1,18 @@
 # Codex Worklog
 
+## 2026-08-09 - Quiescent maintenance and full evidence recovery
+
+- Added an explicit maintenance runtime that keeps only the authenticated API and operator dashboard online. The recurring worker is absent, normal mutations return `423 Locked`, cloud access is disabled, and HAI exposes no commands while recovery is possible.
+- Implemented ledger-only and complete ledger-plus-source-evidence recovery from verified v2 packages. Complete recovery validates archive topology, manifest/ledger coverage, every evidence checksum, immutable content-addressed targets, rewritten live paths, and the final database/filesystem state.
+- Bound recovery to the same cross-process ownership lock as the worker, exact typed confirmations, a source-complete pre-restore package, a private ledger rollback snapshot, audited results, and fail-closed collision, reparse-point, tamper, and final-verification handling.
+- Added `Start-FAB-Maintenance.cmd`, `Start-FAB.ps1 -Maintenance`, and a Compose maintenance override. Mode changes restart only checkout-owned processes; normal Windows startup restores the API, dashboard, and recurring worker.
+- Added a read-only HAI recovery-status resource while permanently excluding restore execution from HAI. The dashboard redacts backup paths, restore roots, and confirmation phrases, and disables ordinary backup/support actions during maintenance.
+- Separated the private service API URL from the validated browser-facing API origin. Compose now uses its internal `api` hostname only for server traffic while every operator link resolves to the loopback host port.
+- Live isolated Compose acceptance passed with only healthy non-root API/web services, maintenance state, zero HAI commands, cloud disabled, ordinary mutation blocked, a working public recovery link, clean desktop/narrow browser geometry, and no console errors. Exact test containers, volumes, and network were removed afterward.
+- Native Windows acceptance entered maintenance with no worker, verified complete-recovery readiness and mutation blocking, then returned to standard mode with the worker alive and all 13 governed HAI commands restored.
+- Final local verification passed `788` backend tests with four optional-runtime skips, `164` dashboard tests, TypeScript checking, production build budgets, dependency integrity, Python compilation, and zero known web vulnerabilities.
+- No restore was executed against the live ledger, no provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Dependency-safe autonomous workflow continuation
 
 - Replaced failed-step-only autonomy recovery with an explicit local dependency graph. A retry can now continue only through descendants that were recorded as not run because the source cycle aborted after that exact failed step.

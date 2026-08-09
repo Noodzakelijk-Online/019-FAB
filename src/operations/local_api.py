@@ -25,7 +25,14 @@ from src.document_handling.duplicate_detector import DuplicateDetector
 from src.document_processors.document_type_classifier import is_non_posting_document_type
 from src.operations.local_autonomy import LocalAutonomousService
 from src.operations.local_autonomy_control import LocalAutonomyControlService
-from src.operations.local_backup import LocalBackupService, RESTORE_CONFIRMATION_PHRASE
+from src.operations.local_backup import (
+    BACKUP_FORMAT_V2,
+    FULL_RESTORE_CONFIRMATION_PHRASE,
+    RESTORE_CONFIRMATION_PHRASE,
+    RESTORE_MODE_FULL,
+    RESTORE_MODE_LEDGER_ONLY,
+    LocalBackupService,
+)
 from src.operations.local_bank_transactions import LocalBankTransactionImportService
 from src.operations.local_bookkeeping_records import (
     BOOKKEEPING_RECORD_RESOLUTION_STATUSES,
@@ -2904,17 +2911,30 @@ DASHBOARD_TEMPLATE = """
     <section id="backups">
       <div class="section-head">
         <div>
-          <h2>Backups</h2>
-          <p>Snapshot and restore the local SQLite ledger with explicit confirmation.</p>
+          <h2>Backup and recovery</h2>
+          <p>Verified recovery packages protect the ledger and its source evidence.</p>
         </div>
+        {% if not maintenance_mode %}
         <form class="inline-actions" method="post" action="{{ url_for('create_backup_form') }}">
           <button type="submit">Create backup</button>
         </form>
+        {% endif %}
       </div>
       <div class="settings-grid">
         <div class="setting"><span>Backup folder</span><strong class="mono">{{ backups.backupDir }}</strong></div>
-        <div class="setting"><span>Restore phrase</span><strong class="mono">{{ backups.restoreConfirmationPhrase }}</strong></div>
+        <div class="setting"><span>Runtime mode</span><strong>{{ "Maintenance" if maintenance_mode else "Standard" }}</strong></div>
+        <div class="setting"><span>Recovery status</span><strong>{{ backups.restorePolicy.status }}</strong></div>
+        <div class="setting"><span>Worker requirement</span><strong>{{ "Stopped and locked" if maintenance_mode else "Stop before recovery" }}</strong></div>
       </div>
+      {% if maintenance_mode %}
+      <div class="empty">
+        Maintenance mode is local-only. Normal changes, HAI commands, cloud access, and the autonomous worker are locked.
+      </div>
+      {% else %}
+      <div class="empty">
+        Recovery is locked during standard operation. Restart with <span class="mono">Start-FAB-Maintenance.cmd</span> to inspect and restore a package.
+      </div>
+      {% endif %}
       {% if backup_summary %}
       {% if backup_summary.error %}
       <div class="empty">{{ backup_summary.error }}</div>
@@ -2934,8 +2954,9 @@ DASHBOARD_TEMPLATE = """
               <th>Status</th>
               <th>Created</th>
               <th>Ledger bytes</th>
+              <th>Source evidence</th>
               <th>Checksum</th>
-              <th>Restore</th>
+              <th>Recovery</th>
             </tr>
           </thead>
           <tbody>
@@ -2945,14 +2966,29 @@ DASHBOARD_TEMPLATE = """
               <td><span class="badge {{ backup.status }}">{{ backup.status }}</span></td>
               <td class="mono">{{ backup.createdAt or "-" }}</td>
               <td>{{ backup.ledgerBytes or "-" }}</td>
+              <td>
+                <span class="badge {{ backup.sourceEvidenceStatus }}">{{ backup.sourceEvidenceStatus or "unknown" }}</span>
+                <div class="muted">{{ backup.sourceEvidenceDocuments or 0 }} documents, {{ backup.sourceEvidenceGaps or 0 }} gaps</div>
+              </td>
               <td class="mono">{{ backup.ledgerSha256[:12] if backup.ledgerSha256 else "-" }}</td>
               <td>
-                {% if backup.status == "valid" %}
+                {% if backup.status == "valid" and maintenance_mode %}
                 <form method="post" action="{{ url_for('restore_backup_form') }}">
                   <input type="hidden" name="backupPath" value="{{ backup.backupPath }}">
+                  <input type="hidden" name="restoreMode" value="{{ ledger_restore_mode }}">
                   <input type="text" name="confirmation" placeholder="{{ backups.restoreConfirmationPhrase }}">
-                  <button class="compact secondary" type="submit">Restore</button>
+                  <button class="compact secondary" type="submit">Restore ledger</button>
                 </form>
+                {% if backup.format == recovery_package_format and backup.sourceEvidenceStatus == "complete" and (backup.sourceEvidenceGaps or 0) == 0 %}
+                <form method="post" action="{{ url_for('restore_backup_form') }}">
+                  <input type="hidden" name="backupPath" value="{{ backup.backupPath }}">
+                  <input type="hidden" name="restoreMode" value="{{ full_restore_mode }}">
+                  <input type="text" name="confirmation" placeholder="{{ backups.fullRestoreConfirmationPhrase }}">
+                  <button class="compact" type="submit">Restore ledger and files</button>
+                </form>
+                {% endif %}
+                {% elif backup.status == "valid" %}
+                <span class="muted">Maintenance required</span>
                 {% else %}
                 <span class="muted">{{ backup.error or "-" }}</span>
                 {% endif %}
@@ -3836,6 +3872,15 @@ LOGIN_TEMPLATE = """
 
 def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     config = config or {}
+    maintenance_mode = _bool_value(
+        config.get("fab_maintenance_mode")
+        or config.get("operations_maintenance_mode"),
+        default=False,
+    )
+    maintenance_container_bind = _bool_value(
+        config.get("fab_maintenance_container_bind"),
+        default=False,
+    )
     host = str(
         config.get("fab_local_api_host")
         or config.get("operations_api_host")
@@ -3854,6 +3899,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     ).strip().rstrip("/")
     if host not in LOOPBACK_HOSTS and not token:
         raise ValueError("Refusing to expose FAB local API beyond loopback without an API token.")
+    if (
+        maintenance_mode
+        and host not in LOOPBACK_HOSTS
+        and not (maintenance_container_bind and host == "0.0.0.0")
+    ):
+        raise ValueError("FAB maintenance mode is local-only and must bind to a loopback host.")
 
     ledger_path = str(
         config.get("fab_local_ledger_path")
@@ -3883,6 +3934,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(ledger, config)
     app.config["FAB_LOCAL_LEDGER_PATH"] = ledger_path
     app.config["FAB_LOCAL_API_HOST"] = host
+    app.config["FAB_MAINTENANCE_MODE"] = maintenance_mode
     app.config["FAB_LOCAL_INTAKE_PATHS"] = intake_paths
     app.config["FAB_LOCAL_INTAKE_EXTENSIONS"] = intake_extensions
     app.config["MAX_CONTENT_LENGTH"] = _bounded_positive_int(
@@ -3987,6 +4039,28 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return jsonify({"error": "Request JSON body must be an object"}), 400
         return None
 
+    @app.before_request
+    def enforce_maintenance_boundary():
+        if not maintenance_mode or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        if request.endpoint == "login" or request.path in {
+            "/api/backups/restore",
+            "/backups/restore",
+        }:
+            return None
+        message = (
+            "FAB is in local maintenance mode. Normal mutations are locked until "
+            "the standard runtime is restarted."
+        )
+        if request.path.startswith("/api/"):
+            return jsonify({
+                "success": False,
+                "status": "maintenance_locked",
+                "error": message,
+                "externalSubmission": "not_executed",
+            }), 423
+        return message, 423
+
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if not token:
@@ -4085,15 +4159,26 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             readiness["status"] = _combined_health_status(readiness.get("status"), "attention")
             readiness["issueCount"] = int(readiness.get("issueCount") or 0) + 1
             readiness["attentionIssues"] = int(readiness.get("attentionIssues") or 0) + 1
-        health_status = _combined_health_status(
-            operations_health.get("status"),
-            readiness.get("status"),
+        health_status = (
+            "maintenance"
+            if maintenance_mode
+            else _combined_health_status(
+                operations_health.get("status"),
+                readiness.get("status"),
+            )
         )
+        if maintenance_mode:
+            readiness["status"] = "maintenance"
+            readiness["nextAction"] = (
+                "Complete or cancel local recovery, then restart FAB in standard mode."
+            )
         return {
             "service": "fab-ledger-api",
             "apiVersion": "1",
             "instanceId": instance_id,
             "status": health_status,
+            "maintenanceMode": maintenance_mode,
+            "runtimeMode": "maintenance" if maintenance_mode else "standard",
             "ledgerPath": app.config["FAB_LOCAL_LEDGER_PATH"],
             "authRequired": bool(token),
             "ledgerSchema": ledger.schema_status(),
@@ -4148,6 +4233,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             "instanceId": instance_id,
             "status": "ok",
             "authRequired": bool(token),
+            "maintenanceMode": maintenance_mode,
+            "runtimeMode": "maintenance" if maintenance_mode else "standard",
         })
 
     @app.get("/")
@@ -4362,6 +4449,10 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             audit_events=audit_events,
             backup_summary=last_backup_summary,
             backups=backups,
+            maintenance_mode=maintenance_mode,
+            ledger_restore_mode=RESTORE_MODE_LEDGER_ONLY,
+            full_restore_mode=RESTORE_MODE_FULL,
+            recovery_package_format=BACKUP_FORMAT_V2,
             bank_import_summary=last_bank_import_summary,
             bank_statement_imports=bank_statement_imports,
             bank_transactions=bank_transactions,
@@ -4620,12 +4711,28 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     @app.get("/api/cloud/status")
     def cloud_status_api():
         runtime_path = config.get("fab_ngrok_runtime_path")
-        return jsonify(LocalCloudAccessService(
+        result = LocalCloudAccessService(
             project_root=Path(__file__).resolve().parents[2],
             runtime_path=Path(str(runtime_path)) if runtime_path else None,
             api_token_configured=bool(token),
             shared_inspector_url=config.get("fab_ngrok_shared_inspector_url"),
-        ).summarize())
+        ).summarize()
+        if maintenance_mode:
+            result.update({
+                "status": "disabled_for_maintenance",
+                "active": False,
+                "publicUrl": None,
+                "haiManifestUrl": None,
+                "maintenanceMode": True,
+                "nextAction": (
+                    "Complete or cancel local recovery and restart FAB in standard mode "
+                    "before enabling cloud access."
+                ),
+                "externalSubmission": "not_executed",
+            })
+        else:
+            result["maintenanceMode"] = False
+        return jsonify(result)
 
     @app.post("/api/hai/commands/plan")
     def hai_command_plan_api():
@@ -7157,6 +7264,22 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         except Exception as exc:
             return jsonify({"success": False, "status": "invalid", "error": str(exc)}), 400
 
+    @app.get("/api/backups/restore-plan")
+    def plan_backup_restore():
+        backup_path = request.args.get("backupPath") or request.args.get("backupFilename")
+        try:
+            return jsonify(LocalBackupService(ledger, config).plan_restore(
+                str(backup_path or ""),
+                restore_mode=str(request.args.get("restoreMode") or RESTORE_MODE_LEDGER_ONLY),
+            ))
+        except Exception as exc:
+            return jsonify({
+                "success": False,
+                "status": "invalid",
+                "error": str(exc),
+                "externalSubmission": "not_executed",
+            }), 400
+
     @app.post("/api/backups/restore")
     def restore_backup():
         payload = request.get_json(silent=True) or {}
@@ -7164,10 +7287,14 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             result = LocalBackupService(ledger, config).restore_backup(
                 str(payload.get("backupPath") or payload.get("backupFilename") or ""),
                 str(payload.get("confirmation") or ""),
+                restore_mode=str(payload.get("restoreMode") or RESTORE_MODE_LEDGER_ONLY),
+                actor=str(payload.get("actor") or "fab_local_api")[:200],
             )
         except Exception as exc:
             return jsonify({"success": False, "status": "failed", "error": str(exc)}), 400
-        status_code = 200 if result.get("success") else 400
+        status_code = 200 if result.get("success") else (
+            423 if result.get("status") in {"blocked", "worker_active"} else 400
+        )
         return jsonify(result), status_code
 
     @app.post("/backups/restore")
@@ -7176,6 +7303,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             session["fab_last_backup_summary"] = LocalBackupService(ledger, config).restore_backup(
                 str(request.form.get("backupPath") or ""),
                 str(request.form.get("confirmation") or ""),
+                restore_mode=str(request.form.get("restoreMode") or RESTORE_MODE_LEDGER_ONLY),
+                actor="fab_local_dashboard",
             )
         except Exception as exc:
             session["fab_last_backup_summary"] = {

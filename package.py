@@ -27,6 +27,7 @@ class PackageBuilder:
     MAX_TOTAL_BYTES = 512 * 1024 * 1024
     REQUIRED = {
         "windows": {
+            "Start-FAB-Maintenance.cmd",
             "Start-FAB.ps1",
             "Stop-FAB.ps1",
             "config/config_template.ini",
@@ -37,6 +38,7 @@ class PackageBuilder:
         },
         "compose": {
             "Dockerfile",
+            "docker-compose.maintenance.yml",
             "docker-compose.yml",
             "config/config_template.ini",
             "requirements.txt",

@@ -13,6 +13,9 @@ class TestWindowsLauncher(unittest.TestCase):
         self.assertIn("$env:JWT_SECRET = $webJwtSecret", script)
         self.assertIn("$previousJwtSecret = $env:JWT_SECRET", script)
         self.assertIn("Remove-Item Env:JWT_SECRET", script)
+        self.assertIn("$env:FAB_LOCAL_API_PUBLIC_URL = $apiBaseUrl", script)
+        self.assertIn("$previousLocalApiPublicUrl = $env:FAB_LOCAL_API_PUBLIC_URL", script)
+        self.assertIn("Remove-Item Env:FAB_LOCAL_API_PUBLIC_URL", script)
 
     def test_launcher_reconciles_only_its_checksum_bound_virtual_environment(self):
         script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")
@@ -27,6 +30,21 @@ class TestWindowsLauncher(unittest.TestCase):
         self.assertIn('@("venv", "--seed", "--python", "3.13", $venvRoot)', script)
         self.assertIn("-m pip check", script)
         self.assertIn("Set-Content -LiteralPath $venvRequirementsMarker", script)
+
+    def test_maintenance_launcher_is_quiescent_local_and_argument_aware(self):
+        script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")
+        start_cmd = (ROOT / "Start-FAB.cmd").read_text(encoding="utf-8")
+        maintenance_cmd = (ROOT / "Start-FAB-Maintenance.cmd").read_text(encoding="utf-8")
+
+        self.assertIn("[switch]$Maintenance", script)
+        self.assertIn("FAB_MAINTENANCE_MODE", script)
+        self.assertIn("ExpectedMaintenanceMode", script)
+        self.assertIn("-not $requestedMaintenanceMode -and -not $workerPid", script)
+        self.assertIn("maintenanceMode = $requestedMaintenanceMode", script)
+        self.assertIn("Start-FAB.ps1", start_cmd)
+        self.assertIn("%*", start_cmd)
+        self.assertIn("-Maintenance", maintenance_cmd)
+        self.assertIn("%*", maintenance_cmd)
 
 
 if __name__ == "__main__":

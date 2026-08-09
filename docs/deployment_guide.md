@@ -63,6 +63,7 @@ Local deployment is suitable for development, testing, and running the solution 
     local_intake_paths = C:\Users\<you>\Google Drive\sort out
     local_intake_extensions = pdf,jpg,jpeg,png,heic,tif,tiff,txt,csv
     backup_dir = C:\Users\<you>\AppData\Local\FAB\backups
+    backup_restore_source_root = C:\Users\<you>\AppData\Local\FAB\restored-source-evidence
     worker_create_scheduled_backups = true
     backup_schedule_interval_hours = 24
     backup_require_complete_source_evidence = true
@@ -101,7 +102,18 @@ Local deployment is suitable for development, testing, and running the solution 
 
     On Windows Task Scheduler, set **Program/script** to the virtual environment's `python.exe`, **Add arguments** to `-m src.run_worker`, and **Start in** to the repository directory. Use either one long-running worker with restart-on-failure or `worker_run_once=true` with a recurring task, not both recurrence models at once.
 
-6.  **Run the Local Operations API (optional):**
+6.  **Run a Local Recovery Rehearsal:**
+
+    Do not restore while the standard runtime is active. On Windows, launch `Start-FAB-Maintenance.cmd`. The launcher stops the owned standard services when switching modes, starts API and dashboard on loopback without the worker, disables HAI execution and ngrok, and locks every normal mutation. Use **Advanced recovery** to inspect a package before entering either exact confirmation phrase. Full ledger-and-source recovery is available only for a source-complete version 2 package. It creates a verified pre-restore package, refuses source-tree overwrite or checksum drift, and restores the prior live ledger if final validation fails.
+
+    After the rehearsal or recovery:
+    ```powershell
+    .\Stop-FAB.cmd
+    .\Start-FAB.cmd
+    ```
+    Confirm `/api/live` reports `maintenanceMode: false` and that the worker is present before resuming normal operation. Rehearse against an isolated copy first; do not use the live ledger for acceptance testing.
+
+7.  **Run the Local Operations API (optional):**
 
     The local API exposes the authoritative SQLite operations ledger for dashboard, review, routing, and export execution tooling:
     ```bash
@@ -149,7 +161,7 @@ Local deployment is suitable for development, testing, and running the solution 
 The supported container deployment is the repository's three-service Compose stack: authenticated API, worker, and production dashboard. It uses named data/output volumes, mounts intake read-only, runs both images as non-root users, and publishes only to host loopback.
 
 1. Generate separate long random values for `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` in your secret manager or shell environment. Compose also applies the local API token to the server-only operations bridge so the Python services, dashboard, and bounded HAI integration share one authenticated local trust boundary without exposing the token to browser code. Do not put either secret in Compose, `.env`, logs, URLs, or Git.
-2. If ports `5001` or `3000` are already occupied, set `FAB_API_HOST_PORT` and `FAB_WEB_HOST_PORT` to free loopback ports.
+2. If ports `5001` or `3000` are already occupied, set `FAB_API_HOST_PORT` and `FAB_WEB_HOST_PORT` to free loopback ports. Compose keeps `FAB_LOCAL_API_URL=http://api:5001` private for service traffic and derives `FAB_LOCAL_API_PUBLIC_URL` from `FAB_API_HOST_PORT` for operator links; do not replace the public value with Docker's internal hostname.
 3. Build and start the stack:
 
 ```powershell
@@ -168,7 +180,23 @@ docker compose up -d --build api worker web
 4. Open `http://127.0.0.1:<FAB_WEB_HOST_PORT>/admin/operations`. Check `docker compose ps` and `docker compose logs --tail 100 api worker web` if a service is unhealthy.
 5. Stop FAB with `docker compose stop`. Named volumes are retained. Do not use `down --volumes` against financial data unless a separately verified recovery package exists.
 
-The web service's Docker gateway trust is intentionally narrow: it applies only in explicit local-operator mode, to private bridge gateway addresses ending in `.1`, and with a loopback hostname. Put an authenticated reverse proxy in front and disable local-operator mode for a remotely reachable deployment.
+For container recovery, stop the standard stack and start the maintenance override. The override omits the worker and keeps API/dashboard ports published only on host loopback:
+
+```powershell
+docker compose stop
+docker compose -f docker-compose.yml -f docker-compose.maintenance.yml up -d --build api web
+```
+
+Perform only the reviewed local recovery action. Then stop the maintenance services and restart the standard stack:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.maintenance.yml stop
+docker compose up -d api worker web
+```
+
+`docker-compose.maintenance.yml` is a recovery override, not a remotely exposed deployment mode. Do not place TLS ingress or ngrok in front of it.
+
+The web service's Docker gateway trust is intentionally narrow: it applies only in explicit local-operator mode, to private bridge gateway addresses ending in `.1`, and with a loopback hostname. Put an authenticated reverse proxy in front and disable local-operator mode for a remotely reachable deployment. In a managed remote deployment, set `FAB_LOCAL_API_PUBLIC_URL` to the clean external HTTPS origin that a browser can reach; credentials, paths, queries, fragments, and non-loopback HTTP values are rejected.
 
 ## 3. Cloud Deployment Boundary
 

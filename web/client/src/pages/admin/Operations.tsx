@@ -385,7 +385,7 @@ export default function AdminOperations() {
             onCommand={executeCommand}
           />
           <FabBackupCenter
-            backups={data?.backups || { backups: [], schedule: {}, verificationMode: null }}
+            backups={data?.backups || { backups: [], schedule: {}, restorePolicy: {}, verificationMode: null }}
             resource={data?.resourceStates.backups}
             connected={connected}
             pending={createBackup.isPending}

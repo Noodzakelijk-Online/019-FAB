@@ -122,6 +122,10 @@ $expectedRoot = [System.IO.Path]::GetFullPath($root).TrimEnd("\", "/")
 if ($runtimeRoot -ne $expectedRoot) {
     throw "The running FAB instance belongs to another checkout."
 }
+$maintenanceProperty = $runtime.PSObject.Properties["maintenanceMode"]
+if ($maintenanceProperty -and [bool]$maintenanceProperty.Value) {
+    throw "FAB cloud access is disabled during maintenance. Restart FAB in standard mode first."
+}
 $apiBaseUrl = ([string]$runtime.apiBaseUrl).TrimEnd("/")
 $apiUri = [System.Uri]$apiBaseUrl
 if (
@@ -157,7 +161,8 @@ $localLive = Invoke-RestMethod -Uri "$apiBaseUrl/api/live" -Headers $headers -Ti
 if (
     [string]$localLive.service -ne "fab-ledger-api" -or
     [string]$localLive.instanceId -ne $expectedInstanceId -or
-    -not [bool]$localLive.authRequired
+    -not [bool]$localLive.authRequired -or
+    [bool]$localLive.maintenanceMode
 ) {
     throw "The local FAB API identity or authentication boundary could not be verified."
 }
