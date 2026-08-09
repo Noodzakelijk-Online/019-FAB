@@ -1,5 +1,15 @@
 # Codex Worklog
 
+## 2026-08-09 - Authoritative review queue pagination
+
+- Replaced the review API's raw-row slice with complete document-group paging, so multiple open decisions for one document cannot be split across pages or counted as separate dashboard records.
+- Added queue-wide posting-blocked, evidence-only, duplicate, suggestion, document, decision, and oldest/newest timestamp totals. Activation readiness now uses the complete queue instead of the first 200 rows.
+- Added a composite review index and lean continuation-page mode. Page 2 and later skip full summary/category-catalog recomputation while still returning an authoritative total and compact redacted work items.
+- Wired bounded review pages through the token-holding Express gateway and operator-only tRPC route. The dashboard starts with 50 document reviews, reports loaded versus total state, merges subsequent pages, and keeps triage/search behavior over the loaded set.
+- Live Windows acceptance loaded the real queue `50 -> 100 -> 119`; the final page contained 19 document groups. Desktop/responsive DOM checks found no horizontal or control-text overflow and no new console warnings/errors after the final reload and page fetch.
+- Corrected the English review-age unit from Dutch `u` to `h` and clarified document-review terminology.
+- Final local verification passed `793` backend tests with four optional-runtime skips, `165` web tests, TypeScript checking, and production build budgets. No review was resolved, no provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Quiescent maintenance and full evidence recovery
 
 - Added an explicit maintenance runtime that keeps only the authenticated API and operator dashboard online. The recurring worker is absent, normal mutations return `423 Locked`, cloud access is disabled, and HAI exposes no commands while recovery is possible.

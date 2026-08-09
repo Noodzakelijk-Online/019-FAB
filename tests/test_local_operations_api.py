@@ -675,6 +675,116 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(payload["workItems"][0]["documentId"], document_id)
             self.assertEqual(payload["workItems"][0]["document"]["vendorName"], "Vendor")
 
+    def test_review_queue_pages_complete_work_items_with_global_safety_totals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            grouped_document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "grouped-review",
+                "originalFilename": "grouped.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+            })
+            evidence_document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "evidence-review",
+                "originalFilename": "statement.pdf",
+                "documentType": "bank_statement",
+                "processingStatus": "needs_review",
+            })
+            suggestion_document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "suggestion-review",
+                "originalFilename": "telecom.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "category": "Manual Review",
+            })
+            ledger.create_review_item({
+                "documentId": grouped_document_id,
+                "reason": "validation_failed",
+                "details": "Confirm required fields.",
+            })
+            ledger.create_review_item({
+                "documentId": grouped_document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+            })
+            ledger.create_review_item({
+                "documentId": evidence_document_id,
+                "reason": "non_posting_document_type",
+                "details": "Retain as evidence.",
+            })
+            ledger.create_review_item({
+                "documentId": suggestion_document_id,
+                "reason": "duplicate_candidate",
+                "details": "Compare duplicate evidence.",
+            })
+            ledger.create_review_item({
+                "reason": "manual_review",
+                "details": "Unlinked legacy review.",
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            first = client.get("/api/review?status=open&limit=2&offset=0").get_json()
+            second = client.get("/api/review?status=open&limit=2&offset=2").get_json()
+
+            self.assertEqual(first["summary"], second["summary"])
+            self.assertEqual(first["summary"]["reviewItems"], 5)
+            self.assertEqual(first["summary"]["workItems"], 4)
+            self.assertEqual(first["summary"]["documents"], 3)
+            self.assertEqual(first["summary"]["postingBlockedDocuments"], 2)
+            self.assertEqual(first["summary"]["postingBlockedReviewItems"], 4)
+            self.assertEqual(first["summary"]["evidenceOnlyDocuments"], 1)
+            self.assertEqual(first["summary"]["evidenceOnlyReviewItems"], 1)
+            self.assertEqual(first["summary"]["duplicateCandidates"], 1)
+            self.assertEqual(first["summary"]["categorySuggestions"], 1)
+            self.assertIsNotNone(first["summary"]["oldestReviewCreatedAt"])
+            self.assertIsNotNone(first["summary"]["newestReviewCreatedAt"])
+            self.assertEqual(first["pagination"], {
+                "scope": "work_items",
+                "offset": 0,
+                "limit": 2,
+                "returned": 2,
+                "total": 4,
+                "hasMore": True,
+                "nextOffset": 2,
+                "previousOffset": None,
+            })
+            self.assertEqual(second["pagination"], {
+                "scope": "work_items",
+                "offset": 2,
+                "limit": 2,
+                "returned": 2,
+                "total": 4,
+                "hasMore": False,
+                "nextOffset": None,
+                "previousOffset": 0,
+            })
+            combined = first["workItems"] + second["workItems"]
+            self.assertEqual(len({item["id"] for item in combined}), 4)
+            grouped = next(
+                item for item in combined
+                if item["documentId"] == grouped_document_id
+            )
+            self.assertEqual(len(grouped["reviewItems"]), 2)
+
+            bounded = client.get("/api/review?status=open&limit=1&offset=-50").get_json()
+            self.assertEqual(bounded["pagination"]["offset"], 0)
+            self.assertEqual(bounded["pagination"]["returned"], 1)
+            lean_page = client.get(
+                "/api/review?status=open&limit=2&offset=2"
+                "&view=summary&includeSummary=false&includeCategoryOptions=false"
+            ).get_json()
+            self.assertEqual(lean_page["summary"], {})
+            self.assertEqual(lean_page["categoryOptions"], [])
+            self.assertEqual(lean_page["reviewItems"], [])
+            self.assertEqual(lean_page["pagination"]["total"], 4)
+            self.assertEqual(lean_page["pagination"]["returned"], 2)
+
     def test_review_summary_projection_omits_private_and_duplicate_payloads(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

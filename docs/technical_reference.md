@@ -284,7 +284,7 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 
 ### Operations-owned error and review handling
 
-The duplicate JSON review queues and SMTP retry facade were removed. `FabWorker` records independent stage failures in the operations ledger; `LocalWorkflowRecoveryService` creates governed retries; `LocalExceptionQueueService`, `LocalReviewService`, and `CorrectionLearningService` own operator review, resolution, and attributable correction evidence. These records are exposed through the authenticated local API and the Operations dashboard.
+The duplicate JSON review queues and SMTP retry facade were removed. `FabWorker` records independent stage failures in the operations ledger; `LocalWorkflowRecoveryService` creates governed retries; `LocalExceptionQueueService`, `LocalReviewService`, and `CorrectionLearningService` own operator review, resolution, and attributable correction evidence. These records are exposed through the authenticated local API and the Operations dashboard. `/api/review` paginates complete document-level work items with `limit` and `offset`, never splits one document's decisions across pages, and returns a `pagination` envelope. Its default `summary` is queue-wide rather than page-local; trusted server continuations can set `includeSummary=false&includeCategoryOptions=false` to avoid recomputing global projections while retaining an authoritative total.
 
 ### Performance implementation
 

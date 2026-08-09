@@ -183,6 +183,9 @@ class LocalOperationsLedger:
                 CREATE INDEX IF NOT EXISTS idx_local_review_status
                     ON review_items(status);
 
+                CREATE INDEX IF NOT EXISTS idx_local_review_status_document_order
+                    ON review_items(status, document_id, created_at DESC, id DESC);
+
                 CREATE TABLE IF NOT EXISTS duplicate_candidates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     document_id INTEGER NOT NULL,
@@ -4534,6 +4537,142 @@ class LocalOperationsLedger:
         with self._connection() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
+
+    def list_review_work_item_page(
+        self,
+        status: Optional[Any] = None,
+        limit: int = 100,
+        offset: int = 0,
+        document_id: Optional[int] = None,
+    ) -> list:
+        """Return complete document-level review groups for one bounded page."""
+        limit = self._bounded_limit(limit)
+        offset = max(0, self._int(offset, 0))
+        where = []
+        params = []
+        self._append_status_filter(where, params, "r.status", status)
+        if document_id is not None:
+            where.append("r.document_id = ?")
+            params.append(int(document_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        group_key = (
+            "CASE WHEN r.document_id IS NULL "
+            "THEN 'review:' || CAST(r.id AS TEXT) "
+            "ELSE 'document:' || CAST(r.document_id AS TEXT) END"
+        )
+        query = f"""
+            WITH filtered AS (
+                SELECT
+                    r.*,
+                    {group_key} AS review_group_key
+                FROM review_items r
+                {where_sql}
+            ),
+            page_groups AS (
+                SELECT
+                    review_group_key,
+                    MAX(created_at) AS latest_created_at,
+                    MAX(id) AS latest_id
+                FROM filtered
+                GROUP BY review_group_key
+                ORDER BY latest_created_at DESC, latest_id DESC
+                LIMIT ? OFFSET ?
+            )
+            SELECT
+                filtered.id,
+                filtered.document_id,
+                filtered.reason,
+                filtered.details,
+                filtered.status,
+                filtered.corrected_data_json,
+                filtered.created_at,
+                filtered.updated_at
+            FROM filtered
+            INNER JOIN page_groups
+                ON page_groups.review_group_key = filtered.review_group_key
+            ORDER BY
+                page_groups.latest_created_at DESC,
+                page_groups.latest_id DESC,
+                filtered.created_at DESC,
+                filtered.id DESC
+        """
+        with self._connection() as connection:
+            rows = connection.execute(query, [*params, limit, offset]).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def list_review_summary_groups(
+        self,
+        status: Optional[Any] = None,
+        document_id: Optional[int] = None,
+    ) -> list:
+        """Return one compact aggregate row per review work item."""
+        where = []
+        params = []
+        self._append_status_filter(where, params, "r.status", status)
+        if document_id is not None:
+            where.append("r.document_id = ?")
+            params.append(int(document_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        group_key = (
+            "CASE WHEN r.document_id IS NULL "
+            "THEN 'review:' || CAST(r.id AS TEXT) "
+            "ELSE 'document:' || CAST(r.document_id AS TEXT) END"
+        )
+        query = f"""
+            SELECT
+                {group_key} AS review_group_key,
+                MAX(r.document_id) AS document_id,
+                COUNT(*) AS review_count,
+                MAX(CASE WHEN r.reason = 'duplicate_candidate' THEN 1 ELSE 0 END)
+                    AS has_duplicate_candidate,
+                MIN(r.created_at) AS oldest_created_at,
+                MAX(r.created_at) AS newest_created_at,
+                MAX(d.document_type) AS document_type,
+                MAX(d.vendor_name) AS vendor_name,
+                MAX(d.category) AS category,
+                MAX(d.extracted_data_json) AS extracted_data_json,
+                MAX(d.metadata_json) AS metadata_json
+            FROM review_items r
+            LEFT JOIN bookkeeping_documents d ON d.id = r.document_id
+            {where_sql}
+            GROUP BY {group_key}
+            ORDER BY newest_created_at DESC, MAX(r.id) DESC
+        """
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def count_review_work_item_groups(
+        self,
+        status: Optional[Any] = None,
+        document_id: Optional[int] = None,
+    ) -> int:
+        where = []
+        params = []
+        self._append_status_filter(where, params, "r.status", status)
+        if document_id is not None:
+            where.append("r.document_id = ?")
+            params.append(int(document_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        group_key = (
+            "CASE WHEN r.document_id IS NULL "
+            "THEN 'review:' || CAST(r.id AS TEXT) "
+            "ELSE 'document:' || CAST(r.document_id AS TEXT) END"
+        )
+        with self._connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM (
+                    SELECT 1
+                    FROM review_items r
+                    {where_sql}
+                    GROUP BY {group_key}
+                ) grouped_reviews
+                """,
+                params,
+            ).fetchone()
+        return int(row["total"] or 0) if row else 0
 
     def get_review_item(self, review_item_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:

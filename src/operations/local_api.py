@@ -7568,31 +7568,46 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         status_filter: Any = requested_status or None
         if requested_status == "open":
             status_filter = ("pending", "in_review")
-        review_items = ledger.list_review_items(
+        limit = _limit_arg()
+        offset = _bounded_nonnegative_int(
+            request.args.get("offset"),
+            default=0,
+            maximum=10_000_000,
+        )
+        review_items = ledger.list_review_work_item_page(
             status=status_filter,
-            limit=_limit_arg(),
+            limit=limit,
+            offset=offset,
         )
         work_items = _review_work_items(ledger, review_items, config)
+        include_summary = _bool_value(request.args.get("includeSummary"), default=True)
+        summary = _review_queue_summary(ledger, status_filter) if include_summary else {}
+        total_work_items = (
+            int(summary.get("workItems") or 0)
+            if include_summary
+            else ledger.count_review_work_item_groups(status=status_filter)
+        )
+        include_category_options = _bool_value(
+            request.args.get("includeCategoryOptions"),
+            default=True,
+        )
         summary_view = str(request.args.get("view") or "").strip().lower() == "summary"
         response_work_items = (
             [_compact_review_work_item_summary(item) for item in work_items]
             if summary_view
             else work_items
         )
-        evidence_only_work_items = [
-            item
-            for item in work_items
-            if (item.get("document") or {}).get("postingEligible") is False
-        ]
-        posting_blocked_work_items = [
-            item
-            for item in work_items
-            if (item.get("document") or {}).get("postingEligible") is not False
-        ]
+        returned_work_items = len(work_items)
+        next_offset = offset + returned_work_items
+        has_more = next_offset < total_work_items
         return jsonify({
             "reviewItems": [] if summary_view else review_items,
             "workItems": response_work_items,
-            "categoryOptions": _review_category_options(ledger, config),
+            "categoryOptions": (
+                _review_category_options(ledger, config)
+                if include_category_options
+                else []
+            ),
             "capabilities": {
                 "exactVendorCategoryBatch": {
                     "enabled": True,
@@ -7604,31 +7619,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     "preservedReviewGates": ["duplicate_candidate", "validation_failed"],
                 },
             },
-            "summary": {
-                "reviewItems": len(review_items),
-                "documents": len([item for item in work_items if item.get("documentId")]),
-                "postingBlockedDocuments": len([
-                    item for item in posting_blocked_work_items if item.get("documentId")
-                ]),
-                "postingBlockedReviewItems": sum(
-                    len(item.get("reviewItems") or [])
-                    for item in posting_blocked_work_items
-                ),
-                "evidenceOnlyDocuments": len([
-                    item for item in evidence_only_work_items if item.get("documentId")
-                ]),
-                "evidenceOnlyReviewItems": sum(
-                    len(item.get("reviewItems") or [])
-                    for item in evidence_only_work_items
-                ),
-                "duplicateCandidates": len([
-                    item for item in work_items
-                    if "duplicate_candidate" in (item.get("reasons") or [])
-                ]),
-                "categorySuggestions": len([
-                    item for item in work_items
-                    if ((item.get("document") or {}).get("categorySuggestion") or {}).get("category")
-                ]),
+            "summary": summary,
+            "pagination": {
+                "scope": "work_items",
+                "offset": offset,
+                "limit": limit,
+                "returned": returned_work_items,
+                "total": total_work_items,
+                "hasMore": has_more,
+                "nextOffset": next_offset if has_more else None,
+                "previousOffset": max(0, offset - limit) if offset else None,
             },
         })
 
@@ -8175,6 +8175,14 @@ def _bounded_positive_int(value: Any, default: int, maximum: int) -> int:
     return max(1, min(parsed, maximum))
 
 
+def _bounded_nonnegative_int(value: Any, default: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(0, min(parsed, maximum))
+
+
 def _bounded_nonnegative_float(value: Any, default: float, maximum: float) -> float:
     try:
         parsed = float(value)
@@ -8403,6 +8411,72 @@ def _compact_review_work_item_summary(item: Dict[str, Any]) -> Dict[str, Any]:
     return compact
 
 
+def _review_queue_summary(
+    ledger: LocalOperationsLedger,
+    status: Optional[Any],
+) -> Dict[str, Any]:
+    groups = ledger.list_review_summary_groups(status=status)
+    review_items = 0
+    documents = 0
+    posting_blocked_documents = 0
+    posting_blocked_review_items = 0
+    evidence_only_documents = 0
+    evidence_only_review_items = 0
+    duplicate_candidates = 0
+    category_suggestions = 0
+    oldest_created_at = None
+    newest_created_at = None
+
+    for group in groups:
+        review_count = int(group.get("review_count") or 0)
+        document_id = group.get("document_id")
+        has_document = document_id is not None
+        evidence_only = has_document and not _review_document_posting_eligible(group)
+        review_items += review_count
+        documents += int(has_document)
+        duplicate_candidates += int(bool(group.get("has_duplicate_candidate")))
+        if evidence_only:
+            evidence_only_documents += 1
+            evidence_only_review_items += review_count
+        else:
+            posting_blocked_documents += int(has_document)
+            posting_blocked_review_items += review_count
+        if has_document and suggest_category_intent(group):
+            category_suggestions += 1
+        oldest_created_at = _earliest_iso_text(oldest_created_at, group.get("oldest_created_at"))
+        newest_created_at = _latest_iso_text(newest_created_at, group.get("newest_created_at"))
+
+    return {
+        "reviewItems": review_items,
+        "workItems": len(groups),
+        "documents": documents,
+        "postingBlockedDocuments": posting_blocked_documents,
+        "postingBlockedReviewItems": posting_blocked_review_items,
+        "evidenceOnlyDocuments": evidence_only_documents,
+        "evidenceOnlyReviewItems": evidence_only_review_items,
+        "duplicateCandidates": duplicate_candidates,
+        "categorySuggestions": category_suggestions,
+        "oldestReviewCreatedAt": oldest_created_at,
+        "newestReviewCreatedAt": newest_created_at,
+    }
+
+
+def _earliest_iso_text(current: Any, candidate: Any) -> Optional[str]:
+    candidate_text = str(candidate or "").strip()
+    if not candidate_text:
+        return str(current) if current else None
+    current_text = str(current or "").strip()
+    return candidate_text if not current_text or candidate_text < current_text else current_text
+
+
+def _latest_iso_text(current: Any, candidate: Any) -> Optional[str]:
+    candidate_text = str(candidate or "").strip()
+    if not candidate_text:
+        return str(current) if current else None
+    current_text = str(current or "").strip()
+    return candidate_text if not current_text or candidate_text > current_text else current_text
+
+
 def _mapping_fields(value: Any, fields: tuple) -> Dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -8431,18 +8505,8 @@ def _compact_review_document(
         else {}
     )
     classified_document_type = str(classification.get("documentType") or "").strip().lower()
-    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
-    override = review_metadata.get("documentTypeOverride")
-    override_document_type = (
-        str(override.get("documentType") or "").strip().lower()
-        if isinstance(override, dict)
-        else ""
-    )
     document_type = str(document.get("document_type") or "").strip().lower()
-    effective_document_type = override_document_type or document_type
-    posting_eligible = not is_non_posting_document_type(effective_document_type) and not (
-        not override_document_type and is_non_posting_document_type(classified_document_type)
-    )
+    posting_eligible = _review_document_posting_eligible(document)
     record_metadata = (
         bookkeeping_record.get("metadata")
         if isinstance((bookkeeping_record or {}).get("metadata"), dict)
@@ -8480,6 +8544,29 @@ def _compact_review_document(
         "duplicateOfDocumentId": document.get("duplicate_of_document_id"),
         "ocrExcerpt": ocr_text[:1200],
     }
+
+
+def _review_document_posting_eligible(document: Dict[str, Any]) -> bool:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    processing = metadata.get("processing") if isinstance(metadata.get("processing"), dict) else {}
+    classification = (
+        processing.get("documentTypeClassification")
+        if isinstance(processing.get("documentTypeClassification"), dict)
+        else {}
+    )
+    classified_document_type = str(classification.get("documentType") or "").strip().lower()
+    review_metadata = metadata.get("review") if isinstance(metadata.get("review"), dict) else {}
+    override = review_metadata.get("documentTypeOverride")
+    override_document_type = (
+        str(override.get("documentType") or "").strip().lower()
+        if isinstance(override, dict)
+        else ""
+    )
+    document_type = str(document.get("document_type") or "").strip().lower()
+    effective_document_type = override_document_type or document_type
+    return not is_non_posting_document_type(effective_document_type) and not (
+        not override_document_type and is_non_posting_document_type(classified_document_type)
+    )
 
 
 def _review_category_options(ledger: LocalOperationsLedger, config: Dict[str, Any]) -> list:

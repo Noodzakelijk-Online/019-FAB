@@ -9,6 +9,8 @@ import {
   ClipboardCheck,
   CopyCheck,
   FileSearch,
+  ListPlus,
+  LoaderCircle,
   Scale,
   ShieldCheck,
   Sparkles,
@@ -66,22 +68,28 @@ type FabReviewWorkspaceProps = {
   workItems: FabRecord[];
   categoryOptions: string[];
   summary: FabRecord;
+  pagination: FabRecord;
   resource?: FabResourceState;
   search: string;
   localApiEndpoint: string;
   resolvingReviewId: number | null;
   onResolve: (input: FabReviewResolution) => Promise<void>;
+  loadingMore: boolean;
+  onLoadMore: () => Promise<void>;
 };
 
 export function FabReviewWorkspace({
   workItems,
   categoryOptions,
   summary,
+  pagination,
   resource,
   search,
   localApiEndpoint,
   resolvingReviewId,
   onResolve,
+  loadingMore,
+  onLoadMore,
 }: FabReviewWorkspaceProps) {
   const { copy } = useFabLocale();
   const [selectedId, setSelectedId] = useState("");
@@ -109,6 +117,12 @@ export function FabReviewWorkspace({
   );
   const selected = workItems.find((item) => text(item.id, "") === selectedId) || null;
   const state = panelState(resource, workItems.length);
+  const totalWorkItems = Math.max(workItems.length, count(pagination.total));
+  const hasMore = pagination.hasMore === true && workItems.length < totalWorkItems;
+  const nextBatchSize = Math.min(
+    Math.max(1, count(pagination.limit) || 50),
+    Math.max(0, totalWorkItems - workItems.length),
+  );
 
   useEffect(() => {
     if (selectedId && !workItems.some((item) => text(item.id, "") === selectedId)) {
@@ -151,8 +165,8 @@ export function FabReviewWorkspace({
           </div>
           <span className="fab-result-count">
             {reviewFilter === "vendor_batches"
-              ? copy(`${visibleItems.length} vendor batches shown`, `${visibleItems.length} leveranciersbatches weergegeven`)
-              : copy(`${visibleItems.length} shown`, `${visibleItems.length} weergegeven`)}
+              ? copy(`${visibleItems.length} vendor batches in ${workItems.length} loaded`, `${visibleItems.length} leveranciersbatches in ${workItems.length} geladen`)
+              : copy(`${visibleItems.length} shown from ${workItems.length} loaded`, `${visibleItems.length} weergegeven van ${workItems.length} geladen`)}
           </span>
         </div>
       ) : null}
@@ -236,6 +250,28 @@ export function FabReviewWorkspace({
             <strong>{currentPage} / {pageCount}</strong>
             <button type="button" className="fab-icon-button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} aria-label={copy("Next review page", "Volgende controlepagina")} title={copy("Next page", "Volgende pagina")}><ChevronRight aria-hidden="true" /></button>
           </div>
+        </div>
+      )}
+
+      {hasMore && (
+        <div className="fab-pagination" aria-live="polite">
+          <span>{copy(
+            `${workItems.length} of ${totalWorkItems} document reviews loaded`,
+            `${workItems.length} van ${totalWorkItems} documentcontroles geladen`,
+          )}</span>
+          <button
+            type="button"
+            className="fab-secondary-button compact"
+            onClick={() => { void onLoadMore(); }}
+            disabled={loadingMore}
+          >
+            {loadingMore
+              ? <LoaderCircle className="is-spinning" aria-hidden="true" />
+              : <ListPlus aria-hidden="true" />}
+            {loadingMore
+              ? copy("Loading reviews", "Controles laden")
+              : copy(`Load next ${nextBatchSize}`, `Volgende ${nextBatchSize} laden`)}
+          </button>
         </div>
       )}
 

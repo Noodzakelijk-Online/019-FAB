@@ -26,11 +26,11 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 019 Audit logging and event history | Implemented | Persistent audit events across decisions and controls. |
 | 020 User-facing dashboard and next-action design | Implemented | Operator control center with blockers and next actions. |
 | 021 Forms, validation, and autosave behavior | Partial | Validation is wired; universal draft autosave is not implemented. |
-| 022 Search, filters, sorting, and pagination | Partial | Dashboard search/filtering and bounded API limits exist; not every table paginates. |
+| 022 Search, filters, sorting, and pagination | Partial | The review queue now pages complete document groups on the server and incrementally loads the entire filtered-open queue while preserving client triage/search over loaded records. Existing exception and delivery pagination remain; not every low-volume table paginates. |
 | 023 Import and export workflows | Implemented | File/provider intake and approval-gated exports. |
 | 024 Templates, presets, and reusable user defaults | Partial | Rules/mappings/preferences exist; broader reusable presets remain. |
 | 025 AI/provider abstraction and deterministic fallback | Implemented | OCR/category providers with deterministic rules and review fallback. |
-| 026 Human review queue and approval gates | Implemented | Review workspace, corrections, routing/export approvals. |
+| 026 Human review queue and approval gates | Implemented | Review workspace, corrections, routing/export approvals, complete document-group paging, and queue-wide posting/evidence safety totals. |
 | 027 Notifications and reminders | Implemented | Preferences, refresh, due/exception notifications. |
 | 028 Privacy controls and data deletion | Partial | Retention/export controls exist; end-user erasure workflow needs governance validation. |
 | 029 Security headers and web security | Implemented | Restrictive production CSP, conditional HTTPS HSTS, standard browser protections, request tracing, auth/sanitization, and real TCP/live header tests are wired; independent penetration testing remains a separate external gate. |
@@ -54,9 +54,9 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 047 File safety and path traversal tests | Implemented | Upload/intake/backup/provider credential path tests. |
 | 048 Provider failure simulation | Implemented | OAuth, API, rate, retry, ambiguous, and attachment failure tests. |
 | 049 Accessibility review | Partial | Semantic states and keyboard-native controls; full WCAG audit remains. |
-| 050 Responsive and browser compatibility | Partial | Prior connected Chrome desktop/narrow screenshots passed; current-source in-app Browser desktop/narrow DOM, navigation, cloud state, and error checks passed. The current screenshot service returned blank frames and a broad browser/device matrix remains. |
-| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, lazy OCR/ML loading, bounded backup/review projections, and short single-flight coalescing are verified. Real used-process memory and hot/cold endpoint timings are recorded; sustained multi-day host load testing remains. |
-| 052 Large dataset and pagination testing | Partial | Bounded batch/limit tests exist; sustained production-scale test remains. |
+| 050 Responsive and browser compatibility | Partial | Prior connected Chrome desktop/narrow screenshots passed. Current-source in-app Browser QA exercised the live 119-document review queue at desktop and responsive breakpoints with no horizontal/control-text overflow and no new console errors; the responsive screenshot capture remained blank and a broad browser/device matrix remains. |
+| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, lazy OCR/ML loading, bounded backup/review projections, and short single-flight coalescing are verified. Review continuation pages skip queue-wide summary and category-catalog recomputation and use a composite status/document/order index. Real used-process memory and hot/cold endpoint timings are recorded; sustained multi-day host load testing remains. |
+| 052 Large dataset and pagination testing | Partial | Review paging has complete-group boundary tests and live `50 -> 100 -> 119` acceptance; bounded batch/limit tests cover other queues. Sustained production-scale testing remains. |
 | 053 Backup and restore procedures | Implemented | Source-complete recovery packages and confirmation-gated restore. |
 | 054 Data reconciliation and repair commands | Implemented | Reconciliation, reprocessing, recovery, and close-readiness services. |
 | 055 Product analytics local-first design | Partial | Operational aggregate metrics exist; no product telemetry pipeline is enabled. |

@@ -174,7 +174,7 @@ export function FabControlOverview({
       value: metric(pendingReviewDocuments, lang),
       detail: pendingReview === null
         ? copy("Decision count unavailable", "Aantal beslissingen niet beschikbaar")
-        : `${pendingReview} ${copy(pendingReview === 1 ? "open decision" : "open decisions", pendingReview === 1 ? "open beslissing" : "open beslissingen")}${oldestReview === null ? "" : ` · ${copy("oldest", "oudste")} ${oldestReview}u`}`,
+        : `${pendingReview} ${copy(pendingReview === 1 ? "open decision" : "open decisions", pendingReview === 1 ? "open beslissing" : "open beslissingen")}${oldestReview === null ? "" : ` | ${copy("oldest", "oudste")} ${oldestReview}${copy("h", "u")}`}`,
       icon: FileSearch,
       tone: pendingReviewDocuments !== null && pendingReviewDocuments > 0 ? "warn" as const : "good" as const,
       resource: reviewResource || metricResource,

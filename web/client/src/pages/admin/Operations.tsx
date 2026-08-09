@@ -20,7 +20,7 @@ import { FabReviewWorkspace, type FabReviewResolution } from "@/components/fab/F
 import { FabWaveReceiptExecutorDrawer } from "@/components/fab/FabWaveReceiptExecutorDrawer";
 import { FabWaveSetupDrawer, type FabWaveSetupSaveInput } from "@/components/fab/FabWaveSetupDrawer";
 import type { FabCommandId, FabRecord } from "@/components/fab/fabView";
-import { asRecord, count, humanize, text } from "@/components/fab/fabView";
+import { asRecord, count, humanize, records, text } from "@/components/fab/fabView";
 import { useFabLocale } from "@/components/fab/fabLocale";
 import { trpc } from "@/lib/trpc";
 import "@/components/fab/fab-operator.css";
@@ -58,7 +58,11 @@ export default function AdminOperations() {
   const [commandStartedAt, setCommandStartedAt] = useState<string | null>(null);
   const [lastCommand, setLastCommand] = useState<CompletedCommand | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [reviewWorkItems, setReviewWorkItems] = useState<FabRecord[]>([]);
+  const [reviewPagination, setReviewPagination] = useState<FabRecord>({});
+  const [loadingMoreReviews, setLoadingMoreReviews] = useState(false);
   const isAdmin = user?.role === "admin";
+  const utils = trpc.useUtils();
   const operatorAccess = trpc.fab.access.useQuery(undefined, {
     retry: false,
     refetchOnWindowFocus: false,
@@ -244,6 +248,34 @@ export default function AdminOperations() {
   const connected = Boolean(data?.connection.connected);
 
   useEffect(() => {
+    setReviewWorkItems(data?.reviews.workItems || []);
+    setReviewPagination(data?.reviews.pagination || {});
+  }, [data?.connection.checkedAt, data?.reviews.pagination, data?.reviews.workItems]);
+
+  const loadMoreReviews = useCallback(async () => {
+    if (loadingMoreReviews || reviewPagination.hasMore !== true) return;
+    const nextOffset = count(reviewPagination.nextOffset);
+    const limit = Math.max(1, count(reviewPagination.limit) || 50);
+    setLoadingMoreReviews(true);
+    try {
+      const page = await utils.fab.reviewPage.fetch({ offset: nextOffset, limit });
+      const nextItems = records(page.workItems);
+      setReviewWorkItems((current) => {
+        const merged = new Map(current.map((item) => [text(item.id), item]));
+        nextItems.forEach((item) => merged.set(text(item.id), item));
+        return Array.from(merged.values());
+      });
+      setReviewPagination(asRecord(page.pagination));
+    } catch (error) {
+      toast.error(error instanceof Error
+        ? error.message
+        : copy("More reviews could not be loaded.", "Meer controles konden niet worden geladen."));
+    } finally {
+      setLoadingMoreReviews(false);
+    }
+  }, [copy, loadingMoreReviews, reviewPagination, utils.fab.reviewPage]);
+
+  useEffect(() => {
     document.documentElement.classList.add("fab-operator-active");
     return () => document.documentElement.classList.remove("fab-operator-active");
   }, []);
@@ -355,14 +387,17 @@ export default function AdminOperations() {
             onOpenReviews={() => document.getElementById("review-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" })}
           />}
           <FabReviewWorkspace
-            workItems={data?.reviews.workItems || []}
+            workItems={reviewWorkItems}
             categoryOptions={data?.reviews.categoryOptions || []}
             summary={data?.reviews.summary || {}}
+            pagination={reviewPagination}
             resource={data?.resourceStates.reviewQueue}
             search={search}
             localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
             resolvingReviewId={resolveReview.isPending ? resolveReview.variables?.reviewItemId || null : null}
             onResolve={resolveReviewItem}
+            loadingMore={loadingMoreReviews}
+            onLoadMore={loadMoreReviews}
           />
           <FabOperationsPanels
             recovery={data?.recovery || {}}

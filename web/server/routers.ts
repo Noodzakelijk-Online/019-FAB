@@ -91,6 +91,7 @@ import {
   createFabBackup,
   createFabSupportBundle,
   getFabControlCenter,
+  getFabReviewPage,
   resolveFabReviewItem,
   runFabOperatorCommand,
   saveFabWaveSetup,
@@ -441,6 +442,12 @@ export const appRouter = router({
       operatorLabel: ctx.user?.name || ctx.user?.email || "Local operator",
     })),
     controlCenter: fabOperatorProcedure.query(async () => getFabControlCenter()),
+    reviewPage: fabOperatorProcedure
+      .input(z.object({
+        offset: z.number().int().min(0).max(10_000_000),
+        limit: z.number().int().min(1).max(100).optional(),
+      }).strict())
+      .query(async ({ input }) => getFabReviewPage(input)),
     createBackup: fabOperatorProcedure
       .mutation(async ({ ctx }) => createFabBackup(
         ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",

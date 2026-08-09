@@ -6,6 +6,7 @@ import {
   getFabBrowserApiBaseUrl,
   getFabControlCenter,
   getFabLocalApiBaseUrl,
+  getFabReviewPage,
   resetFabControlCenterCacheForTests,
   resolveFabReviewItem,
   runFabOperatorCommand,
@@ -68,6 +69,72 @@ describe("FAB local API gateway", () => {
 
     expect(result).toEqual({ status: "ok" });
     expect(JSON.stringify(result)).not.toContain("private-token");
+  });
+
+  it("loads a bounded review page and projects only dashboard fields", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe("/api/review");
+      expect(url.searchParams.get("status")).toBe("open");
+      expect(url.searchParams.get("offset")).toBe("0");
+      expect(url.searchParams.get("limit")).toBe("100");
+      expect(url.searchParams.get("view")).toBe("summary");
+      expect(url.searchParams.get("includeSummary")).toBe("false");
+      expect(url.searchParams.get("includeCategoryOptions")).toBe("false");
+      return new Response(JSON.stringify({
+        workItems: [{
+          id: "document-7",
+          documentId: 7,
+          document: { filename: "receipt.pdf", privateMetadata: "omit" },
+          reviewItems: [{ id: 9, reason: "manual_review", correctedData: { secret: true } }],
+        }],
+        categoryOptions: ["Office Supplies"],
+        summary: {
+          workItems: 119,
+          documents: 118,
+          postingBlockedDocuments: 117,
+          oldestReviewCreatedAt: "2026-01-01T00:00:00Z",
+          privateSummary: "omit",
+        },
+        pagination: {
+          scope: "work_items",
+          offset: 0,
+          limit: 100,
+          returned: 1,
+          total: 119,
+          hasMore: true,
+          nextOffset: 100,
+          privateCursor: "omit",
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getFabReviewPage({ offset: -25, limit: 500 });
+
+    expect(result.pagination).toEqual({
+      scope: "work_items",
+      offset: 0,
+      limit: 100,
+      returned: 1,
+      total: 119,
+      hasMore: true,
+      nextOffset: 100,
+    });
+    expect(result.summary).toMatchObject({
+      workItems: 119,
+      documents: 118,
+      postingBlockedDocuments: 117,
+      oldestReviewCreatedAt: "2026-01-01T00:00:00Z",
+    });
+    expect(result.workItems[0]).toMatchObject({
+      id: "document-7",
+      documentId: 7,
+      document: { filename: "receipt.pdf" },
+      reviewItems: [{ id: 9, reason: "manual_review" }],
+    });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain("secret");
   });
 
   it("creates a sanitized support bundle through the local API", async () => {
@@ -356,6 +423,19 @@ describe("FAB local API gateway", () => {
           evidenceOnlyDocuments: 1,
           evidenceOnlyReviewItems: 1,
           duplicateCandidates: 0,
+          workItems: 2,
+          oldestReviewCreatedAt: "2026-01-01T00:00:00Z",
+          newestReviewCreatedAt: "2026-07-24T09:00:00Z",
+        },
+        pagination: {
+          scope: "work_items",
+          offset: 0,
+          limit: 50,
+          returned: 1,
+          total: 2,
+          hasMore: true,
+          nextOffset: 1,
+          previousOffset: null,
         },
         categoryOptions: ["Operations | Office Supplies"],
         workItems: [{
@@ -463,7 +543,7 @@ describe("FAB local API gateway", () => {
       highPriorityExceptions: 1,
       ledgerReadyForApproval: 2,
     });
-    expect(result.decisionContext.oldestReviewAgeHours).toBeGreaterThan(0);
+    expect(result.decisionContext.oldestReviewAgeHours).toBeGreaterThan(1_000);
     expect(result.connections).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "google_drive", canSync: true, nextAction: "Sync the approved folder." }),
       expect.objectContaining({
@@ -586,6 +666,16 @@ describe("FAB local API gateway", () => {
         evidenceOnlyDocuments: 1,
       },
       categoryOptions: ["Operations | Office Supplies"],
+      pagination: {
+        scope: "work_items",
+        offset: 0,
+        limit: 50,
+        returned: 1,
+        total: 2,
+        hasMore: true,
+        nextOffset: 1,
+        previousOffset: null,
+      },
       workItems: [expect.objectContaining({
         documentId: 7,
         document: expect.objectContaining({
@@ -655,7 +745,8 @@ describe("FAB local API gateway", () => {
     expect(fetchMock.mock.calls.some(([input]) => {
       const url = new URL(String(input));
       return url.pathname === "/api/review"
-        && url.searchParams.get("limit") === "200"
+        && url.searchParams.get("limit") === "50"
+        && url.searchParams.get("offset") === "0"
         && url.searchParams.get("view") === "summary";
     })).toBe(true);
     const serialized = JSON.stringify(result);

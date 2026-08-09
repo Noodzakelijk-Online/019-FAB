@@ -75,6 +75,7 @@ export type FabControlCenter = {
     workItems: JsonRecord[];
     categoryOptions: string[];
     summary: JsonRecord;
+    pagination: JsonRecord;
   };
   gmailAuthorization: JsonRecord;
   driveAuthorization: JsonRecord;
@@ -123,7 +124,7 @@ const MAX_CONCURRENT_READS = 4;
 const READ_PATHS = {
   backups: "/api/backups?limit=5&verify=false",
   autonomy: "/api/autonomy/plan?limit=25",
-  reviewQueue: "/api/review?status=open&limit=200&view=summary",
+  reviewQueue: "/api/review?status=open&limit=50&offset=0&view=summary",
   exceptions: "/api/exceptions?limit=25&includeEntities=true",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&view=summary",
   health: "/api/health",
@@ -461,7 +462,7 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
         ? amountByCurrency(bankTransactions)
         : null,
       oldestReviewAgeHours: resourceStates.reviewQueue.state === "live" || resourceStates.reviewQueue.state === "stale"
-        ? oldestReviewAgeHours(reviewWorkItems, checkedAt)
+        ? reviewSummaryAgeHours(reviewSummary, checkedAt) ?? oldestReviewAgeHours(reviewWorkItems, checkedAt)
         : null,
       highPriorityExceptions: resourceStates.exceptions.state === "live" || resourceStates.exceptions.state === "stale"
         ? nullableNumber(asRecord(asRecord(exceptionsPayload.summary)?.bySeverity)?.high)
@@ -479,11 +480,7 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
       workOrders: arrayValue(resources.driveWaveWorkOrders?.workOrders).map(projectDeliveryWorkOrder),
       count: nullableNumber(resources.driveWaveWorkOrders?.count),
     },
-    reviews: {
-      workItems: arrayValue(resources.reviewQueue?.workItems).map(projectReviewWorkItem),
-      categoryOptions: stringArray(resources.reviewQueue?.categoryOptions),
-      summary: asRecord(resources.reviewQueue?.summary) || {},
-    },
+    reviews: projectReviewQueue(resources.reviewQueue),
     gmailAuthorization: resources.gmailAuthorization || {},
     driveAuthorization: resources.driveAuthorization || {},
     waveSetup,
@@ -718,6 +715,18 @@ export async function validateFabWaveSetup(
   }, { timeoutMs: 20_000 });
 }
 
+export async function getFabReviewPage(input: {
+  offset: number;
+  limit?: number;
+}): Promise<FabControlCenter["reviews"]> {
+  const offset = Math.max(0, Math.min(Math.trunc(input.offset), 10_000_000));
+  const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 50), 100));
+  const payload = await fabLocalRequest(
+    `/api/review?status=open&limit=${limit}&offset=${offset}&view=summary&includeSummary=false&includeCategoryOptions=false`,
+  );
+  return projectReviewQueue(payload);
+}
+
 export async function resolveFabReviewItem(input: {
   reviewItemId: number;
   status: "approved" | "rejected" | "resolved" | "ignored";
@@ -792,7 +801,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     autonomy: {},
     closeReadiness: {},
     delivery: { status: {}, summary: {}, workOrders: [], count: null },
-    reviews: { workItems: [], categoryOptions: [], summary: {} },
+    reviews: { workItems: [], categoryOptions: [], summary: {}, pagination: {} },
     gmailAuthorization: {},
     driveAuthorization: {},
     waveSetup: {},
@@ -1111,6 +1120,37 @@ function projectReviewWorkItem(value: JsonRecord): JsonRecord {
   };
 }
 
+function projectReviewQueue(value: unknown): FabControlCenter["reviews"] {
+  const payload = asRecord(value) || {};
+  return {
+    workItems: arrayValue(payload.workItems).map(projectReviewWorkItem),
+    categoryOptions: stringArray(payload.categoryOptions),
+    summary: selectFields(payload.summary, [
+      "categorySuggestions",
+      "documents",
+      "duplicateCandidates",
+      "evidenceOnlyDocuments",
+      "evidenceOnlyReviewItems",
+      "newestReviewCreatedAt",
+      "oldestReviewCreatedAt",
+      "postingBlockedDocuments",
+      "postingBlockedReviewItems",
+      "reviewItems",
+      "workItems",
+    ]),
+    pagination: selectFields(payload.pagination, [
+      "hasMore",
+      "limit",
+      "nextOffset",
+      "offset",
+      "previousOffset",
+      "returned",
+      "scope",
+      "total",
+    ]),
+  };
+}
+
 function selectFields(value: unknown, fields: string[]): JsonRecord {
   const source = asRecord(value);
   if (!source) return {};
@@ -1164,6 +1204,15 @@ function oldestReviewAgeHours(workItems: JsonRecord[], checkedAt: string): numbe
     });
   if (!timestamps.length) return null;
   return Math.max(0, Math.round((Date.parse(checkedAt) - Math.min(...timestamps)) / 3_600_000));
+}
+
+function reviewSummaryAgeHours(summary: JsonRecord, checkedAt: string): number | null {
+  const oldest = nullableString(summary.oldestReviewCreatedAt);
+  if (!oldest) return null;
+  const oldestTimestamp = Date.parse(oldest);
+  const checkedTimestamp = Date.parse(checkedAt);
+  if (Number.isNaN(oldestTimestamp) || Number.isNaN(checkedTimestamp)) return null;
+  return Math.max(0, Number(((checkedTimestamp - oldestTimestamp) / 3_600_000).toFixed(1)));
 }
 
 function waveSetupNextAction(status: string): string {
