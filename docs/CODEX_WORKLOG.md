@@ -11,6 +11,7 @@
 - Removed the dummy tax-export method rather than allowing an unverified file to resemble a statutory filing.
 - Closed child-process streams in the Windows worker ownership test after the focused run exposed a `ResourceWarning`.
 - Final verification passed 771 backend tests with three optional-runtime skips, 163 dashboard tests, TypeScript checking, production build budgets, dependency/peer audits, Python compilation, PowerShell parsing, Compose configuration, authenticated Windows API/dashboard/HAI acceptance, and worker ownership rejection. No provider operation or financial source file was changed.
+- Implementation commit `e58e1b6` is on `origin/main`; GitHub Actions run `31316715894` passed the frontend, Linux backend, and all four Windows backend jobs.
 
 ## 2026-08-09 - Release safety and unsupported entrypoint retirement
 
