@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -27,6 +28,7 @@ SECRET_MARKERS = ("token", "secret", "password", "api_key", "client_secret", "cr
 MAX_RUNTIME_METADATA_BYTES = 64 * 1024
 MAX_RUNTIME_IDENTITY_BYTES = 32 * 1024
 RUNTIME_IDENTITY_CACHE_SECONDS = 2.0
+DEPENDENCY_CACHE_SECONDS = 5.0
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -135,12 +137,15 @@ class LocalReadinessService:
         self._runtime_cache_signature: Optional[tuple] = None
         self._runtime_cache_checked_at = 0.0
         self._runtime_cache_dashboard_url = ""
+        self._dependency_cache_lock = threading.Lock()
+        self._dependency_cache_checked_at = 0.0
+        self._dependency_cache: Optional[List[Dict[str, Any]]] = None
 
     def summarize(self) -> Dict[str, Any]:
         dependencies = self._dependencies()
         paths = self._paths()
         credentials = self._credentials()
-        sources = self._sources(credentials, paths)
+        sources = self._sources(credentials, paths, dependencies)
         security = self._security()
         local_access = self._local_access(security)
         issues = self._issues(dependencies, paths, credentials, sources, security)
@@ -172,6 +177,19 @@ class LocalReadinessService:
         }
 
     def _dependencies(self) -> List[Dict[str, Any]]:
+        now = time.monotonic()
+        with self._dependency_cache_lock:
+            if (
+                self._dependency_cache is not None
+                and now - self._dependency_cache_checked_at < DEPENDENCY_CACHE_SECONDS
+            ):
+                return copy.deepcopy(self._dependency_cache)
+            dependencies = self._discover_dependencies()
+            self._dependency_cache = copy.deepcopy(dependencies)
+            self._dependency_cache_checked_at = now
+            return dependencies
+
+    def _discover_dependencies(self) -> List[Dict[str, Any]]:
         tesseract_cmd = str(_config_value(self.config, "tesseract_cmd", "ocr_tesseract_cmd", default="tesseract"))
         tesseract_resolved = resolve_tesseract_command(self.config)
         configured_languages = configured_tesseract_languages(self.config)
@@ -364,9 +382,14 @@ class LocalReadinessService:
             _credential_value("api_token", "FAB local API token", self.config, "fab_local_api_token", "fab_operations_api_token", "operations_api_token", "operations.api_token", "api_token"),
         ]
 
-    def _sources(self, credentials: List[Dict[str, Any]], paths: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _sources(
+        self,
+        credentials: List[Dict[str, Any]],
+        paths: Dict[str, Any],
+        dependency_items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         credential_map = {item["id"]: item for item in credentials}
-        dependencies = {item["id"]: item for item in self._dependencies()}
+        dependencies = {item["id"]: item for item in dependency_items}
         return [
             _source_status(
                 "local_folder",

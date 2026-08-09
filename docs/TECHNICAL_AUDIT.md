@@ -77,6 +77,13 @@ Audit date: 2026-08-09
   metadata is accepted only after a bounded direct loopback identity probe
   proves the service, checkout, routes, and exact API origin; a short
   signature-bound cache avoids repeated probes under dashboard refresh load.
+- Removed duplicate dependency discovery inside readiness summaries and the
+  per-route readiness-service lifecycle that defeated caching. All API,
+  dashboard, HAI, autonomy, recovery, doctor, and support paths now share one
+  app-owned service. Its thread-safe five-second dependency cache returns deep
+  copies and preserves prompt change detection. One hundred live authenticated
+  settings reads improved from 39.41 ms median / 54.81 ms p95 to 2.48 ms /
+  3.02 ms after the production restart.
 
 ## Remaining risks
 

@@ -11,6 +11,76 @@ from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalReadinessService(unittest.TestCase):
+    def test_summary_reuses_one_dependency_snapshot_for_source_readiness(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LocalReadinessService(
+                {},
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                api_host="127.0.0.1",
+                api_port=5001,
+                api_token_configured=False,
+                intake_paths=[],
+                intake_extensions=[],
+                instance_root=temp_dir,
+            )
+
+            with patch.object(service, "_dependencies", wraps=service._dependencies) as dependency_scan:
+                summary = service.summarize()
+
+            self.assertEqual(dependency_scan.call_count, 1)
+            self.assertTrue(any(item["id"] == "tesseract_ocr" for item in summary["sources"]))
+
+    def test_dependency_discovery_cache_is_bounded_and_returns_independent_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = LocalReadinessService(
+                {},
+                ledger_path=os.path.join(temp_dir, "fab.sqlite3"),
+                api_host="127.0.0.1",
+                api_port=5001,
+                api_token_configured=False,
+                intake_paths=[],
+                intake_extensions=[],
+                instance_root=temp_dir,
+            )
+
+            with (
+                patch("src.operations.local_readiness.time.monotonic", side_effect=[100.0, 101.0, 106.0]),
+                patch.object(service, "_discover_dependencies", wraps=service._discover_dependencies) as discovery,
+            ):
+                first = service.summarize()
+                first["dependencies"][0]["status"] = "mutated-by-caller"
+                cached = service.summarize()
+                refreshed = service.summarize()
+
+            self.assertEqual(discovery.call_count, 2)
+            self.assertEqual(cached["dependencies"][0]["status"], "ok")
+            self.assertEqual(refreshed["dependencies"][0]["status"], "ok")
+
+    def test_api_routes_share_the_app_owned_readiness_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_intake_paths": temp_dir,
+            })
+            client = app.test_client()
+            readiness = app.extensions["fab_readiness_service"]
+            support = app.extensions["fab_support_bundle_service"]
+
+            with patch.object(
+                readiness,
+                "_discover_dependencies",
+                wraps=readiness._discover_dependencies,
+            ) as discovery:
+                first = client.get("/api/settings")
+                second = client.get("/api/settings")
+                doctor = client.get("/api/doctor")
+
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(doctor.status_code, 200)
+            self.assertEqual(discovery.call_count, 1)
+            self.assertIs(support.readiness, readiness)
+
     def test_readiness_reports_sources_and_redacts_secret_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             intake_dir = os.path.join(temp_dir, "sort-out")

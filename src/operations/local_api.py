@@ -3930,6 +3930,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     ledger = LocalOperationsLedger(ledger_path)
     instance_id = local_instance_id(Path(__file__).resolve().parents[2])
     app = Flask(__name__)
+    readiness_service = _readiness_service(
+        config,
+        ledger_path,
+        host,
+        bool(token),
+        intake_paths,
+        intake_extensions,
+    )
+    support_bundle_service = LocalSupportBundleService(ledger, config, readiness_service)
+    app.extensions["fab_readiness_service"] = readiness_service
+    app.extensions["fab_support_bundle_service"] = support_bundle_service
     app.config["FAB_GMAIL_AUTH"] = LocalGmailAuthorizationCoordinator(ledger, config)
     app.config["FAB_GOOGLE_DRIVE_AUTH"] = LocalGoogleDriveAuthorizationCoordinator(ledger, config)
     app.config["FAB_LOCAL_LEDGER_PATH"] = ledger_path
@@ -4142,7 +4153,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     def build_health_payload(issue_limit: int) -> Dict[str, Any]:
         operations_health = LocalOperationsHealth(ledger, config).summarize(issue_limit=issue_limit)
-        readiness = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions).compact()
+        readiness = readiness_service.compact()
         wave_setup = LocalWaveSetupService(config).status(ledger, "waveapps_business")
         wave_activation = wave_setup.get("activation") if isinstance(wave_setup.get("activation"), dict) else {}
         core_target = {
@@ -4249,7 +4260,6 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         notification_summary = notification_service.summary()
         notification_preferences = ledger.list_notification_preferences(limit=100)
         exceptions = LocalExceptionQueueService(ledger, config).list_exceptions(limit=50)
-        readiness_service = _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions)
         readiness = readiness_service.summarize()
         autonomy_plan = _autonomy_service(
             ledger,
@@ -4326,7 +4336,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         workflow_recovery_service = _workflow_recovery_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         )
@@ -4565,15 +4575,6 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify(ledger.dashboard_metrics())
 
     def hai_connector() -> LocalHaiConnector:
-        readiness = _readiness_service(
-            config,
-            ledger_path,
-            host,
-            bool(token),
-            intake_paths,
-            intake_extensions,
-        )
-
         def rescan_intake_command(payload: Dict[str, Any], actor: str) -> Dict[str, Any]:
             del payload, actor
             if not intake_paths:
@@ -4613,7 +4614,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return _autonomy_service(
                 ledger,
                 config,
-                readiness,
+                readiness_service,
                 intake_paths,
                 intake_extensions,
             ).run_cycle(
@@ -4634,7 +4635,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             return _workflow_recovery_scheduler(
                 ledger,
                 config,
-                readiness,
+                readiness_service,
                 intake_paths,
                 intake_extensions,
             ).run_due(
@@ -4940,7 +4941,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify(_workflow_recovery_scheduler(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).plan(limit=_limit_arg()))
@@ -4951,7 +4952,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         result = _workflow_recovery_scheduler(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).run_due(
@@ -4965,7 +4966,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         result = _workflow_recovery_scheduler(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).run_due(actor="local_user", limit=5)
@@ -4985,7 +4986,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         recovery_plan = _workflow_recovery_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).plan(workflow_run_id)
@@ -4997,7 +4998,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         result = _workflow_recovery_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).retry(
@@ -5018,7 +5019,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         result = _workflow_recovery_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).retry(workflow_run_id, actor="local_user", limit=25)
@@ -5393,39 +5394,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
 
     @app.get("/api/settings")
     def settings():
-        return jsonify(_readiness_service(
-            config,
-            ledger_path,
-            host,
-            bool(token),
-            intake_paths,
-            intake_extensions,
-        ).summarize())
+        return jsonify(readiness_service.summarize())
 
     @app.get("/api/doctor")
     def doctor():
-        readiness = _readiness_service(
-            config,
-            ledger_path,
-            host,
-            bool(token),
-            intake_paths,
-            intake_extensions,
-        )
-        return jsonify(LocalSupportBundleService(ledger, config, readiness).doctor())
+        return jsonify(support_bundle_service.doctor())
 
     @app.post("/api/support-bundles")
     def create_support_bundle():
         payload = request.get_json(silent=True) or {}
-        readiness = _readiness_service(
-            config,
-            ledger_path,
-            host,
-            bool(token),
-            intake_paths,
-            intake_extensions,
-        )
-        result = LocalSupportBundleService(ledger, config, readiness).create(
+        result = support_bundle_service.create(
             actor=str(payload.get("actor") or "fab_local_api")[:200],
             note=str(payload.get("note") or "")[:500],
         )
@@ -5440,7 +5418,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         return jsonify(_autonomy_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).plan(
@@ -5459,7 +5437,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         result = _autonomy_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).run_cycle(
@@ -5514,7 +5492,7 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         session["fab_last_autonomy_summary"] = _autonomy_service(
             ledger,
             config,
-            _readiness_service(config, ledger_path, host, bool(token), intake_paths, intake_extensions),
+            readiness_service,
             intake_paths,
             intake_extensions,
         ).run_cycle(
