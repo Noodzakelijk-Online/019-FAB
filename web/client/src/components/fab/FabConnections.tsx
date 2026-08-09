@@ -34,6 +34,7 @@ const connectorIcons: Record<string, typeof Cloud> = {
   mijngeldzaken: Landmark,
   banking_api: CircleDollarSign,
   hai: Bot,
+  ngrok_cloud: Cloud,
 };
 
 type FabConnectionsProps = {
@@ -51,7 +52,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
   const visibleConnections = connections.filter((item) => matchesSearch(item, search));
   const syncableConnections = connections.filter((item) => item.canSync === true);
   const activeConnections = connections.filter((item) => !["disabled", "not_configured"].includes(text(item.status)));
-  const readyCount = activeConnections.filter((item) => text(item.status) === "ready").length;
+  const readyCount = activeConnections.filter((item) => item.ready === true || text(item.status) === "ready").length;
   const setupCount = activeConnections.length - readyCount;
   const state = panelState(resource, connections.length);
 
@@ -61,7 +62,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
         <div><span>{copy("Source and downstream controls", "Bron- en vervolgkoppelingen")}</span><h2>{copy("Connections", "Koppelingen")}</h2></div>
         <div className="fab-connection-heading-actions">
           <FabDataStatus resource={resource} state={state} />
-          <span className={`fab-status-chip tone-${setupCount === 0 ? "good" : "warn"}`}>{resource?.state === "live" || resource?.state === "stale" ? `${readyCount} ${copy("ready", "gereed")}${setupCount ? ` · ${setupCount} ${copy("setup", "instellen")}` : ""}` : `- ${copy("ready", "gereed")}`}</span>
+          <span className={`fab-status-chip tone-${setupCount === 0 ? "good" : "warn"}`}>{resource?.state === "live" || resource?.state === "stale" ? `${readyCount} ${copy("ready", "gereed")}${setupCount ? ` / ${setupCount} ${copy("setup", "instellen")}` : ""}` : `- ${copy("ready", "gereed")}`}</span>
           {syncableConnections.length ? (
             <button className="fab-secondary-button compact" onClick={() => onCommand("sync_sources")} disabled={commandPending}>
               <RefreshCw aria-hidden="true" /> {copy("Sync sources", "Bronnen synchroniseren")}
@@ -80,7 +81,7 @@ export function FabConnections({ connections, search, commandPending, resource, 
           const Icon = connectorIcons[id] || Database;
           const status = text(connection.status, connection.ready ? "ready" : connection.configured ? "attention" : "not_configured");
           const canSync = connection.canSync === true && ["gmail", "google_drive", "google_photos", "freshdesk"].includes(id);
-          const ready = status === "ready";
+          const ready = connection.ready === true || status === "ready";
           const setupTarget = connectionSetupTarget(id, localApiEndpoint);
           const connectorProfile = connection.connectorProfile && typeof connection.connectorProfile === "object"
             ? connection.connectorProfile as FabRecord
@@ -131,6 +132,8 @@ function connectionSetupTarget(id: string, endpoint: string): string {
           ? "reconciliation"
           : id === "hai"
             ? "api/hai/manifest"
+            : id === "ngrok_cloud"
+              ? "api/cloud/status"
             : "settings";
   return anchor.startsWith("api/") ? `${endpoint}/${anchor}` : `${endpoint}/#${anchor}`;
 }

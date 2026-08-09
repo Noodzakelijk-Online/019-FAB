@@ -13,10 +13,10 @@ FAB is local-first. The supported Windows runtime is the authenticated API, auto
 .\Start-FAB.ps1 -NoBrowser
 ```
 
-5. Run the sanitized readiness check:
+5. Run the sanitized readiness check with FAB's isolated runtime:
 
 ```powershell
-python -m src.run_fab_doctor
+.\.venv\Scripts\python.exe -m src.run_fab_doctor
 ```
 
 The first start installs the local Python requirements into `.venv` and the dashboard packages into `web/node_modules` when they are absent. The launcher prints the selected URLs. Defaults are:
@@ -28,6 +28,36 @@ The first start installs the local Python requirements into `.venv` and the dash
 
 API clients use `Authorization: Bearer <token>`. The API runs under Waitress with bounded threads; the worker and dashboard are separate managed processes. `Stop-FAB.ps1` stops only the FAB instance recorded for this checkout.
 
+## Managed ngrok access
+
+The managed launcher exposes only the authenticated FAB API. The operator dashboard remains on loopback. Start FAB first, configure ngrok for the Windows user, and then run:
+
+```powershell
+.\Start-FAB-Ngrok.cmd
+```
+
+When another ngrok endpoint is already online, FAB refuses to stop or pool it. Reserve a separate HTTPS endpoint for FAB and pass its clean origin explicitly:
+
+```powershell
+.\Start-FAB-Ngrok.cmd -Url https://your-reserved-endpoint.example
+```
+
+Startup succeeds only after all of these checks pass:
+
+- the local API belongs to this checkout and requires a strong bearer token;
+- an unauthenticated remote `/api/live` request receives `401`;
+- authenticated liveness returns this checkout's FAB instance identity;
+- the authenticated HAI manifest is available remotely;
+- the private ngrok inspector shows the exact endpoint forwarding to FAB's loopback API.
+
+The dashboard connection panel and authenticated `GET /api/cloud/status` report `active` only while that owned runtime remains verifiable. Stop the endpoint with:
+
+```powershell
+.\Stop-FAB-Ngrok.cmd
+```
+
+`Stop-FAB.cmd` also stops the managed tunnel before the local API. Both stop paths require the recorded project identity, ngrok PID, `fab-managed` command marker, and private overlay path to match, so a stale PID cannot stop another process.
+
 ## Temporary ngrok verification
 
 Start FAB locally, configure ngrok for the Windows user, then run:
@@ -36,7 +66,7 @@ Start FAB locally, configure ngrok for the Windows user, then run:
 .\Test-FAB-Ngrok.ps1
 ```
 
-The verifier creates an isolated temporary agent, exposes only the local API port, proves an unauthenticated request receives `401`, proves an authenticated `/api/live` request succeeds, and then removes its temporary files and endpoint.
+The verifier creates an isolated temporary agent, exposes only the local API port, proves an unauthenticated request receives `401`, verifies authenticated liveness and the HAI manifest, and then removes its temporary files and endpoint. It uses FAB's isolated Python runtime and leaves no persistent cloud status.
 
 If the ngrok account requires a second reserved endpoint, supply it explicitly:
 
@@ -44,12 +74,12 @@ If the ngrok account requires a second reserved endpoint, supply it explicitly:
 .\Test-FAB-Ngrok.ps1 -Url https://your-reserved-endpoint.example
 ```
 
-`ERR_NGROK_334` means the account already has an endpoint online. Do not stop or pool an unrelated endpoint; reserve a separate FAB endpoint and rerun with `-Url`.
+`ERR_NGROK_334` means the account already has an endpoint online. Do not stop or pool an unrelated endpoint; reserve a separate FAB endpoint and rerun with `-Url`. Both the managed launcher and verifier now detect the common local conflict before starting another agent.
 
 ## Exposure rules
 
 - Never expose FAB without a strong API token.
 - Keep the API and dashboard listeners on loopback unless an explicitly reviewed reverse proxy is used.
 - Do not put credentials, document identifiers, or tokens in a public URL.
-- Treat ngrok as temporary supervised access, not as production hosting or provider acceptance.
-- Stop the temporary tunnel when verification finishes.
+- Treat ngrok as supervised remote access, not as provider acceptance or a substitute for monitored production hosting.
+- Stop managed access when it is not needed. Temporary verification stops itself.

@@ -11,13 +11,18 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $runtimePath = Join-Path $root "data\fab-runtime.json"
 $mainConfig = Join-Path $env:LOCALAPPDATA "ngrok\ngrok.yml"
 $ngrok = Get-Command ngrok -ErrorAction Stop
-$python = Get-Command python -ErrorAction Stop
+$venvPython = Join-Path $root ".venv\Scripts\python.exe"
+
+Set-Location -LiteralPath $root
 
 if (-not (Test-Path -LiteralPath $runtimePath)) {
     throw "FAB is not running. Start it with Start-FAB.cmd first."
 }
 if (-not (Test-Path -LiteralPath $mainConfig)) {
     throw "ngrok is not configured for this Windows user."
+}
+if (-not (Test-Path -LiteralPath $venvPython)) {
+    throw "FAB's isolated Python runtime is missing. Run Start-FAB.cmd first."
 }
 
 $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
@@ -28,16 +33,39 @@ if ($apiUri.Host -notin @("127.0.0.1", "localhost", "::1")) {
 }
 if ($Url) {
     $requestedUrl = [System.Uri]$Url
-    if ($requestedUrl.Scheme -ne "https" -or -not $requestedUrl.Host) {
-        throw "-Url must be a complete HTTPS ngrok endpoint."
+    if (
+        -not $requestedUrl.IsAbsoluteUri -or
+        $requestedUrl.Scheme -ne "https" -or
+        -not $requestedUrl.Host -or
+        $requestedUrl.UserInfo -or
+        $requestedUrl.AbsolutePath -ne "/" -or
+        $requestedUrl.Query -or
+        $requestedUrl.Fragment
+    ) {
+        throw "-Url must be a complete HTTPS origin without credentials, path, query, or fragment."
     }
+    $Url = $requestedUrl.GetLeftPart([System.UriPartial]::Authority)
 }
 
-$apiToken = & $python.Source -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
+$apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
 if ($LASTEXITCODE -ne 0 -or ([string]$apiToken).Length -lt 32) {
     throw "Configure a strong FAB API token before using ngrok."
 }
 $apiToken = [string]$apiToken
+
+if (-not $Url) {
+    try {
+        $sharedInspector = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 2
+        if (@($sharedInspector.tunnels).Count -gt 0) {
+            throw "Another ngrok endpoint is already active. Reserve a separate FAB HTTPS endpoint and rerun with -Url. FAB will not stop or pool the existing endpoint."
+        }
+    }
+    catch {
+        if ($_.Exception.Message -like "Another ngrok endpoint is already active*") {
+            throw
+        }
+    }
+}
 
 function Find-AvailableLoopbackPort {
     param([int]$StartPort)
@@ -124,6 +152,7 @@ try {
         $reason = if ($process.HasExited) {
             $process.WaitForExit()
             $process.Refresh()
+            $exitCode = if ($null -eq $process.ExitCode) { "unknown" } else { [string]$process.ExitCode }
             $diagnostic = @(
                 Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue
                 Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue
@@ -135,7 +164,7 @@ try {
             else {
                 "no classified agent diagnostic was emitted"
             }
-            "ngrok exited with code $($process.ExitCode): $classified"
+            "ngrok exited with code $exitCode`: $classified"
         }
         else {
             "the temporary endpoint did not become ready"
@@ -159,10 +188,15 @@ try {
         -Uri $liveUrl `
         -Headers @{ Authorization = "Bearer $apiToken" } `
         -TimeoutSec 20
+    $manifest = Invoke-RestMethod `
+        -Uri "$($tunnel.public_url)/api/hai/manifest" `
+        -Headers @{ Authorization = "Bearer $apiToken" } `
+        -TimeoutSec 20
     if (
         $unauthorizedStatus -ne 401 -or
         [string]$authorized.status -ne "ok" -or
-        -not [bool]$authorized.authRequired
+        -not [bool]$authorized.authRequired -or
+        [string]$manifest.version -ne "fab-hai-connector-v1"
     ) {
         throw "FAB ngrok authentication did not fail closed."
     }
@@ -170,6 +204,7 @@ try {
     Write-Host "FAB ngrok HTTPS verification passed." -ForegroundColor Green
     Write-Host "Unauthenticated request: 401"
     Write-Host "Authenticated liveness: ok"
+    Write-Host "Authenticated HAI manifest: ok"
     Write-Host "The temporary FAB tunnel will now be stopped."
 }
 finally {

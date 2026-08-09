@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from src.operations.local_backup import (
     BACKUP_FORMAT_V1,
@@ -108,6 +109,24 @@ class TestLocalBackupService(unittest.TestCase):
                 manifest_only["schedule"]["integrityVerification"],
                 "manifest_only",
             )
+
+    def test_manifest_inspection_cache_reuses_only_an_unchanged_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            service = LocalBackupService(
+                ledger,
+                {"fab_local_backup_dir": os.path.join(temp_dir, "backups")},
+            )
+            backup = service.create_backup()
+            first = service.inspect_backup_manifest(backup["backupPath"])
+
+            with patch(
+                "src.operations.local_backup.zipfile.ZipFile",
+                side_effect=AssertionError("unchanged manifest cache miss"),
+            ):
+                cached = service.inspect_backup_manifest(backup["backupPath"])
+
+            self.assertEqual(first, cached)
 
     def test_inspect_rejects_checksum_mismatched_ledger_bytes(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,21 +1,23 @@
 import logging
 import os
 from typing import Dict, Any
-try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.linear_model import LogisticRegression
-except ImportError:
-    TfidfVectorizer = None
-    LogisticRegression = None
-
-try:
-    import joblib
-except ImportError:
-    joblib = None
 from src.categorizers.base import BaseCategorizer
 
 
 logger = logging.getLogger(__name__)
+joblib = None
+
+
+def _joblib_module():
+    global joblib
+    if joblib is not None:
+        return joblib
+    try:
+        import joblib as loaded_joblib
+    except ImportError:
+        return None
+    joblib = loaded_joblib
+    return joblib
 
 class MLCategorizer(BaseCategorizer):
     """Categorizes documents using a trained Machine Learning model."""
@@ -30,14 +32,14 @@ class MLCategorizer(BaseCategorizer):
         self._load_model()
 
     def _load_model(self):
-        if joblib is None:
-            self.unavailable_reason = "dependencies_missing"
-            logger.info("ML categorization is unavailable because optional dependencies are missing.")
-            return
-
         if os.path.exists(self.model_path) and os.path.exists(self.vectorizer_path):
-            self.model = joblib.load(self.model_path)
-            self.vectorizer = joblib.load(self.vectorizer_path)
+            loader = _joblib_module()
+            if loader is None:
+                self.unavailable_reason = "dependencies_missing"
+                logger.info("ML categorization is unavailable because optional dependencies are missing.")
+                return
+            self.model = loader.load(self.model_path)
+            self.vectorizer = loader.load(self.vectorizer_path)
             logger.info("ML categorization model loaded.")
         else:
             self.unavailable_reason = "model_not_trained"
@@ -45,8 +47,16 @@ class MLCategorizer(BaseCategorizer):
 
     def train_model(self, X_train: list, y_train: list):
         """Trains the ML model with provided data."""
-        if TfidfVectorizer is None or LogisticRegression is None or joblib is None:
+        loader = _joblib_module()
+        if loader is None:
             raise ImportError("scikit-learn and joblib are required to train the ML categorizer.")
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.linear_model import LogisticRegression
+        except ImportError as exc:
+            raise ImportError(
+                "scikit-learn and joblib are required to train the ML categorizer."
+            ) from exc
 
         self.vectorizer = TfidfVectorizer(max_features=1000)
         X_train_vectorized = self.vectorizer.fit_transform(X_train)
@@ -56,8 +66,8 @@ class MLCategorizer(BaseCategorizer):
 
         os.makedirs(os.path.dirname(os.path.abspath(self.model_path)), exist_ok=True)
         os.makedirs(os.path.dirname(os.path.abspath(self.vectorizer_path)), exist_ok=True)
-        joblib.dump(self.model, self.model_path)
-        joblib.dump(self.vectorizer, self.vectorizer_path)
+        loader.dump(self.model, self.model_path)
+        loader.dump(self.vectorizer, self.vectorizer_path)
         self.unavailable_reason = None
         logger.info("ML categorization model trained and saved.")
 

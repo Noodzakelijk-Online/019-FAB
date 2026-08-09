@@ -25,6 +25,8 @@ MAX_BACKUP_ARCHIVE_FILES = 10_000
 MAX_BACKUP_EVIDENCE_FILE_BYTES = 250 * 1024 * 1024
 MAX_BACKUP_UNCOMPRESSED_BYTES = 20 * 1024 * 1024 * 1024
 _INSPECTION_CACHE: Dict[str, Dict[str, Any]] = {}
+_MANIFEST_INSPECTION_CACHE: Dict[str, Dict[str, Any]] = {}
+MAX_INSPECTION_CACHE_ENTRIES = 128
 
 
 class LocalBackupService:
@@ -183,6 +185,10 @@ class LocalBackupService:
             raise ValueError(f"Backup not found: {resolved_path}")
         if not resolved_path.lower().endswith(".zip"):
             raise ValueError("Only .zip local FAB backups are supported")
+        signature = _file_signature(resolved_path)
+        cached = _MANIFEST_INSPECTION_CACHE.get(resolved_path)
+        if cached and cached.get("signature") == signature:
+            return copy.deepcopy(cached["result"])
         with zipfile.ZipFile(resolved_path, "r") as archive:
             names = archive.namelist()
             self._validate_member_names(names)
@@ -212,7 +218,7 @@ class LocalBackupService:
             total_uncompressed = sum(info.file_size for info in archive.infolist())
             if total_uncompressed > MAX_BACKUP_UNCOMPRESSED_BYTES:
                 raise ValueError("Backup exceeds the maximum uncompressed size")
-        return {
+        result = {
             "success": True,
             "status": "manifest_valid",
             "backupPath": resolved_path,
@@ -220,6 +226,13 @@ class LocalBackupService:
             "manifest": manifest,
             "deepVerification": "not_executed",
         }
+        _store_inspection_cache(
+            _MANIFEST_INSPECTION_CACHE,
+            resolved_path,
+            signature,
+            result,
+        )
+        return result
 
     def inspect_backup(self, backup_path: str) -> Dict[str, Any]:
         resolved_path = self._resolve_backup_path(backup_path)
@@ -292,10 +305,7 @@ class LocalBackupService:
             "manifest": manifest,
             "restoreConfirmationPhrase": RESTORE_CONFIRMATION_PHRASE,
         }
-        _INSPECTION_CACHE[resolved_path] = {
-            "signature": signature,
-            "result": copy.deepcopy(result),
-        }
+        _store_inspection_cache(_INSPECTION_CACHE, resolved_path, signature, result)
         return result
 
     def schedule_status(self, deep_verify: bool = True) -> Dict[str, Any]:
@@ -854,6 +864,20 @@ def _file_signature(path: str) -> Tuple[int, int, int]:
         int(stat.st_mtime_ns),
         int(stat.st_ctime_ns),
     )
+
+
+def _store_inspection_cache(
+    cache: Dict[str, Dict[str, Any]],
+    path: str,
+    signature: Tuple[int, int, int],
+    result: Dict[str, Any],
+) -> None:
+    cache[path] = {
+        "signature": signature,
+        "result": copy.deepcopy(result),
+    }
+    while len(cache) > MAX_INSPECTION_CACHE_ENTRIES:
+        cache.pop(next(iter(cache)))
 
 
 def _valid_sha256(value: Any) -> bool:

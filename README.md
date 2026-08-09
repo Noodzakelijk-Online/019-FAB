@@ -360,7 +360,7 @@ python package.py
 
 ## Deployment
 
-Use `Start-FAB.ps1` for the supported Windows runtime or the repository's three-service Docker Compose stack for container deployment. FAB must remain on loopback or behind private networking, TLS, an authenticated reverse proxy, and a managed secret store. Unauthenticated Cloud Function deployment is not supported for financial data. See `docs/deployment_guide.md` and `docs/local_windows_ngrok_setup.md` for the verified procedures and acceptance boundaries.
+Use `Start-FAB.ps1` for the supported Windows runtime or the repository's three-service Docker Compose stack for container deployment. Optional supervised Windows cloud access uses `Start-FAB-Ngrok.cmd` and `Stop-FAB-Ngrok.cmd`; it exposes only the authenticated API/HAI surface, keeps the dashboard local, and refuses to reuse or stop another project's endpoint. FAB must remain on loopback or behind private networking, TLS, an authenticated reverse proxy, and a managed secret store. Unauthenticated Cloud Function deployment is not supported for financial data. See `docs/deployment_guide.md` and `docs/local_windows_ngrok_setup.md` for the verified procedures and acceptance boundaries.
 
 ## Contributing
 

@@ -603,6 +603,40 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(payload["workItems"][0]["documentId"], document_id)
             self.assertEqual(payload["workItems"][0]["document"]["vendorName"], "Vendor")
 
+    def test_review_summary_projection_omits_private_and_duplicate_payloads(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger_path = os.path.join(temp_dir, "fab.sqlite3")
+            ledger = LocalOperationsLedger(ledger_path)
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "private-source-id",
+                "originalFilename": "receipt.pdf",
+                "documentType": "receipt",
+                "processingStatus": "needs_review",
+                "vendorName": "Vendor",
+                "ocrText": "Review evidence " * 200,
+            })
+            ledger.create_review_item({
+                "documentId": document_id,
+                "reason": "manual_review_category",
+                "details": "Confirm category.",
+                "correctedData": {"privateModelTrace": "must-not-leave-api"},
+            })
+            client = create_app({"fab_local_ledger_path": ledger_path}).test_client()
+
+            full = client.get("/api/review?status=open").get_json()
+            compact = client.get("/api/review?status=open&view=summary").get_json()
+
+            self.assertEqual(len(full["reviewItems"]), 1)
+            self.assertEqual(compact["reviewItems"], [])
+            self.assertNotIn("sourceDocumentId", compact["workItems"][0]["document"])
+            self.assertNotIn(
+                "correctedData",
+                compact["workItems"][0]["reviewItems"][0],
+            )
+            self.assertNotIn("must-not-leave-api", json.dumps(compact))
+            self.assertEqual(compact["summary"], full["summary"])
+
     def test_review_api_exposes_identity_evidence_and_resolves_one_duplicate_pair(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

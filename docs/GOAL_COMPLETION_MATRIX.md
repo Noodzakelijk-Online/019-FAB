@@ -35,11 +35,11 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 028 Privacy controls and data deletion | Partial | Retention/export controls exist; end-user erasure workflow needs governance validation. |
 | 029 Security headers and web security | Implemented | Restrictive production CSP, conditional HTTPS HSTS, standard browser protections, request tracing, auth/sanitization, and real TCP/live header tests are wired; independent penetration testing remains a separate external gate. |
 | 030 Secrets management and credential rotation | Partial | Local encrypted Wave store and OAuth reauthorization state; full rotation drill remains. |
-| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. |
-| 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, and local-operator acceptance passed. |
+| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. Managed ngrok start/stop wrappers verify ownership and never pool or stop another project's endpoint. |
+| 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, HAI/cloud status, and local-operator acceptance passed. A dedicated production endpoint is still an infrastructure activation gate. |
 | 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |
-| 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, and workflow state. |
+| 035 Observability, health, and readiness endpoints | Implemented | Constant-time liveness, deep health, settings, doctor, metrics, audit, workflow state, and project-owned cloud status. |
 | 036 Admin/operator diagnostics | Implemented | Dashboard diagnostics and sanitized support bundle. |
 | 037 Demo mode with explicit labelling | Not applicable | No production demo state is substituted for live financial data. |
 | 038 Fake provider lab for tests only | Partial | Mocks/fixtures are test-scoped; no dedicated provider simulator UI. |
@@ -54,8 +54,8 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 047 File safety and path traversal tests | Implemented | Upload/intake/backup/provider credential path tests. |
 | 048 Provider failure simulation | Implemented | OAuth, API, rate, retry, ambiguous, and attachment failure tests. |
 | 049 Accessibility review | Partial | Semantic states and keyboard-native controls; full WCAG audit remains. |
-| 050 Responsive and browser compatibility | Partial | Connected Chrome desktop/narrow screenshots, navigation, console, overflow, and delivery-control checks passed; a broad browser/device matrix remains. |
-| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, bulk recovery lookup, paginated queues, bounded health/support payloads, and short single-flight coalescing with uncached safety paths are verified; sustained idle-host load testing remains. |
+| 050 Responsive and browser compatibility | Partial | Prior connected Chrome desktop/narrow screenshots passed; current-source in-app Browser desktop/narrow DOM, navigation, cloud state, and error checks passed. The current screenshot service returned blank frames and a broad browser/device matrix remains. |
+| 051 Performance baseline and indexing | Partial | SQLite WAL/busy waiting, bounded dashboard fan-out, lazy OCR/ML loading, bounded backup/review projections, and short single-flight coalescing are verified. Real used-process memory and hot/cold endpoint timings are recorded; sustained multi-day host load testing remains. |
 | 052 Large dataset and pagination testing | Partial | Bounded batch/limit tests exist; sustained production-scale test remains. |
 | 053 Backup and restore procedures | Implemented | Source-complete recovery packages and confirmation-gated restore. |
 | 054 Data reconciliation and repair commands | Implemented | Reconciliation, reprocessing, recovery, and close-readiness services. |

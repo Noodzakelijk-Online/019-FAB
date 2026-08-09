@@ -80,6 +80,7 @@ export type FabControlCenter = {
   driveAuthorization: JsonRecord;
   waveSetup: JsonRecord;
   waveReceiptExecutor: JsonRecord;
+  cloudAccess: JsonRecord;
   exceptions: JsonRecord[];
   exceptionSummary: JsonRecord;
   connections: JsonRecord[];
@@ -109,7 +110,7 @@ const MAX_CONCURRENT_READS = 4;
 const READ_PATHS = {
   backups: "/api/backups?limit=5&verify=false",
   autonomy: "/api/autonomy/plan?limit=25",
-  reviewQueue: "/api/review?status=open&limit=200",
+  reviewQueue: "/api/review?status=open&limit=200&view=summary",
   exceptions: "/api/exceptions?limit=25&includeEntities=true",
   driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&view=summary",
   health: "/api/health",
@@ -132,6 +133,7 @@ const READ_PATHS = {
   driveAuthorization: "/api/connectors/google-drive/authorization",
   haiStatus: "/api/hai/status",
   haiManifest: "/api/hai/manifest",
+  cloudStatus: "/api/cloud/status",
   gmailAuthorization: "/api/connectors/gmail/authorization",
 } as const;
 
@@ -142,6 +144,7 @@ const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
   autonomy: 15_000,
   backups: 12_000,
   driveWaveWorkOrders: 12_000,
+  cloudStatus: 3_000,
 };
 
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
@@ -327,6 +330,7 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
   const sourceReadiness = resources.sourceReadiness || {};
   const waveSetup = resources.waveSetup || {};
   const waveReceiptExecutor = resources.waveReceiptExecutor || {};
+  const cloudAccess = resources.cloudStatus || {};
   const registeredSources = arrayValue(resources.sources?.sources);
   const workflowRuns = arrayValue(resources.workflows?.workflowRuns);
   const reviewWorkItems = arrayValue(resources.reviewQueue?.workItems);
@@ -441,6 +445,7 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
     driveAuthorization: resources.driveAuthorization || {},
     waveSetup,
     waveReceiptExecutor,
+    cloudAccess,
     exceptions: arrayValue(exceptionsPayload.exceptions),
     exceptionSummary: asRecord(exceptionsPayload.summary) || {},
     connections: [
@@ -471,6 +476,23 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
           ? `Governed machine control is enabled for ${haiAllowedCommandIds.length} allowlisted commands.`
           : "Governed machine-control contract for safe local FAB commands.",
         allowedCommandIds: haiAllowedCommandIds,
+      },
+      {
+        id: "ngrok_cloud",
+        label: "FAB cloud access",
+        status: stringValue(cloudAccess.status, "not_running"),
+        configured: cloudAccess.configured === true,
+        ready: cloudAccess.active === true,
+        details: cloudAccess.active === true
+          ? "Authenticated HTTPS access is verified for the FAB API and HAI manifest."
+          : "Project-owned ngrok access for the authenticated FAB API and HAI connector.",
+        nextAction: stringValue(
+          cloudAccess.nextAction,
+          "Run Start-FAB-Ngrok.cmd after configuring a dedicated FAB endpoint.",
+        ),
+        lastSyncAt: cloudAccess.verifiedAt || null,
+        publicUrl: cloudAccess.publicUrl || null,
+        authMode: cloudAccess.authMode || null,
       },
     ],
     workflows: workflowRuns,
@@ -730,6 +752,7 @@ function disconnectedControlCenter(endpoint: string, checkedAt: string, error: s
     driveAuthorization: {},
     waveSetup: {},
     waveReceiptExecutor: {},
+    cloudAccess: {},
     exceptions: [],
     exceptionSummary: {},
     connections: [],

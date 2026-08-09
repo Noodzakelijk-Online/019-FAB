@@ -16,6 +16,7 @@ The Flask API is the source of operational truth. Major endpoint groups are:
 | Reconciliation/reporting | `/api/reconciliation/*`, `/api/report-runs/*`, `/api/compliance/*`, `/api/master-ledger` | Local computation; provisional findings are labeled. `summaryOnly=true` returns the exact checksum and aggregate projection without serializing rows to the caller. |
 | Recovery/support | `/api/backups`, `/api/support-bundles` | Restore is confirmation-gated; support output is sanitized. |
 | HAI | `/api/hai/status`, `/api/hai/manifest`, `/api/hai/commands/execute` | Fixed command allowlist, normalized payloads, no external approval or emergency-stop clear. |
+| Managed cloud access | `/api/cloud/status` | Read-only, secret-safe status. Reports active only when project runtime identity and the exact owned ngrok tunnel remain verifiable. |
 
 ## Web gateway
 

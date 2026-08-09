@@ -1,5 +1,19 @@
 # Codex Worklog
 
+## 2026-08-09 - Managed FAB cloud access and runtime efficiency follow-up
+
+- Added project-owned `Start-FAB-Ngrok.cmd` / `Stop-FAB-Ngrok.cmd` lifecycle scripts that expose only the authenticated FAB API, use a private inspector port, verify the remote FAB and HAI identities, and refuse to pool, stop, or reuse an unrelated ngrok endpoint.
+- Added a secret-safe `/api/cloud/status` contract and dashboard connection card. Runtime metadata must match this checkout, its stable instance ID, the exact HTTPS origin, private inspector, tunnel name, and loopback API target before FAB reports cloud access as active.
+- Kept the dashboard on loopback and kept remote access disabled when a strong API token, a dedicated endpoint, or exact runtime ownership cannot be proved.
+- Lazy-loaded OCR/ML dependencies so ordinary API startup no longer imports NumPy, SciPy, pandas, OpenCV, scikit-learn, joblib, or the processor pipeline. Measured API import wall time fell from roughly 7 seconds to 1.1 seconds.
+- After a real control-center load, measured native working sets fell from about 212 MB to 97 MB for the API and from about 190 MB to 120 MB for the worker; the production dashboard used about 124 MB.
+- Added signature-bound, bounded backup-manifest caching. Warm unchanged manifest reads fell from roughly 1.4-1.6 seconds to 26-30 ms while any size/time/signature change forces reinspection.
+- Added a summary review contract for the dashboard while retaining complete review evidence on the default API. The source API payload fell from 434,794 to 234,340 bytes on the live ledger.
+- Verification passed 793 backend tests plus 38 subtests, 161 web tests, TypeScript checking, production build budgets, the production dependency audit, PowerShell parsing, live Windows/HAI/cloud checks, desktop/narrow in-app Browser DOM interaction, and exact-source non-root Compose acceptance.
+- The in-app Browser exposed complete desktop and 520-pixel DOM state with the cloud card and no application errors, but its screenshot function returned blank frames; no screenshot claim is made for this follow-up.
+- The unmanaged ngrok endpoint on port 4040 remained untouched. FAB still needs a separately reserved HTTPS endpoint before managed cloud access can be accepted.
+- No provider record was changed, no Drive source was archived, and no external submission was performed.
+
 ## 2026-08-09 - Production runtime, security, and truthful product follow-up
 
 - Removed production Manus instrumentation and its dependency; the generated HTML shell fell from roughly 369 KB to 2,031 bytes.

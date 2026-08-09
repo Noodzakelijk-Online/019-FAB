@@ -10,7 +10,6 @@ from src.document_processors.document_type_classifier import (
     is_non_posting_document_type,
 )
 from src.document_processors.financial_field_extractor import FinancialFieldExtractor
-from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.operations.local_backup import LocalBackupService
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_category_suggestions import (
@@ -1850,6 +1849,8 @@ class LocalDocumentProcessor:
                 "language": "unknown",
             }
         if self._processor_pipeline is None:
+            from src.document_processors.processor_pipeline import ProcessorPipeline
+
             self._processor_pipeline = ProcessorPipeline(self.config)
         return self._processor_pipeline.process_document(path)
 

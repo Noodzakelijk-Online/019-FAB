@@ -4,7 +4,7 @@
 
 ```powershell
 .\Start-FAB.ps1 -NoBrowser
-python -m src.run_fab_doctor
+.\.venv\Scripts\python.exe -m src.run_fab_doctor
 ```
 
 Open the dashboard URL printed by the launcher, normally `http://127.0.0.1:3000/admin/operations`. The local API normally uses `http://127.0.0.1:5001`.
@@ -41,11 +41,13 @@ Never archive a Drive source merely because a Wave record exists. FAB must verif
 ## Diagnostics and recovery
 
 ```powershell
-python -m src.run_fab_doctor --json
-python -m src.run_fab_doctor --support-bundle
+.\.venv\Scripts\python.exe -m src.run_fab_doctor --json
+.\.venv\Scripts\python.exe -m src.run_fab_doctor --support-bundle
 .\Stop-FAB.ps1
 .\Test-FAB-Ngrok.ps1
 ```
+
+For persistent supervised remote API and HAI access, use `Start-FAB-Ngrok.cmd` and `Stop-FAB-Ngrok.cmd`. FAB never reuses or stops an unrelated ngrok endpoint; provide `-Url https://your-reserved-endpoint.example` when another endpoint is already online. The operator dashboard remains local.
 
 Create a verified recovery package from the dashboard. Restore remains confirmation-gated in the local recovery console. Preserve the current database before repair and verify the restored checksum and source-evidence coverage.
 

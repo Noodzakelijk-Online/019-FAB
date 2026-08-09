@@ -1,0 +1,162 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from src.operations.local_api import create_app
+from src.operations.local_cloud_access import LocalCloudAccessService
+from src.utils.runtime_identity import local_instance_id
+
+
+class TestLocalCloudAccessService(unittest.TestCase):
+    def test_missing_runtime_is_truthfully_not_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = LocalCloudAccessService(
+                project_root=root,
+                api_token_configured=True,
+            ).summarize()
+
+        self.assertEqual(result["status"], "not_running")
+        self.assertFalse(result["active"])
+        self.assertTrue(result["configured"])
+        self.assertIsNone(result["publicUrl"])
+        self.assertEqual(result["externalSubmission"], "not_executed")
+
+    def test_valid_owned_tunnel_is_active_and_sanitized(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = self._write_runtime(root)
+            result = LocalCloudAccessService(
+                project_root=root,
+                runtime_path=runtime_path,
+                api_token_configured=True,
+                inspector_fetch=lambda _url, _timeout: {
+                    "tunnels": [{
+                        "name": "fab-managed",
+                        "public_url": "https://fab.example.test",
+                        "config": {"addr": "http://127.0.0.1:5001"},
+                    }],
+                },
+            ).summarize()
+
+        self.assertEqual(result["status"], "active")
+        self.assertTrue(result["active"])
+        self.assertEqual(result["publicUrl"], "https://fab.example.test")
+        self.assertEqual(result["haiManifestUrl"], "https://fab.example.test/api/hai/manifest")
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertNotIn(temp_dir, rendered)
+        self.assertNotIn("processId", rendered)
+        self.assertNotIn("inspectorPort", rendered)
+        self.assertNotIn("overlay", rendered)
+        self.assertNotIn("private-token-value", rendered)
+
+    def test_missing_or_mismatched_inspector_tunnel_is_stale(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = self._write_runtime(root)
+            service = LocalCloudAccessService(
+                project_root=root,
+                runtime_path=runtime_path,
+                api_token_configured=True,
+                inspector_fetch=lambda _url, _timeout: {
+                    "tunnels": [{
+                        "name": "another-service",
+                        "public_url": "https://fab.example.test",
+                        "config": {"addr": "http://127.0.0.1:5001"},
+                    }],
+                },
+            )
+
+            result = service.summarize()
+
+        self.assertEqual(result["status"], "stale")
+        self.assertFalse(result["active"])
+        self.assertIsNone(result["publicUrl"])
+        self.assertIsNone(result["haiManifestUrl"])
+
+    def test_runtime_for_another_checkout_or_without_auth_is_invalid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = self._write_runtime(root)
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime["instanceRoot"] = str(root / "other-checkout")
+            runtime["authRequired"] = False
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+
+            result = LocalCloudAccessService(
+                project_root=root,
+                runtime_path=runtime_path,
+                api_token_configured=True,
+                inspector_fetch=lambda _url, _timeout: self.fail("inspector must not be called"),
+            ).summarize()
+
+        self.assertEqual(result["status"], "invalid_runtime")
+        self.assertFalse(result["active"])
+        self.assertIsNone(result["publicUrl"])
+
+    def test_public_url_must_be_a_clean_https_origin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = self._write_runtime(root)
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime["publicUrl"] = "https://user:secret@fab.example.test/private?token=secret"
+            runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+
+            result = LocalCloudAccessService(
+                project_root=root,
+                runtime_path=runtime_path,
+                api_token_configured=True,
+            ).summarize()
+
+        self.assertEqual(result["status"], "invalid_runtime")
+        self.assertNotIn("secret", json.dumps(result))
+
+    def test_api_exposes_authenticated_sanitized_cloud_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runtime_path = root / "missing-runtime.json"
+            client = create_app({
+                "fab_local_ledger_path": str(root / "fab.sqlite3"),
+                "fab_local_api_token": "cloud-status-test-token",
+                "fab_ngrok_runtime_path": str(runtime_path),
+            }).test_client()
+
+            unauthorized = client.get("/api/cloud/status")
+            response = client.get(
+                "/api/cloud/status",
+                headers={"Authorization": "Bearer cloud-status-test-token"},
+            )
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["status"], "not_running")
+        self.assertEqual(response.get_json()["authMode"], "bearer_token")
+
+    @staticmethod
+    def _write_runtime(root: Path) -> Path:
+        runtime_path = root / "data" / "fab-ngrok-runtime.json"
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps({
+            "version": 1,
+            "service": "fab-ngrok-tunnel",
+            "instanceRoot": str(root),
+            "instanceId": local_instance_id(root),
+            "processId": 1234,
+            "inspectorPort": 4041,
+            "publicUrl": "https://fab.example.test",
+            "localApiBaseUrl": "http://127.0.0.1:5001",
+            "status": "active",
+            "startedAt": "2026-08-09T10:00:00Z",
+            "verifiedAt": "2026-08-09T10:00:02Z",
+            "authRequired": True,
+            "haiManifestUrl": "https://fab.example.test/api/hai/manifest",
+            "overlayPath": str(root / "private-overlay.yml"),
+            "stdoutPath": str(root / "private.out.log"),
+            "stderrPath": str(root / "private.err.log"),
+        }), encoding="utf-8")
+        return runtime_path
+
+
+if __name__ == "__main__":
+    unittest.main()

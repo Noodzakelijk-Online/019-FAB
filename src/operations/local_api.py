@@ -33,6 +33,7 @@ from src.operations.local_bookkeeping_records import (
 )
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
+from src.operations.local_cloud_access import LocalCloudAccessService
 from src.operations.local_categories import fab_category_options
 from src.operations.local_category_suggestions import suggest_category_intent
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
@@ -4593,6 +4594,15 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def hai_status_api():
         return jsonify(hai_connector().status())
 
+    @app.get("/api/cloud/status")
+    def cloud_status_api():
+        runtime_path = config.get("fab_ngrok_runtime_path")
+        return jsonify(LocalCloudAccessService(
+            project_root=Path(__file__).resolve().parents[2],
+            runtime_path=Path(str(runtime_path)) if runtime_path else None,
+            api_token_configured=bool(token),
+        ).summarize())
+
     @app.post("/api/hai/commands/plan")
     def hai_command_plan_api():
         payload = request.get_json(silent=True) or {}
@@ -7401,6 +7411,12 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             limit=_limit_arg(),
         )
         work_items = _review_work_items(ledger, review_items, config)
+        summary_view = str(request.args.get("view") or "").strip().lower() == "summary"
+        response_work_items = (
+            [_compact_review_work_item_summary(item) for item in work_items]
+            if summary_view
+            else work_items
+        )
         evidence_only_work_items = [
             item
             for item in work_items
@@ -7412,8 +7428,8 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
             if (item.get("document") or {}).get("postingEligible") is not False
         ]
         return jsonify({
-            "reviewItems": review_items,
-            "workItems": work_items,
+            "reviewItems": [] if summary_view else review_items,
+            "workItems": response_work_items,
             "categoryOptions": _review_category_options(ledger, config),
             "capabilities": {
                 "exactVendorCategoryBatch": {
@@ -8116,6 +8132,121 @@ def _compact_duplicate_identity(evidence: Dict[str, Any]) -> Dict[str, Any]:
         "receiptNumber": evidence.get("receipt_number"),
         "orderNumber": evidence.get("order_number"),
         "transactionReference": evidence.get("transaction_reference"),
+    }
+
+
+def _compact_review_work_item_summary(item: Dict[str, Any]) -> Dict[str, Any]:
+    document = _mapping_fields(item.get("document"), (
+        "category",
+        "classifiedDocumentType",
+        "currency",
+        "documentType",
+        "duplicateOfDocumentId",
+        "filename",
+        "financialFieldIssues",
+        "normalizedRecordDate",
+        "normalizedVatAmount",
+        "ocrExcerpt",
+        "orderNumber",
+        "postingEligible",
+        "processingStatus",
+        "source",
+        "sourceUrl",
+        "targetSystem",
+        "totalAmount",
+        "transactionDate",
+        "transactionReference",
+        "vatAmount",
+        "vendorName",
+        "invoiceNumber",
+        "receiptNumber",
+    ))
+    category_suggestion = _mapping_fields(
+        (item.get("document") or {}).get("categorySuggestion"),
+        ("category", "confidenceScore", "matchPolicy", "rationale", "source"),
+    )
+    if category_suggestion:
+        document["categorySuggestion"] = category_suggestion
+
+    duplicate_candidates = []
+    for candidate in item.get("duplicateCandidates") or []:
+        compact_candidate = _mapping_fields(candidate, (
+            "candidateDocumentId",
+            "confidenceScore",
+            "conflictingIdentityFields",
+            "comparableFields",
+            "id",
+            "matchType",
+            "matchedIdentityFields",
+            "reason",
+            "similarityScore",
+        ))
+        compact_candidate["currentIdentity"] = _mapping_fields(
+            candidate.get("currentIdentity"),
+            (
+                "amount",
+                "date",
+                "invoiceNumber",
+                "orderNumber",
+                "postingPolarity",
+                "receiptNumber",
+                "tax",
+                "transactionReference",
+                "vendor",
+            ),
+        )
+        compact_candidate["candidateIdentity"] = _mapping_fields(
+            candidate.get("candidateIdentity"),
+            (
+                "amount",
+                "date",
+                "invoiceNumber",
+                "orderNumber",
+                "postingPolarity",
+                "receiptNumber",
+                "tax",
+                "transactionReference",
+                "vendor",
+            ),
+        )
+        compact_candidate["document"] = _mapping_fields(
+            candidate.get("document"),
+            (
+                "currency",
+                "documentType",
+                "filename",
+                "invoiceNumber",
+                "orderNumber",
+                "receiptNumber",
+                "source",
+                "totalAmount",
+                "transactionDate",
+                "transactionReference",
+                "vendorName",
+            ),
+        )
+        duplicate_candidates.append(compact_candidate)
+
+    compact = _mapping_fields(item, ("documentId", "id", "reasons", "reviewPath", "status"))
+    compact["document"] = document
+    compact["duplicateCandidates"] = duplicate_candidates
+    compact["reviewItems"] = [
+        _mapping_fields(
+            review,
+            ("createdAt", "details", "id", "reason", "status", "updatedAt"),
+        )
+        for review in item.get("reviewItems") or []
+    ]
+    return compact
+
+
+def _mapping_fields(value: Any, fields: tuple) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        field: value[field]
+        for field in fields
+        if field in value
     }
 
 

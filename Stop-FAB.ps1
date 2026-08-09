@@ -8,6 +8,8 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $webRoot = Join-Path $root "web"
 $runtimePath = Join-Path $root "data\fab-runtime.json"
 $workerRuntimePath = Join-Path $root "data\fab-worker-runtime.json"
+$cloudRuntimePath = Join-Path $root "data\fab-ngrok-runtime.json"
+$venvPython = Join-Path $root ".venv\Scripts\python.exe"
 
 Set-Location -LiteralPath $root
 
@@ -382,8 +384,10 @@ if (Test-Path -LiteralPath $runtimePath) {
 
 $apiToken = ""
 try {
-    $python = Get-Command python -ErrorAction Stop
-    $apiToken = & $python.Source -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        throw "FAB's isolated Python runtime is missing."
+    }
+    $apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
 }
 catch {
     Write-Warning "FAB could not read its API token while recovering runtime ownership."
@@ -460,6 +464,15 @@ elseif (Test-Path -LiteralPath $workerRuntimePath) {
     $workerPid = $null
 }
 
+if (Test-Path -LiteralPath $cloudRuntimePath) {
+    try {
+        & (Join-Path $root "Stop-FAB-Ngrok.ps1") -Quiet
+    }
+    catch {
+        Write-Warning "FAB could not stop the managed ngrok process safely: $($_.Exception.Message)"
+    }
+}
+
 if (-not $runtime -and $apiPids.Count -eq 0 -and $webPids.Count -eq 0 -and -not $workerPid) {
     Write-Host "No owned FAB services were found. The managed services are already stopped."
 }
@@ -473,7 +486,9 @@ foreach ($ownedApiPid in $apiPids) {
 }
 
 try {
-    $python = Get-Command python -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        throw "FAB's isolated Python runtime is missing."
+    }
     $cleanupScript = @"
 from src.config_loader import ConfigLoader
 from src.operations.local_ledger import LocalOperationsLedger, default_ledger_path
@@ -496,7 +511,7 @@ released = [
 ]
 print(chr(44).join(released))
 "@
-    $releasedLeases = & $python.Source -c $cleanupScript
+    $releasedLeases = & $venvPython -c $cleanupScript
     if ($LASTEXITCODE -ne 0) {
         throw "Lease cleanup exited with code $LASTEXITCODE."
     }
