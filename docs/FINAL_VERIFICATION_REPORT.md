@@ -9,7 +9,7 @@ This report separates local software verification from provider, account, infras
 - Working/default branch: `main` / `main`.
 - Starting commit: `8a2b43d`.
 - Prior implementation commit: `98dbd51`.
-- Reliability hardening commit: recorded by the final Git push and delivery response.
+- Reliability hardening commit: `182373f`.
 - Final evidence commit and remote hash: recorded by the final Git push and delivery response.
 
 ## Results
@@ -28,7 +28,7 @@ This report separates local software verification from provider, account, infras
 | Desktop/mobile browser QA | Partial | In-app Browser DOM and geometry checks passed at desktop and 480x844 mobile: meaningful live content, no framework overlay, no horizontal overflow, and paginated exception/review/delivery queues. Browser screenshot and click dispatch failed inside the Browser runtime despite controls being visible and enabled. |
 | No-excuses search | Pass | No operational `TODO`, `FIXME`, fake-success, mock-integration, or placeholder-credential path remains. Unsupported features are explicitly documented as unavailable or supervised. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Fresh-clone verification | Pass | Clean clone of `c5e42aa`: clean status, Python compilation, Compose config, and 123 focused API/autonomy/backup/HAI/support tests passed; one third-party `dateutil` deprecation warning. |
+| Fresh-clone verification | Pass | Clean GitHub clone of `182373f`: exact remote hash, clean status, changed-module compilation, Compose config, and `134 passed` affected API/HAI/schema/health tests; one third-party `dateutil` deprecation warning. |
 
 ## Provider state
 
