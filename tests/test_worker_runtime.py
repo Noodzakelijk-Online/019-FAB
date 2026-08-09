@@ -4,8 +4,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from src import run_worker as worker_entrypoint
 from src.utils.runtime_identity import local_instance_id
 from src.worker.runtime import WorkerAlreadyRunningError, managed_worker_runtime
 
@@ -51,6 +55,44 @@ class TestWorkerRuntime(unittest.TestCase):
             finally:
                 child.terminate()
                 child.wait(timeout=10)
+
+    def test_one_shot_runner_uses_owned_runtime_and_preserves_loaded_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_directory = Path.cwd()
+            loaded_config = {
+                "worker_run_once": False,
+                "worker_run_legacy_workflow": False,
+            }
+            worker = MagicMock()
+
+            with patch.object(
+                worker_entrypoint.ConfigLoader,
+                "get_all_config",
+                return_value=loaded_config,
+            ), patch.object(worker_entrypoint, "FabWorker", return_value=worker) as worker_type:
+                worker_entrypoint.run_worker(project_root=root, run_once=True)
+
+            configured = worker_type.call_args.args[0]
+            self.assertTrue(configured["worker_run_once"])
+            self.assertFalse(configured["worker_run_legacy_workflow"])
+            self.assertFalse(loaded_config["worker_run_once"])
+            worker.run.assert_called_once_with()
+            self.assertEqual(Path.cwd(), original_directory)
+            self.assertFalse((root / "data" / "fab-worker-runtime.json").exists())
+
+    def test_cli_returns_failure_without_traceback_when_worker_is_owned(self):
+        stderr = StringIO()
+        with patch.object(
+            worker_entrypoint,
+            "run_worker",
+            side_effect=WorkerAlreadyRunningError("already owned"),
+        ), redirect_stderr(stderr):
+            exit_code = worker_entrypoint.main(run_once=True)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("FAB worker not started: already owned", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":

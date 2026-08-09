@@ -1,17 +1,39 @@
 import os
+import sys
 from pathlib import Path
+from typing import Optional
 
 from src.config_loader import ConfigLoader
 from src.worker.scheduler import FabWorker
 from src.worker.runtime import WorkerAlreadyRunningError, managed_worker_runtime
 
 
-if __name__ == "__main__":
-    project_root = Path(__file__).resolve().parents[1]
-    os.chdir(project_root)
+def run_worker(
+    *,
+    project_root: Optional[Path] = None,
+    run_once: Optional[bool] = None,
+) -> None:
+    root = (project_root or Path(__file__).resolve().parents[1]).resolve()
+    previous_directory = Path.cwd()
+    os.chdir(root)
     try:
-        with managed_worker_runtime(project_root):
+        with managed_worker_runtime(root):
             config = ConfigLoader(config_file="config/config.ini").get_all_config()
+            if run_once is not None:
+                config = {**config, "worker_run_once": bool(run_once)}
             FabWorker(config).run()
+    finally:
+        os.chdir(previous_directory)
+
+
+def main(*, run_once: Optional[bool] = None) -> int:
+    try:
+        run_worker(run_once=run_once)
     except WorkerAlreadyRunningError as exc:
-        raise SystemExit(f"FAB worker not started: {exc}") from None
+        print(f"FAB worker not started: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

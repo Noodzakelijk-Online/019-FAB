@@ -119,6 +119,11 @@ class TestConfigLoader(unittest.TestCase):
         self.assertTrue(config["freshdesk_financial_filter_enabled"])
         self.assertEqual(config["freshdesk_ticket_statuses"], "2,3")
         self.assertTrue(config["freshdesk_pdf_only"])
+        self.assertTrue(config["enable_enhanced_preprocessing"])
+        self.assertEqual(config["denoising_strength"], "10")
+        self.assertEqual(config["deskew_threshold"], "0.5")
+        self.assertEqual(config["deskew_max_angle"], "15")
+        self.assertEqual(config["fab_preprocessing_temp_dir"], "")
 
     def test_python_container_installs_fail_closed_runtime_defaults(self):
         project_root = Path(__file__).resolve().parents[1]

@@ -53,6 +53,11 @@ class StaticPipeline:
             "language": "en",
             "ocr_strategy": "illumination_normalized_fallback",
             "ocr_fallback_pages": 1,
+            "preprocessing": {
+                "applied": True,
+                "reason": None,
+                "deskewAngle": -2.5,
+            },
             "extracted_data": {
                 "vendor_name": "Retry Vendor",
                 "transaction_date": "2026-06-28",
@@ -825,6 +830,10 @@ class TestLocalDocumentProcessor(unittest.TestCase):
             self.assertEqual(document["processing_status"], "needs_review")
             self.assertIn("Vendor: Retry Vendor", document["ocr_text"])
             self.assertEqual(document["metadata"]["processing"]["ocrStrategy"], "illumination_normalized_fallback")
+            self.assertEqual(
+                document["metadata"]["processing"]["preprocessing"],
+                {"applied": True, "reason": None, "deskewAngle": -2.5},
+            )
             recovery = document["metadata"]["processing"]["ocrRecovery"]
             self.assertEqual(recovery["version"], "illumination_normalization_v1")
             self.assertEqual(recovery["status"], "recovered")

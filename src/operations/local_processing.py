@@ -1660,6 +1660,7 @@ class LocalDocumentProcessor:
                     "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
                     "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
                     "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
+                    "preprocessing": processed_data.get("preprocessing"),
                     "reviewReasons": review_reasons,
                     "validation": validation,
                     "fieldConfidences": processed_data.get("field_confidences") or {},
@@ -1761,6 +1762,7 @@ class LocalDocumentProcessor:
                 "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
                 "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
                 "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
+                "preprocessing": processed_data.get("preprocessing"),
                 "resolvedReviewItemIds": resolved_review_item_ids,
             },
         })
@@ -1779,6 +1781,7 @@ class LocalDocumentProcessor:
             "ocrStrategy": processed_data.get("ocr_strategy", "standard"),
             "ocrFallbackPages": _safe_int(processed_data.get("ocr_fallback_pages")),
             "ocrFallbackRecoveredPages": _safe_int(processed_data.get("ocr_fallback_recovered_pages")),
+            "preprocessing": processed_data.get("preprocessing"),
             "bookkeepingRecordId": record_result.get("recordId"),
             "resolvedReviewItemIds": resolved_review_item_ids,
         }

@@ -73,7 +73,7 @@ class FabWorker:
         self.process_postings = _as_bool(self.config.get("worker_process_approved_postings", True))
         self.process_retries = _as_bool(self.config.get("worker_process_due_retries", True))
         self.operations_ledger = _dependency("build_local_operations_ledger")(self.config)
-        self.run_legacy_workflow = _as_bool(self.config.get("worker_run_legacy_workflow", True))
+        self.run_legacy_workflow = _as_bool(self.config.get("worker_run_legacy_workflow", False))
         self.sync_source_connectors = bool(self.operations_ledger) and _as_bool(
             self.config.get("worker_sync_source_connectors", True)
         )

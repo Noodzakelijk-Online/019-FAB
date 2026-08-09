@@ -437,6 +437,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 $apiToken = [string]$apiToken
 
+$webJwtSecret = [string]$env:JWT_SECRET
+if ($webJwtSecret.Length -lt 32) {
+    $webJwtSecret = & $python.Source -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); print(LocalSecretStore(c).get_or_create_runtime_secret('web_jwt_secret'))"
+    if ($LASTEXITCODE -ne 0 -or ([string]$webJwtSecret).Length -lt 32) {
+        throw "FAB could not provision its encrypted dashboard signing secret."
+    }
+    $webJwtSecret = [string]$webJwtSecret
+}
+
 $mijngeldzakenExportDir = & $python.Source -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('mijngeldzaken_export_dir') or c.get('operations_mijngeldzaken_export_dir') or 'data/exports/mijngeldzaken'))"
 if ($LASTEXITCODE -ne 0) {
     throw "FAB could not read the configured MijnGeldzaken export directory."
@@ -661,9 +670,11 @@ if (-not $webPid) {
     $previousLocalApiToken = $env:FAB_LOCAL_API_TOKEN
     $previousOperationsServiceToken = $env:FAB_OPERATIONS_SERVICE_TOKEN
     $previousNodeEnvironment = $env:NODE_ENV
+    $previousJwtSecret = $env:JWT_SECRET
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
+        $env:JWT_SECRET = $webJwtSecret
         if ($apiToken) {
             $env:FAB_LOCAL_API_TOKEN = $apiToken
             $env:FAB_OPERATIONS_SERVICE_TOKEN = $apiToken
@@ -714,6 +725,12 @@ if (-not $webPid) {
         }
         else {
             $env:NODE_ENV = $previousNodeEnvironment
+        }
+        if ($null -eq $previousJwtSecret) {
+            Remove-Item Env:JWT_SECRET -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:JWT_SECRET = $previousJwtSecret
         }
     }
 }

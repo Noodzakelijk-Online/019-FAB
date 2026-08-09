@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Any
 
 from src.document_processors.base import BaseProcessor
@@ -60,46 +61,65 @@ class ProcessorPipeline(BaseProcessor):
             "ocr_strategy": "not_run",
             "ocr_fallback_pages": 0,
             "ocr_fallback_recovered_pages": 0,
+            "preprocessing": {
+                "applied": False,
+                "reason": "not_run",
+                "deskewAngle": 0.0,
+            },
         }
         current_path = document_path
+        cleanup_paths = []
 
-        for step in self.pipeline_steps:
-            if isinstance(step, EnhancedProcessor):
+        try:
+            for step in self.pipeline_steps:
+                if isinstance(step, EnhancedProcessor):
+                    result = step.process_document(current_path)
+                    cleanup_paths.extend(result.get("cleanup_paths") or [])
+                    processed_data["preprocessing"] = {
+                        "applied": bool(result.get("preprocessing_applied")),
+                        "reason": result.get("preprocessing_reason"),
+                        "deskewAngle": float(result.get("deskew_angle") or 0.0),
+                    }
+                    if result.get("processed_image_path"):
+                        current_path = result["processed_image_path"]
+                    continue
+
+                if isinstance(step, (VisionProcessor, TesseractProcessor)):
+                    result = step.process_document(current_path)
+                    if result.get("error") and not str(result.get("ocr_text") or "").strip():
+                        raise RuntimeError(f"OCR failed: {result['error']}")
+                    processed_data["ocr_text"] = result.get("ocr_text", "")
+                    self._merge_extracted_data(processed_data, result)
+                    self._merge_extracted_data(
+                        processed_data,
+                        self.field_extractor.extract(processed_data["ocr_text"]),
+                    )
+                    processed_data["language"] = result.get("language", "")
+                    processed_data["ocr_confidence"] = result.get("ocr_confidence", 0.0)
+                    processed_data["ocr_strategy"] = result.get("ocr_strategy", "standard")
+                    processed_data["ocr_fallback_pages"] = result.get("ocr_fallback_pages", 0)
+                    processed_data["ocr_fallback_recovered_pages"] = result.get("ocr_fallback_recovered_pages", 0)
+                    continue
+
+                if isinstance(step, (TemplateMatchingProcessor, LineItemExtractor)):
+                    result = step.process_document(current_path, processed_data["ocr_text"])
+                    self._merge_extracted_data(processed_data, result)
+                    continue
+
                 result = step.process_document(current_path)
-                if result.get("processed_image_path"):
-                    current_path = result["processed_image_path"]
-                continue
-
-            if isinstance(step, (VisionProcessor, TesseractProcessor)):
-                result = step.process_document(current_path)
-                if result.get("error") and not str(result.get("ocr_text") or "").strip():
-                    raise RuntimeError(f"OCR failed: {result['error']}")
-                processed_data["ocr_text"] = result.get("ocr_text", "")
                 self._merge_extracted_data(processed_data, result)
-                self._merge_extracted_data(
-                    processed_data,
-                    self.field_extractor.extract(processed_data["ocr_text"]),
-                )
-                processed_data["language"] = result.get("language", "")
-                processed_data["ocr_confidence"] = result.get("ocr_confidence", 0.0)
-                processed_data["ocr_strategy"] = result.get("ocr_strategy", "standard")
-                processed_data["ocr_fallback_pages"] = result.get("ocr_fallback_pages", 0)
-                processed_data["ocr_fallback_recovered_pages"] = result.get("ocr_fallback_recovered_pages", 0)
-                continue
+                if result.get("ocr_text"):
+                    processed_data["ocr_text"] = result["ocr_text"]
+                if result.get("language"):
+                    processed_data["language"] = result["language"]
 
-            if isinstance(step, (TemplateMatchingProcessor, LineItemExtractor)):
-                result = step.process_document(current_path, processed_data["ocr_text"])
-                self._merge_extracted_data(processed_data, result)
-                continue
-
-            result = step.process_document(current_path)
-            self._merge_extracted_data(processed_data, result)
-            if result.get("ocr_text"):
-                processed_data["ocr_text"] = result["ocr_text"]
-            if result.get("language"):
-                processed_data["language"] = result["language"]
-
-        return processed_data
+            return processed_data
+        finally:
+            for cleanup_path in cleanup_paths:
+                try:
+                    os.remove(cleanup_path)
+                except OSError:
+                    pass
 
     def _merge_extracted_data(self, processed_data: Dict[str, Any], result: Dict[str, Any]) -> None:
         incoming_data = result.get("extracted_data", {}) or {}

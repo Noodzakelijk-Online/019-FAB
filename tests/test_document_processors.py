@@ -5,15 +5,17 @@ import os
 import shutil
 import tempfile
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:
     Image = None
+    ImageDraw = None
 
 from src.document_processors.vision_processor import VisionProcessor
 from src.document_processors.tesseract_processor import TesseractProcessor
 from src.document_processors.template_matching_processor import TemplateMatchingProcessor
 from src.document_processors.line_item_extractor import LineItemExtractor
 from src.document_processors.enhanced_processor import EnhancedProcessor
+import src.document_processors.enhanced_processor as enhanced_module
 from src.document_processors.processor_pipeline import ProcessorPipeline
 from src.document_processors.dutch_ocr_processor import DutchOcrProcessor
 from src.document_processors.handwritten_recognition_processor import HandwrittenRecognitionProcessor
@@ -197,11 +199,60 @@ class TestDocumentProcessors(unittest.TestCase):
         self.assertIn("line_items", result["extracted_data"])
         self.assertEqual(len(result["extracted_data"]["line_items"]), 2)
 
+    @unittest.skipIf(enhanced_module.cv2 is None, "OpenCV is optional in this test runtime")
     def test_enhanced_processor(self):
-        config = {"ocr_processor": "tesseract", "line_item_extraction_enabled": True}
+        preprocessing_dir = os.path.join(self.temp_dir.name, "private-preprocessing")
+        config = {
+            "ocr_processor": "tesseract",
+            "line_item_extraction_enabled": True,
+            "fab_preprocessing_temp_dir": preprocessing_dir,
+        }
         processor = EnhancedProcessor(config)
         result = processor.process_document(self.dummy_image_path)
-        self.assertIn("processed_image_path", result)
+        self.assertTrue(result["preprocessing_applied"])
+        self.assertNotEqual(result["processed_image_path"], self.dummy_image_path)
+        self.assertTrue(os.path.isfile(result["processed_image_path"]))
+        self.assertEqual(result["cleanup_paths"], [result["processed_image_path"]])
+        self.assertEqual(
+            os.path.dirname(result["processed_image_path"]),
+            preprocessing_dir,
+        )
+        self.assertFalse(os.path.exists(self.dummy_image_path.replace(".", "_processed.")))
+        os.remove(result["processed_image_path"])
+
+    def test_enhanced_processor_leaves_non_images_unchanged(self):
+        processor = EnhancedProcessor({})
+
+        result = processor.process_document(self.dummy_pdf_path)
+
+        self.assertFalse(result["preprocessing_applied"])
+        self.assertEqual(result["preprocessing_reason"], "unsupported_image_type")
+        self.assertEqual(result["processed_image_path"], self.dummy_pdf_path)
+        self.assertEqual(result["cleanup_paths"], [])
+
+    @unittest.skipIf(enhanced_module.cv2 is None, "OpenCV is optional in this test runtime")
+    def test_enhanced_processor_corrects_skew_without_doubling_it(self):
+        preprocessing_dir = os.path.join(self.temp_dir.name, "deskew")
+        skewed_path = os.path.join(self.temp_dir.name, "skewed.png")
+        image = Image.new("RGB", (500, 240), color="white")
+        drawing = ImageDraw.Draw(image)
+        for index in range(5):
+            drawing.rectangle(
+                (40, 40 + index * 35, 440, 48 + index * 35),
+                fill="black",
+            )
+        image.rotate(7, expand=False, fillcolor="white").save(skewed_path)
+        processor = EnhancedProcessor({
+            "fab_preprocessing_temp_dir": preprocessing_dir,
+        })
+
+        first = processor.process_document(skewed_path)
+        second = processor.process_document(first["processed_image_path"])
+
+        self.assertAlmostEqual(abs(first["deskew_angle"]), 7.0, delta=0.75)
+        self.assertEqual(second["deskew_angle"], 0.0)
+        for cleanup_path in first["cleanup_paths"] + second["cleanup_paths"]:
+            os.remove(cleanup_path)
 
     def test_vendor_template_processor(self):
         with open(self.config["vendor_templates_file"], "w", encoding="utf-8") as handle:

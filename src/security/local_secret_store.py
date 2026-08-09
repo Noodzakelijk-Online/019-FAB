@@ -4,6 +4,7 @@ import base64
 import ctypes
 import json
 import os
+import secrets
 import tempfile
 from copy import deepcopy
 from typing import Any, Dict, Optional
@@ -22,6 +23,7 @@ WAVE_SETTING_FIELDS = {
     "category_account_ids",
 }
 LOCAL_WAVE_MANAGED_FIELDS_KEY = "_fab_local_wave_secret_fields"
+SUPPORTED_RUNTIME_SECRETS = {"web_jwt_secret"}
 
 
 class LocalSecretStoreError(RuntimeError):
@@ -93,6 +95,25 @@ class LocalSecretStore:
             "accessTokenStored": bool(settings.get("access_token")),
             "storedFields": sorted(key for key in settings if key != "access_token"),
         }
+
+    def get_or_create_runtime_secret(self, name: str) -> str:
+        secret_name = str(name or "").strip()
+        if secret_name not in SUPPORTED_RUNTIME_SECRETS:
+            raise ValueError("Unsupported FAB runtime secret.")
+        payload = self.load()
+        runtime = payload.setdefault("runtime", {})
+        if not isinstance(runtime, dict):
+            raise LocalSecretStoreError("Local secret store has an invalid runtime section.")
+        current = runtime.get(secret_name)
+        if current is not None:
+            value = _bounded_text(current, secret_name, 512)
+            if len(value) < 32:
+                raise LocalSecretStoreError("Stored FAB runtime secret is too short.")
+            return value
+        value = secrets.token_urlsafe(48)
+        runtime[secret_name] = value
+        self._save(payload)
+        return value
 
     @property
     def key_protector(self) -> str:

@@ -334,10 +334,15 @@ Duplicate detection only suppresses documents with sufficient populated accounti
 To execute the main automated bookkeeping workflow, navigate to the project's root directory and run:
 
 ```bash
-python src/main.py
+python -m src.main
 ```
 
-This will initiate the document fetching, processing, categorization, and data entry pipeline based on your `config.ini` settings.
+This runs one ownership-checked cycle of the authoritative ledger worker. It
+performs only the configured governed stages and exits without starting a
+second worker when the recurring Windows or container worker already owns the
+checkout. Use `python -m src.run_worker` for an intentionally long-running
+worker; the legacy checkpoint pipeline remains disabled unless its migration
+compatibility switch is explicitly enabled.
 
 ### 5.2. Running Tests
 

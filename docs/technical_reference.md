@@ -199,9 +199,10 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 
 ### 2.17. `src/document_processors/enhanced_processor.py` (`EnhancedProcessor`)
 
-*   **Purpose**: Combines multiple processing techniques (e.g., OCR + line item extraction) for comprehensive data extraction.
-*   **Dependencies**: Depends on other processors.
-*   **Configuration**: `ocr_processor`, `line_item_extraction_enabled`.
+*   **Purpose**: Prepares supported receipt and invoice images for OCR using grayscale conversion, bounded denoising, measured deskew correction, and Otsu binarization. It never changes the source file.
+*   **Dependencies**: `opencv-python`.
+*   **Configuration**: `enable_enhanced_preprocessing`, `denoising_strength`, `deskew_threshold`, `deskew_max_angle`, and optional `fab_preprocessing_temp_dir`.
+*   **Safety behavior**: Writes a private temporary PNG outside the source folder, returns only sanitized preprocessing evidence, and marks the derived path for unconditional cleanup. Unsupported inputs and unavailable OpenCV fail safely to the original document.
 
 ### 2.18. `src/document_processors/vendor_template_processor.py` (`VendorTemplateProcessor`)
 
@@ -223,10 +224,11 @@ The scanner profile replaces the Gmail-to-Drive Apps Script from `Noodzakelijk-O
 
 ### 2.21. `src/document_processors/processor_pipeline.py` (`ProcessorPipeline`)
 
-*   **Purpose**: Manages a sequence of document processors, allowing for a configurable processing pipeline.
+*   **Purpose**: Manages preprocessing, OCR, financial-field extraction, template matching, and line-item extraction as one processing pipeline.
 *   **Key Methods**:
     *   `process_document(file_path: str, **kwargs)`: Runs the document through all configured processors in sequence.
-*   **Configuration**: `processor_pipeline_steps` (a list of processor names and types).
+*   **Configuration**: `processor_pipeline_steps` (a list of processor names and types), or the default local-first pipeline settings under `[document_processing]`.
+*   **Lifecycle behavior**: Carries only `applied`, `reason`, and `deskewAngle` preprocessing evidence into the bookkeeping audit trail and removes every derived image in a `finally` block after OCR succeeds or fails.
 
 ### 2.22. `src/categorizers/base.py` (`BaseCategorizer`)
 

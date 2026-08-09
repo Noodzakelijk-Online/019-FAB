@@ -23,6 +23,7 @@ class TestOperationsExportWorker(unittest.TestCase):
             "mijngeldzaken_category_mapping": {"Personal": "Huishouden"},
             "fab_autonomy_execute_approved_exports": True,
             "worker_run_once": True,
+            "worker_run_legacy_workflow": True,
             "worker_process_approved_postings": True,
             "worker_process_due_retries": True,
             "worker_create_scheduled_backups": True,
@@ -203,6 +204,15 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertIn("local_worker.autonomy_cycle", audit_actions)
             self.assertIn("local_worker.cycle_completed", audit_actions)
             self.assertNotIn("local_worker.stage_failed", audit_actions)
+
+    def test_legacy_pipeline_is_disabled_when_configuration_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config.pop("worker_run_legacy_workflow")
+
+            worker = FabWorker(config)
+
+            self.assertFalse(worker.run_legacy_workflow)
 
     def test_worker_refreshes_wave_settings_saved_after_startup(self):
         with tempfile.TemporaryDirectory() as temp_dir:

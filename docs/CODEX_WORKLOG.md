@@ -1,5 +1,37 @@
 # Codex Worklog
 
+## 2026-08-09 - Production entrypoint consolidation
+
+- Routed `python -m src.main` through one ownership-checked cycle of the
+  authoritative ledger worker instead of the legacy checkpoint controller.
+- Reused the recurring worker's Windows mutex/runtime descriptor and returned a
+  concise nonzero result when another worker already owns the checkout.
+- Changed the scheduler's missing-configuration fallback so the legacy workflow
+  is disabled unless explicitly enabled.
+- Corrected Windows/Linux/operator documentation and downgraded the broad
+  no-placeholder matrix claim until disabled prototype helpers are retired.
+- Replaced the old source-adjacent preprocessing copy with real bounded image
+  denoising, deskew correction, and binarization in a private temporary file.
+- Added unconditional derived-file cleanup on both OCR success and failure, and
+  persisted only sanitized preprocessing evidence in document/audit records.
+- Added template defaults and real OpenCV regression coverage for skew
+  correction, second-pass stability, source preservation, and cleanup.
+- Fixed noisy zero-length session-key verification found during live restart:
+  loopback operator requests bypass irrelevant SaaS cookie checks, while the
+  launcher provisions a stable signing secret in the encrypted DPAPI-backed
+  local store for session routes that are used.
+- Final verification passed 815 backend tests plus 38 subtests, 163 web tests,
+  TypeScript, production build budgets, dependency/peer audits, Python
+  dependency integrity, source compilation, and Compose configuration.
+- A stopped-state one-shot worker cycle completed in 23 seconds with no
+  external submission; the restarted recurring worker then refused a second
+  owner. The latest export cycle prepared 0 new and recognized 25 existing
+  approval-gated attempts.
+- Current-source in-app Browser QA exercised Connections and a document Review
+  action, verified a 480-pixel-effective layout without horizontal overflow,
+  and found no console warning/error. No provider record or Drive source was
+  changed or archived.
+
 ## 2026-08-09 - Managed FAB cloud access and runtime efficiency follow-up
 
 - Added project-owned `Start-FAB-Ngrok.cmd` / `Stop-FAB-Ngrok.cmd` lifecycle scripts that expose only the authenticated FAB API, use a private inspector port, verify the remote FAB and HAI identities, and refuse to pool, stop, or reuse an unrelated ngrok endpoint.

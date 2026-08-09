@@ -1,25 +1,18 @@
-from src.workflow.controller import WorkflowController
-from src.config_loader import ConfigLoader
-from src.workflow.logger import AppLogger
-import os
+"""Run one authoritative FAB worker cycle.
 
-def main():
-    # Load configuration
-    config_loader = ConfigLoader(config_file="config/config.ini")
-    config = config_loader.get_all_config()
+The legacy checkpoint controller remains available only through the explicit
+``worker_run_legacy_workflow`` compatibility switch. Production entrypoints
+use the SQLite operations ledger, runtime ownership lock, and governed worker
+stages shared with the long-running Windows and container services.
+"""
 
-    # Initialize logger
-    log_file = config.get("app", {}).get("log_file", "logs/app.log")
-    logger = AppLogger(log_file=log_file).get_logger()
-    logger.info("Application started.")
+from src.run_worker import main as worker_main
 
-    # Initialize and run the workflow controller
-    workflow_controller = WorkflowController(config)
-    workflow_controller.run_workflow()
 
-    logger.info("Application finished.")
+def main() -> int:
+    return worker_main(run_once=True)
+
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())
 

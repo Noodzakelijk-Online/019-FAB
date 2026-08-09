@@ -9,8 +9,8 @@ The governed cutover from repository 025's Apps Script is documented in [docs/sc
 - **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Gmail can run as a strict scanner mailbox: exact trusted sender, PDF filename/MIME/signature validation, immutable local evidence, and no deletion or mutation of the source email. Freshdesk can run the consolidated repository-025 financial-ticket profile: keyword-scoped read-only ticket intake, non-posting description evidence, streamed and signature-verified PDF attachments, and no ticket closing or redundant Drive copy. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
 - **Advanced Document Processing**: Utilizes OCR (Tesseract, Google Cloud Vision), including Dutch OCR, handwritten recognition, template matching, and line item extraction.
 - **Intelligent Categorization**: Employs rule-based, machine learning, and hybrid categorization approaches.
-- **Automated Data Entry**: Supports data entry into mijngeldzaken.nl (via browser automation) and Waveapps (via API).
-- **Learning System**: Incorporates feedback loops and learns from existing data to improve categorization accuracy.
+- **Governed Downstream Delivery**: Prepares approval-gated Wave operations and checksum-bound MijnGeldzaken artifacts. Receipt attachment work remains supervised until exact Wave readback succeeds.
+- **Review-Based Learning**: Approved corrections can create explainable exact-vendor rules. FAB does not fabricate training text or promise unsupervised accuracy gains.
 - **Validation**: Validates extracted data against predefined rules and patterns.
 - **Error Handling & Recovery**: Robust error handling with retry mechanisms and manual review interfaces for flagged documents.
 - **Workflow Evidence**: Persists ordered autonomous actions and connector-source steps with attempts, timestamps, duration, result metadata, failures, and aborted downstream work.
@@ -18,11 +18,11 @@ The governed cutover from repository 025's Apps Script is documented in [docs/sc
 - **Performance Optimization**: Includes batch processing, caching, and performance optimization strategies.
 - **Security**: Manages credentials securely using encryption.
 - **Compliance**: Checks documents against regulatory compliance rules.
-- **Mobile Capture**: Provides a module for mobile document capture integration.
+- **Browser Upload**: The authenticated operator dashboard accepts bounded receipt uploads from supported desktop or mobile browsers into the same local evidence ledger.
 - **Automated Reconciliation**: Reconciles processed transactions with banking data.
 - **Data Migration**: Tools for migrating existing financial data.
 - **Budget Management**: Helps in tracking and managing budgets.
-- **Banking API Integration**: Integrates with banking APIs to fetch transaction data.
+- **Bank Statement Import**: Imports and reconciles supported statement data locally. Direct PSD2 bank feeds are not implemented.
 - **Financial Analysis**: Generates financial reports and insights.
 - **Backup & Restore**: Manages backup and restoration of application data.
 
@@ -340,10 +340,16 @@ evidence are never mutated or deleted. The dashboard exposes the same state in
 **Source to Wave delivery**.
 
 ### Running the Workflow Locally
-To run the main automated bookkeeping workflow:
+To run exactly one governed cycle through the same authoritative ledger worker
+used by the Windows launcher and containers:
 ```bash
-python src/main.py
+python -m src.main
 ```
+
+The command acquires this checkout's worker ownership lock and exits without
+starting a second cycle when the recurring worker is already running. Normal
+Windows operation should use `Start-FAB.cmd`; use `python -m src.run_worker`
+only when deliberately running the recurring worker outside the launcher.
 
 ### Running Tests
 To run all unit and integration tests:

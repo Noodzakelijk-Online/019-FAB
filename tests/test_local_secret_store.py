@@ -68,6 +68,28 @@ class TestLocalSecretStore(unittest.TestCase):
         self.assertEqual(effective["waveapps_business_access_token"], "environment-token")
         self.assertEqual(effective["waveapps_business_id"], "stored-business")
 
+    def test_runtime_signing_secret_is_stable_and_encrypted_at_rest(self):
+        store = LocalSecretStore(self.config)
+
+        first = store.get_or_create_runtime_secret("web_jwt_secret")
+        second = LocalSecretStore(self.config).get_or_create_runtime_secret(
+            "web_jwt_secret"
+        )
+        with open(self.config["fab_local_secret_store_path"], "rb") as handle:
+            encrypted_bytes = handle.read()
+
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(len(first), 32)
+        self.assertNotIn(first.encode("ascii"), encrypted_bytes)
+        self.assertEqual(
+            LocalSecretStore(self.config).load()["runtime"]["web_jwt_secret"],
+            first,
+        )
+
+    def test_runtime_signing_secret_rejects_unknown_names(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported FAB runtime secret"):
+            LocalSecretStore(self.config).get_or_create_runtime_secret("unknown")
+
     def test_corrupt_ciphertext_fails_closed_without_plaintext_fallback(self):
         store = LocalSecretStore(self.config)
         store.update_wave_target("waveapps_business", {"access_token": "private-token"})

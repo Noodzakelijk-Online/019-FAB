@@ -18,7 +18,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 011 Core workflow vertical slice | Implemented | Intake through recovery covered by ledger services and tests. |
 | 012 External provider reality review | Implemented | Capability states distinguish live, supervised, and blocked. |
 | 013 Compliance and platform policy boundaries | Partial | Guardrails exist; legal/accountant and provider-policy sign-off remains external. |
-| 014 No fake success and no mock production behavior | Implemented | Fake public claims removed; execution/readback states are explicit. |
+| 014 No fake success and no mock production behavior | Partial | Supported entrypoints use the authoritative ledger worker and execution/readback states are explicit. Disabled legacy compatibility helpers still contain incomplete prototype methods; they are not product capabilities and must be removed or completed before final codebase-wide certification. |
 | 015 Storage, files, uploads, and media safety | Implemented | Hashing, path validation, ignored runtime roots, and recovery evidence. |
 | 016 Background jobs, schedulers, and workers | Implemented | Worker, schedules, leases, recovery, reports, and notifications. |
 | 017 Idempotency and duplicate action prevention | Implemented | Content fingerprints, duplicate candidates, operation IDs, runtime leases. |
@@ -35,7 +35,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 028 Privacy controls and data deletion | Partial | Retention/export controls exist; end-user erasure workflow needs governance validation. |
 | 029 Security headers and web security | Implemented | Restrictive production CSP, conditional HTTPS HSTS, standard browser protections, request tracing, auth/sanitization, and real TCP/live header tests are wired; independent penetration testing remains a separate external gate. |
 | 030 Secrets management and credential rotation | Partial | Local encrypted Wave store and OAuth reauthorization state; full rotation drill remains. |
-| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. Managed ngrok start/stop wrappers verify ownership and never pool or stop another project's endpoint. |
+| 031 Local development one-command experience | Implemented | `Start-FAB.ps1/.cmd` provisions an isolated Python 3.13 `.venv`, starts API/worker/production dashboard, and `Stop-FAB.ps1/.cmd` stops only this checkout. `python -m src.main` uses the same owned worker path for one cycle. Managed ngrok start/stop wrappers verify ownership and never pool or stop another project's endpoint. |
 | 032 Docker and deployment readiness | Implemented | API/worker/web Compose, both non-root images, configurable loopback ports, authenticated health, dashboard, HAI/cloud status, and local-operator acceptance passed. A dedicated production endpoint is still an infrastructure activation gate. |
 | 033 Database migrations and rollback safety | Implemented | Ordered checksum-bound migration history, fail-closed validation, verified pre-upgrade snapshots, and restore-based rollback guidance. |
 | 034 CLI and doctor/self-diagnostic command | Implemented | `python -m src.run_fab_doctor`. |

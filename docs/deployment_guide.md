@@ -50,7 +50,7 @@ Local deployment is suitable for development, testing, and running the solution 
     cp config/config_template.ini config/config.ini
     # Edit config/config.ini
     ```
-    **Security Best Practice**: For sensitive information (API keys, passwords), use the operator dashboard's encrypted local setup or environment variables. The `ConfigLoader` will automatically pick up environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`). Local operations settings also accept direct `FAB_LOCAL_*` variables such as `FAB_LOCAL_LEDGER_PATH`, `FAB_LOCAL_API_HOST`, `FAB_LOCAL_API_PORT`, and `FAB_LOCAL_API_TOKEN`. On Windows, **Connections > Wave - Noodzakelijk Online** encrypts the Wave token locally and protects its encryption key with current-user DPAPI. Managed deployments can instead use `FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN`, `FAB_WAVEAPPS_BUSINESS_ID`, `FAB_WAVEAPPS_PERSONAL_ACCESS_TOKEN`, and `FAB_WAVEAPPS_PERSONAL_ID`; environment values take precedence and do not need to be written to `config.ini`.
+    **Security Best Practice**: For sensitive information (API keys, passwords), use the operator dashboard's encrypted local setup or environment variables. The `ConfigLoader` will automatically pick up environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`). Local operations settings also accept direct `FAB_LOCAL_*` variables such as `FAB_LOCAL_LEDGER_PATH`, `FAB_LOCAL_API_HOST`, `FAB_LOCAL_API_PORT`, and `FAB_LOCAL_API_TOKEN`. On Windows, **Connections > Wave - Noodzakelijk Online** encrypts the Wave token locally and protects its encryption key with current-user DPAPI. `Start-FAB.ps1` also provisions the dashboard signing secret in this encrypted current-user store unless a strong `JWT_SECRET` environment value is supplied. Managed deployments can instead use `FAB_WAVEAPPS_BUSINESS_ACCESS_TOKEN`, `FAB_WAVEAPPS_BUSINESS_ID`, `FAB_WAVEAPPS_PERSONAL_ACCESS_TOKEN`, and `FAB_WAVEAPPS_PERSONAL_ID`; environment values take precedence and do not need to be written to `config.ini`.
 
     For local-first operation on Windows 11, keep the FAB operations ledger enabled and store it in a private local data folder:
     ```ini
@@ -85,10 +85,14 @@ Local deployment is suitable for development, testing, and running the solution 
 
 5.  **Run the Application:**
 
-    You can run the main workflow manually:
+    You can run exactly one governed worker cycle manually:
     ```bash
-    python src/main.py
+    python -m src.main
     ```
+    This uses the authoritative operations ledger and the same runtime ownership
+    lock as the recurring worker. It fails closed when another worker owns the
+    checkout. The legacy checkpoint controller runs only when
+    `worker_run_legacy_workflow=true` is explicitly configured for migration.
     For continuous operation, run the recurring worker rather than repeatedly launching the one-shot command:
     ```bash
     python -m src.run_worker
@@ -119,16 +123,16 @@ Local deployment is suitable for development, testing, and running the solution 
     [Service]
     User=your_username
     WorkingDirectory=/path/to/your/automated_bookkeeping
-    ExecStart=/path/to/your/automated_bookkeeping/venv/bin/python src/main.py
-    Restart=always
-    Environment="APP_GMAIL_CLIENT_ID=your_client_id" "APP_GMAIL_CLIENT_SECRET=your_client_secret" # Add all necessary env vars
+    ExecStart=/path/to/your/automated_bookkeeping/.venv/bin/python -m src.run_worker
+    Restart=on-failure
+    EnvironmentFile=/etc/fab/fab.env
 
     [Install]
     WantedBy=multi-user.target
     ```
     *   Replace `your_username` with your actual username.
     *   Replace `/path/to/your/automated_bookkeeping` with the actual path to your project directory.
-    *   Add all required environment variables for credentials and sensitive settings.
+    *   Store required environment values in a root-owned `0600` environment file or a reviewed secret manager; never place credentials directly in the unit file.
 
 2.  **Reload systemd, enable, and start the service:**
     ```bash
