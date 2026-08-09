@@ -204,10 +204,14 @@ def duplicate_candidate_reassessment_plan(
         pair = tuple(sorted((document_id, candidate_document_id)))
         pair_rows.setdefault(pair, []).append(candidate)
 
+    documents = ledger.get_documents_with_review_items(
+        [document_id for pair in pair_rows for document_id in pair],
+        review_status=("pending", "in_review"),
+    )
     plans = []
     for (canonical_id, subject_id), rows in sorted(pair_rows.items()):
-        canonical = ledger.get_document(canonical_id)
-        subject = ledger.get_document(subject_id)
+        canonical = documents.get(canonical_id)
+        subject = documents.get(subject_id)
         if not canonical or not subject:
             continue
         if (

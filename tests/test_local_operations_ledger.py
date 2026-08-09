@@ -1338,6 +1338,58 @@ class TestLocalOperationsLedger(unittest.TestCase):
             self.assertNotIn("header-secret", event["details"]["error"])
             self.assertIn("[REDACTED]", event["details"]["error"])
 
+    def test_compact_document_snapshot_filters_and_orders_review_items(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            first_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "compact-first",
+                "originalFilename": "first.pdf",
+                "processingStatus": "needs_review",
+            })
+            second_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "compact-second",
+                "originalFilename": "second.pdf",
+                "processingStatus": "processed",
+            })
+            older_id = ledger.create_review_item({
+                "documentId": first_id,
+                "reason": "older-open-review",
+                "details": "First open item.",
+            })
+            newer_id = ledger.create_review_item({
+                "documentId": first_id,
+                "reason": "newer-open-review",
+                "details": "Second open item.",
+            })
+            resolved_id = ledger.create_review_item({
+                "documentId": first_id,
+                "reason": "resolved-review",
+                "details": "Resolved item.",
+            })
+            ledger.resolve_review_item(
+                resolved_id,
+                status="resolved",
+                resolution="Already handled.",
+            )
+
+            documents = ledger.get_documents_with_review_items(
+                [first_id, second_id, first_id, "invalid"],
+                review_status=("pending", "in_review"),
+            )
+
+            self.assertEqual(set(documents), {first_id, second_id})
+            self.assertEqual(documents[second_id]["review_items"], [])
+            self.assertEqual(
+                [item["id"] for item in documents[first_id]["review_items"]],
+                [newer_id, older_id],
+            )
+            self.assertNotIn(
+                resolved_id,
+                [item["id"] for item in documents[first_id]["review_items"]],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

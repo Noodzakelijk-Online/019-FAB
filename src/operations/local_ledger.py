@@ -4162,6 +4162,77 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_documents_with_review_items(
+        self,
+        document_ids: Sequence[int],
+        review_status: Optional[Any] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Load document rows and their selected reviews without full histories."""
+        bounded_ids = []
+        seen_ids = set()
+        for value in document_ids:
+            document_id = self._optional_int(value)
+            if document_id is None or document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            bounded_ids.append(document_id)
+            if len(bounded_ids) >= 10000:
+                break
+        if not bounded_ids:
+            return {}
+
+        documents: Dict[int, Dict[str, Any]] = {}
+        review_rows = []
+        with self._connection() as connection:
+            for chunk_start in range(0, len(bounded_ids), 500):
+                chunk = bounded_ids[chunk_start:chunk_start + 500]
+                placeholders = ", ".join("?" for _ in chunk)
+                document_rows = connection.execute(
+                    f"""
+                    SELECT * FROM bookkeeping_documents
+                    WHERE id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in document_rows:
+                    document = self._row_to_dict(row)
+                    document["review_items"] = []
+                    documents[int(document["id"])] = document
+
+                where = [f"document_id IN ({placeholders})"]
+                params = list(chunk)
+                self._append_status_filter(
+                    where,
+                    params,
+                    "status",
+                    review_status,
+                )
+                review_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT * FROM review_items
+                        WHERE {' AND '.join(where)}
+                        ORDER BY created_at DESC, id DESC
+                        """,
+                        params,
+                    ).fetchall()
+                )
+
+        for row in review_rows:
+            review = self._row_to_dict(row)
+            document = documents.get(int(review["document_id"]))
+            if document is not None:
+                document["review_items"].append(review)
+        for document in documents.values():
+            document["review_items"].sort(
+                key=lambda item: (
+                    str(item.get("created_at") or ""),
+                    int(item.get("id") or 0),
+                ),
+                reverse=True,
+            )
+        return documents
+
     def get_document_delivery_context(
         self,
         document_ids: Sequence[int],

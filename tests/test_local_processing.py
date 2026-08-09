@@ -8,6 +8,7 @@ from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_processing import (
     LocalDocumentProcessor,
     STORED_OCR_REASSESSMENT_VERSION,
+    duplicate_candidate_reassessment_plan,
     duplicate_link_cycles,
 )
 
@@ -1511,6 +1512,65 @@ class TestLocalDocumentProcessor(unittest.TestCase):
                     )
                 },
                 {"duplicate_candidate"},
+            )
+
+    def test_duplicate_reassessment_plan_uses_one_compact_document_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            canonical_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-charge-april",
+                "originalFilename": "april.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-04-21",
+                "totalAmount": 37.68,
+                "extractedData": {"invoice_number": "april-statement"},
+            })
+            subject_id = ledger.register_document({
+                "source": "gmail",
+                "sourceDocumentId": "monthly-charge-may",
+                "originalFilename": "may.pdf",
+                "documentType": "vendor_invoice",
+                "processingStatus": "needs_review",
+                "vendorName": "T-Mobile",
+                "transactionDate": "2023-05-19",
+                "totalAmount": 37.68,
+                "extractedData": {"invoice_number": "may-statement"},
+            })
+            ledger.record_duplicate_candidate({
+                "documentId": subject_id,
+                "candidateDocumentId": canonical_id,
+                "matchType": "fuzzy_document_match",
+                "confidenceScore": 0.95,
+                "status": "pending",
+            })
+            ledger.create_review_item({
+                "documentId": subject_id,
+                "reason": "duplicate_candidate",
+                "details": "Review stale recurring-charge evidence.",
+            })
+
+            with patch.object(
+                ledger,
+                "get_documents_with_review_items",
+                wraps=ledger.get_documents_with_review_items,
+            ) as compact_snapshot, patch.object(
+                ledger,
+                "get_document",
+                side_effect=AssertionError("full document history must not be loaded"),
+            ) as full_document:
+                plans = duplicate_candidate_reassessment_plan(ledger)
+
+            compact_snapshot.assert_called_once()
+            full_document.assert_not_called()
+            self.assertEqual(len(plans), 1)
+            self.assertEqual(plans[0]["pair"], [canonical_id, subject_id])
+            self.assertEqual(plans[0]["action"], "reject")
+            self.assertEqual(
+                plans[0]["subjectDocument"]["review_items"][0]["reason"],
+                "duplicate_candidate",
             )
 
     def test_duplicate_reassessment_clears_only_disproven_pending_pair_link(self):
