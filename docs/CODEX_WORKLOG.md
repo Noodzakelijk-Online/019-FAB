@@ -1,5 +1,15 @@
 # Codex Worklog
 
+## 2026-08-09 - Guided activation and review draft continuity
+
+- Replaced the descriptive activation checklist with a dependency-ordered five-step flow over Google Drive, Gmail, Wave, the supervised Wave receipt session, and queue-wide posting decisions. The dashboard now shows authoritative progress, highlights one current step, and opens the matching guarded setup surface.
+- Kept activation truthful: progress advances only when live connector or review state changes, and no setup action is represented as transaction execution, attachment verification, or Drive archival.
+- Added source-backed review draft recovery in tab-scoped browser storage. Drafts restore after drawer close or dashboard reload only for the exact unchanged review/source identity, reject malformed, oversized, stale, or future-dated state, expire after seven days, and clear after successful approval or explicit discard.
+- Live Browser acceptance showed `3/5 ready`, selected the stale Wave receipt session as the next action, opened its drawer, and found no console warnings/errors. A review note survived close/reopen and full reload; explicit discard restored the original form. No review was submitted.
+- Narrow activation geometry stayed within the component and page bounds, and the desktop view retained a readable progress/action hierarchy.
+- Verification passed all four backend shards (`801 passed`, `4 skipped`), all 174 web tests across 19 files, TypeScript checking, production build budgets, and the production dependency audit. Implementation commit `cc718f3` is on `origin/main`; GitHub Actions run `31333616656` passed the frontend, Linux backend, and all four Windows backend jobs.
+- No provider record, review decision, source file, Drive archive, or external submission was changed.
+
 ## 2026-08-09 - Consistent ledger snapshots and control-center latency
 
 - Reprofiled every one of the 29 operator control-center resources against the live 150-document ledger. Exception enrichment was the slowest remaining independent resource, and delivery work orders repeated trusted Gmail scanner path resolution while building one immutable response.

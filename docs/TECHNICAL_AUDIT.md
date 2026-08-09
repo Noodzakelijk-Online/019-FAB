@@ -102,6 +102,14 @@ Audit date: 2026-08-09
   hash checks. Live exception latency fell from 308.57 ms to 85.28 ms median,
   150-work-order latency from 222.81 ms to 125.52 ms, and the complete cold
   control center to 709.21 ms median with a 31.61 ms immediate-repeat median.
+- Replaced the descriptive activation checklist with a tested, dependency-ordered
+  five-step flow. Progress comes from live Drive, Gmail, Wave, receipt-executor,
+  and queue-wide review state; the current action opens the existing guarded
+  setup surface and cannot bypass any provider or approval gate.
+- Added tab-scoped review draft recovery for source-backed correction forms.
+  Drafts are schema-bounded, exact-review/source-identity-bound, seven-day
+  expiring, cleared after successful approval, explicitly discardable, and
+  never written to the authoritative ledger before the operator submits.
 
 ## Remaining risks
 

@@ -25,7 +25,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 018 Rate limits, cooldowns, and provider quotas | Implemented | Shared limiter state and operational health issues. |
 | 019 Audit logging and event history | Implemented | Persistent audit events across decisions and controls. |
 | 020 User-facing dashboard and next-action design | Implemented | Operator control center with blockers and next actions. |
-| 021 Forms, validation, and autosave behavior | Partial | Validation is wired; universal draft autosave is not implemented. |
+| 021 Forms, validation, and autosave behavior | Partial | Validation is wired. Source-backed review corrections now save in tab-scoped browser storage, restore only for the exact unchanged review/source identity, expire after seven days, clear after approval, and support explicit discard. Universal draft autosave across every low-risk form remains broader follow-up work. |
 | 022 Search, filters, sorting, and pagination | Partial | The review queue now pages complete document groups on the server and incrementally loads the entire filtered-open queue while preserving client triage/search over loaded records. Existing exception and delivery pagination remain; not every low-volume table paginates. |
 | 023 Import and export workflows | Implemented | File/provider intake and approval-gated exports. |
 | 024 Templates, presets, and reusable user defaults | Partial | Rules/mappings/preferences exist; broader reusable presets remain. |
@@ -109,7 +109,7 @@ Status meanings: **Implemented** is reachable, wired, tested, and documented in 
 | 102 Data retention and archival policy | Implemented | Retention/compliance services and evidence-gated Drive archival. |
 | 103 Migration from prototype to production | Partial | Local operational product, maintenance recovery, and supported release packages work; duplicate prototype launchers and placeholder helpers are retired. Live deployment, provider, accountant, and legal acceptance gates remain. |
 | 104 Operator safety stop and emergency controls | Implemented | Persistent audited stop, per-step checks, dashboard/API/HAI policy. |
-| 105 User onboarding and first-run wizard | Partial | Activation checklist/setup drawers exist; end-to-end guided wizard remains. |
+| 105 User onboarding and first-run wizard | Implemented | The operator dashboard derives a dependency-ordered five-step activation path from authoritative Drive, Gmail, Wave, receipt-executor, and queue-wide review readiness. It shows exact progress, highlights one current step, opens the matching existing setup/review surface, advances only when live readiness changes, and never treats setup progress as provider execution. |
 | 106 Role-based settings and team permissions | Partial | Admin/operator gating exists; granular multi-user team permissions remain. |
 | 107 Quality scoring and confidence display | Implemented | Confidence, evidence, extraction and review status are retained/displayed. |
 | 108 Human decision minimization | Implemented | Eligible local repair and processing automate; queue focuses exceptions. |
