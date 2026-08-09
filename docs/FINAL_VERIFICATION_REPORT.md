@@ -32,7 +32,7 @@ This report separates local software verification from provider, account, infras
 | Desktop/mobile browser QA | Pass with tooling limitation | In-app Browser DOM, geometry, and current-load console checks passed at desktop and mobile breakpoints: meaningful live content, no framework overlay, no document-level horizontal overflow, no control overlap, contained scrollable tables, and zero current browser errors/warnings. Mobile controls outside the viewport belong only to the intentionally closed navigation drawer. Screenshot capture remains unavailable in the Browser runtime. |
 | No-excuses search | Pass | No operational `TODO`, `FIXME`, fake-success, mock-integration, or placeholder-credential path remains. Unsupported features are explicitly documented as unavailable or supervised. |
 | Tracked-secret/runtime scan | Pass | The staged implementation snapshot contained no runtime-data paths and no high-confidence private-key, Google, GitHub, Slack, Stripe-live, or OAuth-secret patterns. |
-| Fresh-clone verification | Pass | Clean GitHub clone of `8b3d1a7`: exact remote hash, clean status, changed-module compilation, Compose config, and `11 passed` focused configuration/health/API/support tests; one third-party `dateutil` deprecation warning. |
+| Fresh-clone verification | Pass | Clean GitHub clone of implementation commit `d563d95`: exact remote hash, clean status, changed-module compilation, frozen web install, zero-vulnerability audit, TypeScript check, `3 passed` focused API tests, and `18 passed` gateway/static tests; one third-party `dateutil` deprecation warning. |
 
 ## Provider state
 
