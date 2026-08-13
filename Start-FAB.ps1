@@ -155,6 +155,7 @@ function Test-FabDashboardProcess {
         return (
             $command.Contains("server/dev.ts") -or
             $command.Contains("dist/index.js") -or
+            $command.Contains("dist/fab-standalone.js") -or
             $command.Contains("tsx") -or
             $command.Contains("pnpm") -or
             $command.Contains("npm-cli.js")
@@ -239,7 +240,7 @@ function Get-FabDashboardMode {
 
     if ($Process -and $Process.CommandLine) {
         $command = ([string]$Process.CommandLine).Replace("\", "/").ToLowerInvariant()
-        if ($command.Contains("dist/index.js")) {
+        if ($command.Contains("dist/index.js") -or $command.Contains("dist/fab-standalone.js")) {
             return "production"
         }
     }
@@ -283,7 +284,7 @@ function Find-RunningFabDashboard {
 function Test-FabWebBuildCurrent {
     param([Parameter(Mandatory = $true)][string]$ExpectedWebRoot)
 
-    $serverOutput = Join-Path $ExpectedWebRoot "dist\index.js"
+    $serverOutput = Join-Path $ExpectedWebRoot "dist\fab-standalone.js"
     $clientOutput = Join-Path $ExpectedWebRoot "dist\public\index.html"
     if (-not (Test-Path -LiteralPath $serverOutput) -or -not (Test-Path -LiteralPath $clientOutput)) {
         return $false
@@ -767,7 +768,7 @@ if ($savedRuntime -and $savedRuntime.dashboardUrl) {
             }
             $listenerProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $webListenerPid" -ErrorAction SilentlyContinue
             $webMode = Get-FabDashboardMode -Process $listenerProcess
-            $webProcessMarker = if ($webMode -eq "production") { "dist/index.js" } else { "dev" }
+            $webProcessMarker = if ($webMode -eq "production") { "dist/fab-standalone.js" } else { "dev" }
         }
     }
     else {
@@ -783,7 +784,7 @@ if (-not $webPid) {
         $dashboardUrl = [string]$runningDashboard.DashboardUrl
         $webIdentityUrl = [string]$runningDashboard.IdentityUrl
         $webMode = [string]$runningDashboard.Mode
-        $webProcessMarker = if ($webMode -eq "production") { "dist/index.js" } else { "dev" }
+        $webProcessMarker = if ($webMode -eq "production") { "dist/fab-standalone.js" } else { "dev" }
     }
 }
 
@@ -824,12 +825,16 @@ if (-not $webPid) {
     $previousWebInstanceRoot = $env:FAB_INSTANCE_ROOT
     $previousNodeEnvironment = $env:NODE_ENV
     $previousJwtSecret = $env:JWT_SECRET
+    $previousWebHost = $env:FAB_WEB_HOST
+    $previousOperatorLocalMode = $env:FAB_OPERATOR_LOCAL_MODE
     try {
         $env:PORT = [string]$webPort
         $env:FAB_LOCAL_API_URL = $apiBaseUrl
         $env:FAB_LOCAL_API_PUBLIC_URL = $apiBaseUrl
         $env:FAB_INSTANCE_ROOT = $root
         $env:JWT_SECRET = $webJwtSecret
+        $env:FAB_WEB_HOST = "127.0.0.1"
+        $env:FAB_OPERATOR_LOCAL_MODE = "true"
         if ($apiToken) {
             $env:FAB_LOCAL_API_TOKEN = $apiToken
             $env:FAB_OPERATIONS_SERVICE_TOKEN = $apiToken
@@ -845,8 +850,8 @@ if (-not $webPid) {
         }
         else {
             $env:NODE_ENV = "production"
-            $webProcess = Start-Process -FilePath $node.Source -ArgumentList @((Join-Path $webRoot "dist\index.js")) -WorkingDirectory $webRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "web.out.log") -RedirectStandardError (Join-Path $logsRoot "web.err.log") -PassThru
-            $webProcessMarker = "dist/index.js"
+            $webProcess = Start-Process -FilePath $node.Source -ArgumentList @((Join-Path $webRoot "dist\fab-standalone.js")) -WorkingDirectory $webRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logsRoot "web.out.log") -RedirectStandardError (Join-Path $logsRoot "web.err.log") -PassThru
+            $webProcessMarker = "dist/fab-standalone.js"
         }
         $webPid = $webProcess.Id
     }
@@ -898,6 +903,18 @@ if (-not $webPid) {
         }
         else {
             $env:JWT_SECRET = $previousJwtSecret
+        }
+        if ($null -eq $previousWebHost) {
+            Remove-Item Env:FAB_WEB_HOST -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_WEB_HOST = $previousWebHost
+        }
+        if ($null -eq $previousOperatorLocalMode) {
+            Remove-Item Env:FAB_OPERATOR_LOCAL_MODE -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:FAB_OPERATOR_LOCAL_MODE = $previousOperatorLocalMode
         }
     }
 }

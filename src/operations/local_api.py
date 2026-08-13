@@ -4975,10 +4975,17 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                 "status": "unsupported_view",
                 "supportedViews": ["complete", "summary"],
             }), 400
+        item_limit = request.args.get("itemsLimit")
+        if item_limit is not None:
+            try:
+                item_limit = max(0, min(int(item_limit), 200))
+            except (TypeError, ValueError):
+                return jsonify({"error": "itemsLimit must be an integer from 0 to 200"}), 400
         return jsonify(
             DriveWaveDeliveryService(ledger, config).list_work_orders(
                 limit=_limit_arg(),
                 compact=view == "summary",
+                item_limit=item_limit,
             )
         )
 

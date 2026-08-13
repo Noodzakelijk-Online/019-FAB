@@ -121,15 +121,15 @@ export type FabControlCenter = {
 
 const DEFAULT_FAB_LOCAL_API_URL = "http://127.0.0.1:5001";
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const MAX_CONCURRENT_READS = 4;
+const MAX_CONCURRENT_READS = 8;
 // Start the costliest independent reads first so the bounded worker pool does
 // not leave a long-running request at the end of the dashboard refresh.
 const READ_PATHS = {
   backups: "/api/backups?limit=5&verify=false",
   autonomy: "/api/autonomy/plan?limit=25",
-  reviewQueue: "/api/review?status=open&limit=50&offset=0&view=summary",
+  reviewQueue: "/api/review?status=open&limit=25&offset=0&view=summary",
   exceptions: "/api/exceptions?limit=25&includeEntities=true",
-  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&view=summary",
+  driveWaveWorkOrders: "/api/drive-wave/work-orders?limit=200&itemsLimit=25&view=summary",
   health: "/api/health",
   closeReadiness: "/api/close-readiness",
   reportRuns: "/api/report-runs?limit=5",
@@ -167,7 +167,10 @@ const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
 };
 
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
-const CONTROL_CENTER_CACHE_TTL_MS = 2_000;
+// The operator UI polls once per minute. Keep one immutable verified snapshot
+// just beyond that interval so normal polling does not rebuild 29 resources.
+// Mutations and explicit refreshes invalidate this snapshot immediately.
+const CONTROL_CENTER_CACHE_TTL_MS = 65_000;
 let controlCenterSnapshot: { value: FabControlCenter; expiresAt: number } | null = null;
 let controlCenterInFlight: Promise<FabControlCenter> | null = null;
 let controlCenterCacheGeneration = 0;
@@ -314,6 +317,11 @@ export async function getFabControlCenter(): Promise<FabControlCenter> {
   } finally {
     if (controlCenterInFlight === request) controlCenterInFlight = null;
   }
+}
+
+export async function refreshFabControlCenter(): Promise<FabControlCenter> {
+  invalidateFabControlCenterSnapshot();
+  return getFabControlCenter();
 }
 
 async function buildFabControlCenter(): Promise<FabControlCenter> {

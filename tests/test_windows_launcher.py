@@ -21,6 +21,17 @@ class TestWindowsLauncher(unittest.TestCase):
         self.assertIn("$previousWorkerInstanceRoot = $env:FAB_INSTANCE_ROOT", script)
         self.assertIn("$previousWebInstanceRoot = $env:FAB_INSTANCE_ROOT", script)
         self.assertIn("Remove-Item Env:FAB_INSTANCE_ROOT", script)
+        self.assertIn('dist\\fab-standalone.js', script)
+        self.assertIn('"dist/fab-standalone.js"', script)
+        self.assertIn('$env:FAB_WEB_HOST = "127.0.0.1"', script)
+        self.assertIn('$env:FAB_OPERATOR_LOCAL_MODE = "true"', script)
+        self.assertIn("Remove-Item Env:FAB_WEB_HOST", script)
+        self.assertIn("Remove-Item Env:FAB_OPERATOR_LOCAL_MODE", script)
+
+    def test_stop_launcher_recognizes_the_lean_operator_server(self):
+        script = (ROOT / "Stop-FAB.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('dist/fab-standalone.js', script)
 
     def test_launcher_reconciles_only_its_checksum_bound_virtual_environment(self):
         script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")

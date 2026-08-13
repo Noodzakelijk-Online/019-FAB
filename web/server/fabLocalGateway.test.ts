@@ -8,6 +8,7 @@ import {
   getFabLocalApiBaseUrl,
   getFabReviewPage,
   importFabBankStatement,
+  refreshFabControlCenter,
   resetFabControlCenterCacheForTests,
   resolveFabReviewItem,
   runFabOperatorCommand,
@@ -747,8 +748,15 @@ describe("FAB local API gateway", () => {
     expect(fetchMock.mock.calls.some(([input]) => {
       const url = new URL(String(input));
       return url.pathname === "/api/review"
-        && url.searchParams.get("limit") === "50"
+        && url.searchParams.get("limit") === "25"
         && url.searchParams.get("offset") === "0"
+        && url.searchParams.get("view") === "summary";
+    })).toBe(true);
+    expect(fetchMock.mock.calls.some(([input]) => {
+      const url = new URL(String(input));
+      return url.pathname === "/api/drive-wave/work-orders"
+        && url.searchParams.get("limit") === "200"
+        && url.searchParams.get("itemsLimit") === "25"
         && url.searchParams.get("view") === "summary";
     })).toBe(true);
     const serialized = JSON.stringify(result);
@@ -834,7 +842,7 @@ describe("FAB local API gateway", () => {
     expect(masterLedgerRequest).toBeDefined();
     expect(new URL(String(masterLedgerRequest?.[0])).searchParams.get("summaryOnly")).toBe("true");
     expect(fetchMock.mock.calls.length).toBeGreaterThan(20);
-    expect(maximumActiveRequests).toBeLessThanOrEqual(4);
+    expect(maximumActiveRequests).toBeLessThanOrEqual(8);
   });
 
   it("coalesces duplicate snapshots and invalidates them after a mutation", async () => {
@@ -862,6 +870,26 @@ describe("FAB local API gateway", () => {
     await runFabOperatorCommand("refresh_notifications", "operator-cache-test");
     expect(fetchMock).toHaveBeenCalledTimes(firstSnapshotCalls + 1);
     await getFabControlCenter();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(firstSnapshotCalls + 20);
+  });
+
+  it("keeps automatic polling cached while explicit refresh reloads every resource", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ status: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await getFabControlCenter();
+    const firstSnapshotCalls = fetchMock.mock.calls.length;
+    const polled = await getFabControlCenter();
+
+    expect(polled).toBe(first);
+    expect(fetchMock).toHaveBeenCalledTimes(firstSnapshotCalls);
+
+    const refreshed = await refreshFabControlCenter();
+
+    expect(refreshed).not.toBe(first);
     expect(fetchMock.mock.calls.length).toBeGreaterThan(firstSnapshotCalls + 20);
   });
 

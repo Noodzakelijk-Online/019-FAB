@@ -33,7 +33,7 @@ import {
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { stripeRouter } from "./routers/stripe";
-import { publicProcedure, router, adminProcedure, fabOperatorProcedure } from "./_core/trpc";
+import { publicProcedure, router, adminProcedure } from "./_core/trpc";
 import {
   addToWaitlist,
   getWaitlistCount,
@@ -86,23 +86,7 @@ import {
   buildAutomationWorkflowMasterLedgerProjection,
   buildAutomationWorkflowMasterLedgerCsv,
 } from "@shared/masterLedgerProjection";
-import {
-  FAB_OPERATOR_COMMAND_IDS,
-  createFabBackup,
-  createFabSupportBundle,
-  getFabControlCenter,
-  getFabReviewPage,
-  importFabBankStatement,
-  resolveFabReviewItem,
-  runFabOperatorCommand,
-  saveFabWaveSetup,
-  startFabGmailAuthorization,
-  startFabGoogleDriveAuthorization,
-  uploadFabGmailCredentials,
-  uploadFabGoogleDriveCredentials,
-  uploadFabIntakeFile,
-  validateFabWaveSetup,
-} from "./fabLocalGateway";
+import { fabRouter } from "./fabRouter";
 import { z } from "zod";
 
 const log = createLogger("Router");
@@ -436,151 +420,7 @@ export const appRouter = router({
   system: systemRouter,
   stripe: stripeRouter,
 
-  fab: router({
-    access: fabOperatorProcedure.query(({ ctx }) => ({
-      allowed: true,
-      mode: ctx.fabOperatorMode,
-      operatorLabel: ctx.user?.name || ctx.user?.email || "Local operator",
-    })),
-    controlCenter: fabOperatorProcedure.query(async () => getFabControlCenter()),
-    reviewPage: fabOperatorProcedure
-      .input(z.object({
-        offset: z.number().int().min(0).max(10_000_000),
-        limit: z.number().int().min(1).max(100).optional(),
-      }).strict())
-      .query(async ({ input }) => getFabReviewPage(input)),
-    createBackup: fabOperatorProcedure
-      .mutation(async ({ ctx }) => createFabBackup(
-        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      )),
-    createSupportBundle: fabOperatorProcedure
-      .mutation(async ({ ctx }) => createFabSupportBundle(
-        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      )),
-    uploadIntake: fabOperatorProcedure
-      .input(z.object({
-        filename: z.string().trim().min(1).max(255),
-        mimeType: z.string().trim().max(150).optional(),
-        contentBase64: z.string().min(4).max(8_500_000),
-      }).strict())
-      .mutation(async ({ input }) => uploadFabIntakeFile(input)),
-    importBankStatement: fabOperatorProcedure
-      .input(z.object({
-        filename: z.string().trim().min(1).max(255).regex(
-          /\.(csv|json|xml|camt|sta|mt940)$/i,
-          "Bank statement must be CSV, JSON, CAMT/XML, or MT940",
-        ),
-        format: z.enum(["csv", "json", "camt", "mt940"]),
-        accountIdentifier: z.string().trim().min(1).max(200),
-        contentBase64: z.string().min(4).max(5_600_000),
-      }).strict().superRefine((input, ctx) => {
-        const extensions: Record<typeof input.format, string[]> = {
-          csv: [".csv"],
-          json: [".json"],
-          camt: [".camt", ".xml"],
-          mt940: [".mt940", ".sta"],
-        };
-        const filename = input.filename.toLowerCase();
-        if (!extensions[input.format].some((extension) => filename.endsWith(extension))) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["filename"],
-            message: `File extension does not match ${input.format} format`,
-          });
-        }
-      }))
-      .mutation(async ({ input, ctx }) => importFabBankStatement({
-        ...input,
-        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      })),
-    installGmailCredentials: fabOperatorProcedure
-      .input(z.object({
-        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
-        contentBase64: z.string().min(4).max(90_000),
-        replace: z.boolean().optional(),
-      }).strict())
-      .mutation(async ({ input, ctx }) => uploadFabGmailCredentials({
-        ...input,
-        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      })),
-    startGmailAuthorization: fabOperatorProcedure
-      .mutation(async ({ ctx }) => startFabGmailAuthorization(
-        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      )),
-    installGoogleDriveCredentials: fabOperatorProcedure
-      .input(z.object({
-        filename: z.string().trim().min(1).max(255).regex(/\.json$/i, "Desktop OAuth credentials must be a JSON file"),
-        contentBase64: z.string().min(4).max(90_000),
-        replace: z.boolean().optional(),
-      }).strict())
-      .mutation(async ({ input, ctx }) => uploadFabGoogleDriveCredentials({
-        ...input,
-        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      })),
-    startGoogleDriveAuthorization: fabOperatorProcedure
-      .mutation(async ({ ctx }) => startFabGoogleDriveAuthorization(
-        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      )),
-    saveWaveSetup: fabOperatorProcedure
-      .input(z.object({
-        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
-        accessToken: z.string().trim().min(10).max(16_384).optional(),
-        businessId: z.string().trim().min(1).max(255).optional(),
-        anchorAccountId: z.string().trim().min(1).max(255).optional(),
-        // An empty value explicitly clears the optional fallback account.
-        defaultCategoryAccountId: z.string().trim().max(255).optional(),
-        categoryAccountIds: z.record(z.string().trim().min(1).max(255), z.string().trim().min(1).max(255)).optional(),
-        clearAccessToken: z.boolean().optional(),
-      }).strict())
-      .mutation(async ({ input, ctx }) => saveFabWaveSetup({
-        ...input,
-        actor: ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-      })),
-    validateWaveSetup: fabOperatorProcedure
-      .input(z.object({
-        targetSystem: z.enum(["waveapps_business", "waveapps_personal"]).optional(),
-      }).strict())
-      .mutation(async ({ input }) => validateFabWaveSetup(input.targetSystem)),
-    resolveReview: fabOperatorProcedure
-      .input(z.object({
-        reviewItemId: z.number().int().positive(),
-        status: z.enum(["approved", "rejected", "resolved", "ignored"]),
-        resolution: z.string().trim().min(3).max(1000),
-        corrections: z.object({
-          vendorName: z.string().trim().min(1).max(255).optional(),
-          category: z.string().trim().min(1).max(255).optional(),
-          transactionDate: z.iso.date().optional(),
-          totalAmount: z.number().finite().positive().optional(),
-          vatAmount: z.number().finite().nonnegative().optional(),
-          targetSystem: z.enum(["waveapps_business", "waveapps_personal", "mijngeldzaken"]).optional(),
-          duplicateOfDocumentId: z.number().int().positive().optional(),
-          duplicateCandidateId: z.number().int().positive().optional(),
-          documentType: z.enum(["receipt", "vendor_invoice", "credit_note", "order_confirmation", "estimate", "bank_statement", "insurance_policy", "government_correspondence"]).optional(),
-        }).strict().optional(),
-        learnRule: z.boolean().optional(),
-        applyToMatchingVendor: z.boolean().optional(),
-      }).strict())
-      .mutation(async ({ input }) => resolveFabReviewItem(input)),
-    runCommand: fabOperatorProcedure
-      .input(z.object({
-        commandId: z.enum(FAB_OPERATOR_COMMAND_IDS),
-        payload: z.object({
-          limit: z.number().int().min(1).max(500).optional(),
-          sources: z.array(z.enum(["gmail", "google_drive", "freshdesk", "google_photos"])).max(4).optional(),
-          dryRun: z.boolean().optional(),
-          fromDate: z.iso.date().optional(),
-          toDate: z.iso.date().optional(),
-          targetSystem: z.string().trim().max(100).optional(),
-          reason: z.string().trim().min(1).max(500).optional(),
-          confirmation: z.string().trim().max(100).optional(),
-        }).strict().optional(),
-      }))
-      .mutation(async ({ input, ctx }) => runFabOperatorCommand(
-        input.commandId,
-        ctx.user ? `fab_dashboard:${ctx.user.id}` : "fab_dashboard:local_operator",
-        input.payload || {},
-      )),
-  }),
+  fab: fabRouter,
 
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),

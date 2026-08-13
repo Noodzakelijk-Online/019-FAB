@@ -1,9 +1,13 @@
 import type { Request } from "express";
 import { ENV } from "./_core/env";
-import { sdk } from "./_core/sdk";
 import { isLoopbackRequest } from "./lib/loopback";
 
-type AuthenticateRequest = typeof sdk.authenticateRequest;
+type AuthenticatedOperator = {
+  id?: number | string;
+  openId?: string;
+  role?: string;
+};
+type AuthenticateRequest = (request: Request) => Promise<AuthenticatedOperator | null>;
 
 export type FabOperatorAccess = {
   actor: string | null;
@@ -42,8 +46,10 @@ export async function resolveFabOperatorAccess(
   }
 
   try {
-    const authenticateRequest = options.authenticateRequest
-      ?? sdk.authenticateRequest.bind(sdk);
+    const authenticateRequest = options.authenticateRequest ?? (async (request: Request) => {
+      const { sdk } = await import("./_core/sdk");
+      return sdk.authenticateRequest(request);
+    });
     const user = await authenticateRequest(req);
     if (user?.role === "admin") {
       return {

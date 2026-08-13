@@ -66,6 +66,7 @@ function Test-FabDashboardProcess {
     if ($command.Contains($webRootMarker)) {
         return (
             $command.Contains("server/dev.ts") -or
+            $command.Contains("dist/fab-standalone.js") -or
             $command.Contains("dist/index.js") -or
             $command.Contains("tsx") -or
             $command.Contains("pnpm") -or

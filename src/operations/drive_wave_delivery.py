@@ -174,15 +174,21 @@ class DriveWaveDeliveryService:
         limit: int = 100,
         *,
         compact: bool = False,
+        item_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         with self.ledger.read_snapshot():
-            return self._list_work_orders(limit, compact=compact)
+            return self._list_work_orders(
+                limit,
+                compact=compact,
+                item_limit=item_limit,
+            )
 
     def _list_work_orders(
         self,
         limit: int,
         *,
         compact: bool,
+        item_limit: Optional[int],
     ) -> Dict[str, Any]:
         documents = self._candidate_documents(limit)
         contexts = self._delivery_contexts(documents)
@@ -219,7 +225,7 @@ class DriveWaveDeliveryService:
             "view": "summary" if compact else "complete",
             "count": len(work_orders),
             "summary": summary,
-            "workOrders": work_orders,
+            "workOrders": work_orders[:item_limit] if item_limit is not None else work_orders,
             "externalSubmission": "not_executed",
         }
         if not compact:

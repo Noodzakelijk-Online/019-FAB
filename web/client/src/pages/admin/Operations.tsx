@@ -77,6 +77,14 @@ export default function AdminOperations() {
     refetchInterval: 60_000,
     refetchOnWindowFocus: false,
   });
+  const refreshControlCenter = trpc.fab.refreshControlCenter.useMutation({
+    onSuccess: (result) => {
+      utils.fab.controlCenter.setData(undefined, result);
+    },
+  });
+  const refresh = useCallback(async () => {
+    await refreshControlCenter.mutateAsync();
+  }, [refreshControlCenter]);
   const runCommand = trpc.fab.runCommand.useMutation({
     onSuccess: async (result) => {
       const commandResult = asRecord(result.result);
@@ -320,8 +328,8 @@ export default function AdminOperations() {
       operatorLabel={operatorLabel}
       search={search}
       onSearchChange={setSearch}
-      onRefresh={() => { void controlCenter.refetch(); }}
-      refreshing={controlCenter.isFetching}
+      onRefresh={() => { void refresh(); }}
+      refreshing={controlCenter.isFetching || refreshControlCenter.isPending}
       onOpenCommands={() => setCommandDrawerOpen(true)}
       reviewCount={data?.metrics.pendingReviewDocuments}
     >
@@ -339,7 +347,7 @@ export default function AdminOperations() {
             <div className="fab-system-banner tone-bad">
               <AlertCircle aria-hidden="true" />
               <div><strong>{copy("FAB local API is disconnected", "De lokale FAB-API is niet verbonden")}</strong><span>{text(data?.connection.error, copy("Start the local FAB API and verify the server-side URL and token.", "Start de lokale FAB-API en controleer de server-URL en het token."))}</span></div>
-              <button className="fab-secondary-button compact" onClick={() => { void controlCenter.refetch(); }}>{copy("Retry", "Opnieuw proberen")}</button>
+              <button className="fab-secondary-button compact" onClick={() => { void refresh(); }}>{copy("Retry", "Opnieuw proberen")}</button>
             </div>
           )}
           {Boolean(data?.partialErrors.length) && connected && (
@@ -512,7 +520,7 @@ export default function AdminOperations() {
         onClose={() => setGmailSetupOpen(false)}
         onInstallCredentials={installScannerCredentials}
         onStartAuthorization={authorizeScanner}
-        onRefresh={async () => { await controlCenter.refetch(); }}
+        onRefresh={refresh}
       />
       <FabGoogleDriveSetupDrawer
         open={driveSetupOpen}
@@ -522,7 +530,7 @@ export default function AdminOperations() {
         onClose={() => setDriveSetupOpen(false)}
         onInstallCredentials={installDriveCredentials}
         onStartAuthorization={authorizeDrive}
-        onRefresh={async () => { await controlCenter.refetch(); }}
+        onRefresh={refresh}
       />
       <FabWaveSetupDrawer
         open={waveSetupOpen}
@@ -532,7 +540,7 @@ export default function AdminOperations() {
         onClose={() => setWaveSetupOpen(false)}
         onSave={saveWaveConnection}
         onValidate={validateWaveConnection}
-        onRefresh={async () => { await controlCenter.refetch(); }}
+        onRefresh={refresh}
       />
       <FabWaveReceiptExecutorDrawer
         open={waveReceiptExecutorOpen}
@@ -540,7 +548,7 @@ export default function AdminOperations() {
         executor={data?.waveReceiptExecutor || {}}
         localApiEndpoint={data?.connection.endpoint || "http://127.0.0.1:5001"}
         onClose={() => setWaveReceiptExecutorOpen(false)}
-        onRefresh={async () => { await controlCenter.refetch(); }}
+        onRefresh={refresh}
       />
     </FabOperatorShell>
   );

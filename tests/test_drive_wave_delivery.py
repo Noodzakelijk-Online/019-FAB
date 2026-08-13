@@ -1028,7 +1028,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         client = create_app(config).test_client()
 
         listed = client.get("/api/drive-wave/work-orders?limit=10")
-        compact = client.get("/api/drive-wave/work-orders?limit=10&view=summary")
+        compact = client.get("/api/drive-wave/work-orders?limit=10&itemsLimit=1&view=summary")
         unsupported = client.get("/api/drive-wave/work-orders?view=unknown")
         document_order = client.get(
             f"/api/drive-wave/documents/{self.document_id}/work-order"
@@ -1038,6 +1038,8 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.get_json()["count"], 1)
         self.assertEqual(compact.status_code, 200)
+        self.assertEqual(compact.get_json()["count"], listed.get_json()["count"])
+        self.assertEqual(len(compact.get_json()["workOrders"]), 1)
         self.assertEqual(compact.get_json()["view"], "summary")
         self.assertNotIn("evidence", compact.get_json()["workOrders"][0])
         self.assertEqual(unsupported.status_code, 400)
