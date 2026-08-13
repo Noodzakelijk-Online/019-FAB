@@ -45,6 +45,7 @@ AUTONOMOUS_TRIGGER = "local_autonomous_cycle"
 AUTONOMY_LEASE_NAME = "local_autonomous_cycle"
 WAVE_ENTITY_TARGETS = ("waveapps_business", "waveapps_personal")
 WAVE_ENTITY_TYPES = ("customer", "product", "invoice")
+AUTONOMY_MASTER_LEDGER_LIMIT = 500
 AUTONOMY_EXECUTION_ORDER = (
     "sync_connector_sources",
     "rescan_intake",
@@ -135,7 +136,9 @@ class LocalAutonomousService:
         metrics = metrics_summary if metrics_summary is not None else self.ledger.dashboard_metrics()
         master_ledger = master_ledger_summary
         if master_ledger is None:
-            master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(limit=500)
+            master_ledger = LocalMasterLedgerService(self.ledger, self.config).project(
+                limit=AUTONOMY_MASTER_LEDGER_LIMIT
+            )
         health = health_summary
         if health is None:
             health = LocalOperationsHealth(self.ledger, self.config).summarize(
@@ -178,6 +181,8 @@ class LocalAutonomousService:
         counts["connectorSyncableSources"] = len(connector_sync["syncableSources"])
         counts["waveEntitySyncConfiguredTargets"] = len(wave_entity_sync["configuredTargets"])
         counts["waveEntitySyncTargetsDue"] = len(wave_entity_sync["dueTargets"])
+        master_ledger_due = self._master_ledger_projection_due(master_ledger)
+        wave_daily_plan_due = self._wave_daily_plan_due(include_wave_plan)
         guarded_reasons = self._blocked_reasons(readiness, health)
         if emergency_stop.get("active"):
             guarded_reasons.append("operator_emergency_stop")
@@ -351,9 +356,11 @@ class LocalAutonomousService:
                 "close_report",
                 "low",
                 "read_only",
-                counts["masterLedgerRows"] > 0 and not blocked,
+                counts["masterLedgerRows"] > 0 and master_ledger_due and not blocked,
                 "No normalized bookkeeping records are available for a master-ledger projection."
                 if counts["masterLedgerRows"] == 0
+                else "The current master-ledger checksum is already recorded."
+                if not master_ledger_due
                 else None,
                 {
                     "rows": counts["masterLedgerRows"],
@@ -362,6 +369,7 @@ class LocalAutonomousService:
                     "readyForApproval": counts["masterLedgerReadyForApproval"],
                     "readyForExternalExecution": counts["masterLedgerReadyForExecution"],
                     "ledgerChecksum": master_ledger.get("ledgerChecksum"),
+                    "projectionDue": master_ledger_due,
                     "externalSubmission": "not_executed",
                 },
             ),
@@ -371,9 +379,17 @@ class LocalAutonomousService:
                 "close_report",
                 "low",
                 "read_only",
-                bool(include_wave_plan) and not blocked,
-                "Wave workflow planning was disabled for this request." if not include_wave_plan else None,
-                {"externalSubmission": "not_executed"},
+                bool(include_wave_plan) and wave_daily_plan_due and not blocked,
+                "Wave workflow planning was disabled for this request."
+                if not include_wave_plan
+                else "Today's Wave reconciliation plan is already recorded."
+                if not wave_daily_plan_due
+                else None,
+                {
+                    "planDate": date.today().isoformat(),
+                    "planDue": wave_daily_plan_due,
+                    "externalSubmission": "not_executed",
+                },
             ),
             _action(
                 "prepare_period_close_pack",
@@ -783,6 +799,12 @@ class LocalAutonomousService:
             if action_id in plan_actions
             and (selected_action_ids is None or action_id in selected_action_ids)
         ]
+        record_skipped_steps = _bool_config(
+            self.config,
+            "fab_autonomy_record_skipped_steps",
+            "operations_autonomy_record_skipped_steps",
+            default=True,
+        )
         step_metadata: Dict[str, Dict[str, Any]] = {}
         step_ids: Dict[str, int] = {}
         for step_order, action_id in enumerate(ordered_action_ids, start=1):
@@ -804,15 +826,33 @@ class LocalAutonomousService:
                 "externalSubmission": "not_executed",
             }
             step_metadata[action_id] = metadata
-            step_ids[action_id] = self.ledger.create_workflow_step({
+            if record_skipped_steps or action.get("canRun"):
+                step_ids[action_id] = self.ledger.create_workflow_step({
+                    "workflowRunId": workflow_run_id,
+                    "stepKey": action_id,
+                    "stage": action.get("stage"),
+                    "status": "pending",
+                    "attempt": max(1, int((step_attempts or {}).get(action_id, 1))),
+                    "stepOrder": step_order,
+                    "metadata": metadata,
+                })
+
+        def ensure_step(action_id: str) -> int:
+            existing_step_id = step_ids.get(action_id)
+            if existing_step_id is not None:
+                return existing_step_id
+            action = plan_actions[action_id]
+            step_id = self.ledger.create_workflow_step({
                 "workflowRunId": workflow_run_id,
                 "stepKey": action_id,
                 "stage": action.get("stage"),
                 "status": "pending",
                 "attempt": max(1, int((step_attempts or {}).get(action_id, 1))),
-                "stepOrder": step_order,
-                "metadata": metadata,
+                "stepOrder": ordered_action_ids.index(action_id) + 1,
+                "metadata": step_metadata[action_id],
             })
+            step_ids[action_id] = step_id
+            return step_id
 
         def execute_step(action_id: str, should_run: bool, callback) -> Dict[str, Any]:
             nonlocal failed_step_key
@@ -822,9 +862,9 @@ class LocalAutonomousService:
                     "status": "not_selected",
                     "reason": "not_selected_for_recovery",
                 }
-            step_id = step_ids[action_id]
             emergency_stop = self.ledger.get_runtime_control(AUTONOMY_EMERGENCY_STOP)
             if emergency_stop.get("active"):
+                step_id = ensure_step(action_id)
                 result = {
                     "id": action_id,
                     "status": "stopped",
@@ -845,18 +885,20 @@ class LocalAutonomousService:
                 raise AutonomyEmergencyStop("Operator emergency stop engaged")
             if not should_run:
                 result = self._skip(plan, action_id)
-                self.ledger.update_workflow_step(step_id, {
-                    "status": "skipped",
-                    "finishedAt": _utc_timestamp(),
-                    "durationMs": 0,
-                    "metadata": {
-                        **step_metadata[action_id],
-                        "result": _compact_step_result(result),
-                    },
-                })
+                if record_skipped_steps:
+                    self.ledger.update_workflow_step(ensure_step(action_id), {
+                        "status": "skipped",
+                        "finishedAt": _utc_timestamp(),
+                        "durationMs": 0,
+                        "metadata": {
+                            **step_metadata[action_id],
+                            "result": _compact_step_result(result),
+                        },
+                    })
                 skipped.append(result)
                 return result
 
+            step_id = ensure_step(action_id)
             started_at = _utc_timestamp()
             started = time.perf_counter()
             self.ledger.update_workflow_step(step_id, {
@@ -1019,6 +1061,9 @@ class LocalAutonomousService:
             )
         except AutonomyEmergencyStop:
             status = "stopped"
+            if not record_skipped_steps:
+                for action_id in ordered_action_ids:
+                    ensure_step(action_id)
             for action_id, step_id in step_ids.items():
                 step = self.ledger.get_workflow_step(step_id)
                 if not step or step.get("status") != "pending":
@@ -1035,6 +1080,9 @@ class LocalAutonomousService:
         except Exception as exc:
             status = "failed"
             error_message = _safe_error_message(exc, self.config)
+            if not record_skipped_steps:
+                for action_id in ordered_action_ids:
+                    ensure_step(action_id)
             for action_id, step_id in step_ids.items():
                 step = self.ledger.get_workflow_step(step_id)
                 if not step or step.get("status") != "pending":
@@ -1165,7 +1213,10 @@ class LocalAutonomousService:
             )
             if record.get("source_type") == "bank_transaction"
         ]
-        ready_routing_attempts = self.ledger.list_routing_attempts(status=PREPARED_ROUTING_STATUSES, limit=limit)
+        ready_routing_attempts = self.ledger.list_routing_attempts_without_export(
+            status=PREPARED_ROUTING_STATUSES,
+            limit=limit,
+        )
         pending_routing_attempts = self.ledger.list_routing_attempts(status=PENDING_ROUTE_STATUSES, limit=500)
         pending_export_attempts = self.ledger.list_export_attempts(status=("approval_required", "prepared"), limit=500)
         approved_export_attempts = self.ledger.list_export_attempts(status="approved", limit=500)
@@ -1213,6 +1264,33 @@ class LocalAutonomousService:
         ):
             reasons.append("operations_health_blocked")
         return reasons
+
+    def _master_ledger_projection_due(self, projection: Dict[str, Any]) -> bool:
+        checksum = str(projection.get("ledgerChecksum") or "").strip()
+        if not checksum:
+            return False
+        latest = self.ledger.find_latest_audit_event(
+            "local_master_ledger.projection_prepared",
+            "master_ledger",
+        )
+        details = latest.get("details") if isinstance((latest or {}).get("details"), dict) else {}
+        return str(details.get("ledgerChecksum") or "").strip() != checksum
+
+    def _wave_daily_plan_due(self, include_wave_plan: bool) -> bool:
+        if not include_wave_plan:
+            return False
+        today = date.today().isoformat()
+        latest = self.ledger.find_latest_audit_event(
+            "local_autonomy.wave_daily_plan_prepared",
+            "wave_workflow",
+        )
+        if not latest:
+            return True
+        details = latest.get("details") if isinstance(latest.get("details"), dict) else {}
+        recorded_date = str(details.get("planDate") or "").strip()
+        if not recorded_date:
+            recorded_date = str(latest.get("created_at") or "")[:10]
+        return recorded_date != today
 
     def _connector_sync_plan(self, include_connector_sync: bool) -> Dict[str, Any]:
         plan = LocalConnectorIntakeService(self.ledger, self.config).plan()
@@ -1470,7 +1548,7 @@ class LocalAutonomousService:
 
     def _run_master_ledger_projection(self, limit: int) -> Dict[str, Any]:
         service = LocalMasterLedgerService(self.ledger, self.config)
-        projection = service.project(limit=limit)
+        projection = service.project(limit=AUTONOMY_MASTER_LEDGER_LIMIT)
         service.record_projection_audit(projection, actor="local_autonomy")
         return {
             "id": "prepare_master_ledger_projection",
@@ -1483,7 +1561,12 @@ class LocalAutonomousService:
         return {"id": "refresh_bank_records", "status": "completed", "summary": summary}
 
     def _has_prepared_routes(self) -> bool:
-        return len(self.ledger.list_routing_attempts(status=PREPARED_ROUTING_STATUSES, limit=1)) > 0
+        return bool(
+            self.ledger.list_routing_attempts_without_export(
+                status=PREPARED_ROUTING_STATUSES,
+                limit=1,
+            )
+        )
 
     def _run_reconciliation(self, bank_transactions: List[Dict[str, Any]], limit: int) -> Dict[str, Any]:
         summary = LocalReconciliationService(self.ledger, self.config).run(bank_transactions, limit=limit)
@@ -1518,6 +1601,7 @@ class LocalAutonomousService:
             "entityId": (plan.get("workflow_plan") or {}).get("workflow_id"),
             "details": {
                 "status": plan.get("status"),
+                "planDate": today,
                 "operationCount": plan.get("operationCount"),
                 "waveReportSnapshots": snapshot_summary,
                 "waveOperationSnapshots": operation_snapshot_summary,

@@ -1,6 +1,6 @@
 # Technical Audit
 
-Audit date: 2026-08-09
+Audit date: 2026-08-13
 
 ## Baseline
 
@@ -20,6 +20,12 @@ Audit date: 2026-08-09
 - Worker leases, idempotency keys, rate limits, recovery candidates, and dead-letter-style export deferral are present.
 
 ## Remediated in this audit
+
+- Replaced repeated export-attempt list scans and no-op updates with indexed identity lookups, route-without-export queries, explicit changed-state results, and no-op batch behavior.
+- Made master-ledger projection and Wave daily planning due-based, preventing identical checksum projections and same-day plans from running every five minutes.
+- Reduced recurring workflow persistence to runnable steps while preserving complete failure and emergency-stop boundaries; coalesced unchanged worker summaries with bounded daily heartbeats.
+- Added canonical Base64URL enforcement to short-lived operator-session tickets so equivalent noncanonical encodings fail before signature acceptance.
+- Verified on a copied production ledger that a steady pass completed in 367 ms with one runnable action, zero export writes, and no external submission. Live recurrence reduced normal cycle persistence from 13 workflow steps to one without deleting historical audit evidence.
 
 - Added a persistent, audited autonomy emergency stop. It is checked before every workflow step and only an operator can clear it with an exact confirmation phrase.
 - Added sanitized doctor output and support ZIP generation that excludes financial documents, OCR, ledger rows, filenames, amounts, paths, configuration values, and credentials.

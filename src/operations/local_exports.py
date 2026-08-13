@@ -93,20 +93,22 @@ class LocalExportAttemptService:
         )
         if existing_attempt and (existing_status in PRESERVED_EXPORT_STATUSES or unchanged_draft):
             if not unchanged_draft:
-                self.ledger.record_audit_event({
-                    "action": "local_export_attempt.prepare_preserved",
-                    "entityType": "export_attempt",
-                    "entityId": str(existing_attempt.get("id")),
-                    "details": {
-                        "actor": actor,
-                        "routingAttemptId": routing_attempt.get("id"),
-                        "documentId": routing_attempt.get("document_id"),
-                        "bookkeepingRecordId": existing_attempt.get("bookkeeping_record_id"),
-                        "operationId": operation.get("operation_id"),
-                        "status": existing_attempt.get("status"),
-                        "externalSubmission": existing_attempt.get("external_submission"),
-                    },
-                })
+                preserve_details = {
+                    "actor": actor,
+                    "routingAttemptId": routing_attempt.get("id"),
+                    "documentId": routing_attempt.get("document_id"),
+                    "bookkeepingRecordId": existing_attempt.get("bookkeeping_record_id"),
+                    "operationId": operation.get("operation_id"),
+                    "status": existing_attempt.get("status"),
+                    "externalSubmission": existing_attempt.get("external_submission"),
+                }
+                if _preserved_state_changed(self.ledger, existing_attempt, preserve_details):
+                    self.ledger.record_audit_event({
+                        "action": "local_export_attempt.prepare_preserved",
+                        "entityType": "export_attempt",
+                        "entityId": str(existing_attempt.get("id")),
+                        "details": preserve_details,
+                    })
             return {
                 "success": True,
                 "status": "already_prepared",
@@ -239,6 +241,8 @@ class LocalExportAttemptService:
             "prepared": 0,
             "alreadyPrepared": 0,
             "blocked": 0,
+            "changed": False,
+            "auditRecorded": False,
             "exportAttempts": [],
             "externalSubmission": "not_executed",
         }
@@ -251,17 +255,20 @@ class LocalExportAttemptService:
             else:
                 summary["blocked"] += 1
             summary["exportAttempts"].append(result)
-        self.ledger.record_audit_event({
-            "action": "local_export_attempt.batch_prepare_completed",
-            "entityType": "export_attempt",
-            "details": {
-                "requested": summary["requested"],
-                "prepared": summary["prepared"],
-                "alreadyPrepared": summary["alreadyPrepared"],
-                "blocked": summary["blocked"],
-                "externalSubmission": "not_executed",
-            },
-        })
+        summary["changed"] = bool(summary["prepared"] or summary["blocked"])
+        if summary["changed"]:
+            self.ledger.record_audit_event({
+                "action": "local_export_attempt.batch_prepare_completed",
+                "entityType": "export_attempt",
+                "details": {
+                    "requested": summary["requested"],
+                    "prepared": summary["prepared"],
+                    "alreadyPrepared": summary["alreadyPrepared"],
+                    "blocked": summary["blocked"],
+                    "externalSubmission": "not_executed",
+                },
+            })
+            summary["auditRecorded"] = True
         return summary
 
     def process_approved_attempts(
@@ -1565,15 +1572,34 @@ def _existing_export_attempt_for_route(
     routing_attempt: Dict[str, Any],
     operation: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    routing_attempt_id = routing_attempt.get("id")
-    operation_id = operation.get("operation_id")
-    candidates = ledger.list_export_attempts(limit=500)
-    for attempt in candidates:
-        if routing_attempt_id is not None and attempt.get("routing_attempt_id") == routing_attempt_id:
-            return attempt
-        if operation_id and attempt.get("operation_id") == operation_id:
-            return attempt
-    return None
+    return ledger.find_export_attempt(
+        routing_attempt_id=routing_attempt.get("id"),
+        operation_id=operation.get("operation_id"),
+    )
+
+
+def _preserved_state_changed(
+    ledger: LocalOperationsLedger,
+    existing_attempt: Dict[str, Any],
+    details: Dict[str, Any],
+) -> bool:
+    latest = ledger.find_audit_event(
+        "local_export_attempt.prepare_preserved",
+        "export_attempt",
+        str(existing_attempt.get("id")),
+    )
+    if not latest:
+        return True
+    latest_details = latest.get("details") if isinstance(latest.get("details"), dict) else {}
+    state_fields = (
+        "routingAttemptId",
+        "documentId",
+        "bookkeepingRecordId",
+        "operationId",
+        "status",
+        "externalSubmission",
+    )
+    return any(latest_details.get(field) != details.get(field) for field in state_fields)
 
 
 def _same_export_operation(

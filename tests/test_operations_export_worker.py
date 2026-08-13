@@ -98,6 +98,114 @@ class TestOperationsExportWorker(unittest.TestCase):
             self.assertEqual(len(ledger.list_financial_report_runs()), 1)
             self.assertEqual(len(ledger.list_compliance_assessments()), 1)
 
+    def test_worker_does_not_repeat_export_preparation_completed_by_autonomy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            worker = FabWorker(config)
+
+            with patch("src.worker.scheduler.LocalAutonomousService") as autonomy_type, patch(
+                "src.worker.scheduler.LocalExportAttemptService"
+            ) as export_type:
+                autonomy_type.return_value.run_cycle.return_value = {
+                    "success": True,
+                    "status": "completed",
+                    "executedActions": [{"id": "prepare_export_attempts", "status": "completed"}],
+                    "skippedActions": [],
+                }
+                export_type.return_value.process_approved_attempts.return_value = {
+                    "success": True,
+                    "status": "completed",
+                    "processed": [],
+                    "count": 0,
+                }
+
+                worker._run_local_autonomy()
+                worker._process_operations_exports()
+
+            export_type.return_value.prepare_ready_exports.assert_not_called()
+            export_type.return_value.process_approved_attempts.assert_called_once_with(
+                limit=20,
+                actor="local_worker",
+            )
+
+    def test_worker_falls_back_to_export_preparation_when_autonomy_did_not_run_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            worker = FabWorker(config)
+
+            with patch("src.worker.scheduler.LocalExportAttemptService") as export_type:
+                export_type.return_value.prepare_ready_exports.return_value = {
+                    "requested": 0,
+                    "prepared": 0,
+                    "alreadyPrepared": 0,
+                    "blocked": 0,
+                    "changed": False,
+                    "auditRecorded": False,
+                    "externalSubmission": "not_executed",
+                }
+                export_type.return_value.process_approved_attempts.return_value = {
+                    "success": True,
+                    "status": "completed",
+                    "processed": [],
+                    "count": 0,
+                }
+
+                worker._process_operations_exports()
+
+            export_type.return_value.prepare_ready_exports.assert_called_once_with(limit=25)
+
+    def test_worker_uses_sparse_step_evidence_for_recurring_idle_cycles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            config.update({
+                "worker_sync_source_connectors": False,
+                "worker_include_wave_plan": False,
+                "worker_include_wave_sync": False,
+            })
+            worker = FabWorker(config)
+
+            worker._run_local_autonomy()
+
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            workflow = ledger.list_workflow_runs(
+                trigger_source="local_autonomous_cycle",
+                limit=1,
+            )[0]
+            self.assertEqual(
+                ledger.list_workflow_steps(workflow_run_id=workflow["id"], limit=100),
+                [],
+            )
+
+    def test_worker_coalesces_unchanged_cycle_audits_but_records_state_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            worker = FabWorker(config)
+
+            worker._record_audit(
+                "scheduled_backup_cycle",
+                {"success": True, "status": "not_due", "nextDueAt": "2026-08-14T00:00:00Z"},
+                "Backup is current",
+            )
+            worker._record_audit(
+                "scheduled_backup_cycle",
+                {"success": True, "status": "not_due", "nextDueAt": "2026-08-14T00:00:00Z"},
+                "Backup is current",
+            )
+            worker._record_audit(
+                "scheduled_backup_cycle",
+                {"success": False, "status": "failed", "nextDueAt": "2026-08-14T00:00:00Z"},
+                "Backup failed",
+            )
+
+            ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
+            events = [
+                event for event in ledger.list_audit_events(limit=10)
+                if event["action"] == "local_worker.scheduled_backup_cycle"
+            ]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0]["details"]["status"], "failed")
+            self.assertEqual(events[1]["details"]["status"], "not_due")
+
     def test_worker_stage_failure_does_not_suppress_local_autonomy_or_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)

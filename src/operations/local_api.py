@@ -162,7 +162,11 @@ def _normalize_operator_session_target(value: Any) -> Optional[str]:
 def _decode_operator_session_part(value: str) -> bytes:
     if not value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
         raise ValueError("Invalid base64url value")
-    return base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+    decoded = base64.urlsafe_b64decode(value + ("=" * (-len(value) % 4)))
+    canonical = base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii")
+    if not hmac.compare_digest(canonical, value):
+        raise ValueError("Non-canonical base64url value")
+    return decoded
 
 
 def _api_error_code(status_code: int) -> str:

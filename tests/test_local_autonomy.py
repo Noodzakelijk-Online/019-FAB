@@ -100,6 +100,80 @@ class TestLocalAutonomousService(unittest.TestCase):
             self.assertIn("Autonomous Cycle", page.data.decode("utf-8"))
             self.assertIn("Cycle lease", page.data.decode("utf-8"))
 
+    def test_autonomy_plan_does_not_reprepare_routes_with_export_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            document_id = ledger.register_document({
+                "source": "scanner",
+                "sourceDocumentId": "already-exported-route",
+                "originalFilename": "receipt.txt",
+                "processingStatus": "reviewed",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "transactionDate": "2026-08-13",
+                "totalAmount": 42.5,
+            })
+            route = LocalRoutingService(ledger).prepare_document_route(document_id)
+            LocalExportAttemptService(ledger).prepare_from_routing_attempt(
+                route["routingAttemptId"]
+            )
+
+            plan = LocalAutonomousService(ledger, {}, intake_paths=[]).plan(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+            cycle = LocalAutonomousService(ledger, {}, intake_paths=[]).run_cycle(
+                include_wave_plan=False,
+                include_wave_sync=False,
+                include_connector_sync=False,
+            )
+
+            self.assertEqual(plan["counts"]["readyForExportAttempts"], 0)
+            self.assertNotIn("prepare_export_attempts", plan["runnableActionIds"])
+            self.assertNotIn(
+                "prepare_export_attempts",
+                {action["id"] for action in cycle["executedActions"]},
+            )
+
+    def test_autonomy_records_master_projection_and_wave_plan_only_when_due(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "validated",
+                "targetSystem": "waveapps_business",
+                "vendorName": "Office Shop",
+                "category": "Office Supplies",
+                "recordDate": "2026-08-13",
+                "amount": 42.5,
+            })
+            service = LocalAutonomousService(ledger, {}, intake_paths=[])
+
+            first = service.run_cycle(include_wave_plan=True, include_wave_sync=False)
+            second = service.run_cycle(include_wave_plan=True, include_wave_sync=False)
+
+            first_ids = {action["id"] for action in first["executedActions"]}
+            second_ids = {action["id"] for action in second["executedActions"]}
+            self.assertIn("prepare_master_ledger_projection", first_ids)
+            self.assertIn("plan_wave_daily_reconciliation", first_ids)
+            self.assertNotIn("prepare_master_ledger_projection", second_ids)
+            self.assertNotIn("plan_wave_daily_reconciliation", second_ids)
+            self.assertEqual(
+                len([
+                    event for event in ledger.list_audit_events(limit=100)
+                    if event["action"] == "local_master_ledger.projection_prepared"
+                ]),
+                1,
+            )
+            self.assertEqual(
+                len([
+                    event for event in ledger.list_audit_events(limit=100)
+                    if event["action"] == "local_autonomy.wave_daily_plan_prepared"
+                ]),
+                1,
+            )
+
     def test_autonomy_plan_includes_operating_exception_queue(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

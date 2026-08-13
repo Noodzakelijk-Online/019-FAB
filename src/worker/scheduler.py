@@ -1,4 +1,5 @@
 import importlib
+import json
 import re
 import signal
 import time
@@ -44,6 +45,25 @@ _DEPENDENCY_PATHS = {
         "apply_local_wave_settings",
     ),
     "Database": ("src.storage.database", "Database"),
+}
+
+COALESCED_WORKER_AUDITS = {
+    "approved_export_cycle",
+    "autonomy_cycle",
+    "compliance_cycle",
+    "connector_intake_cycle",
+    "cycle_completed",
+    "cycle_started",
+    "drive_wave_archive_cycle",
+    "notification_cycle",
+    "scheduled_backup_cycle",
+    "scheduled_report_cycle",
+    "workflow_recovery_cycle",
+}
+WORKER_AUDIT_VOLATILE_FIELDS = {
+    "autonomy_cycle": {"workflowRunId"},
+    "cycle_completed": {"completedAt", "startedAt"},
+    "cycle_started": {"startedAt"},
 }
 
 # Keep these names patchable in worker tests while avoiding import cost for
@@ -123,6 +143,13 @@ class FabWorker:
         )
         self._stop_requested = False
         self._recovery_held_connector_sources = set()
+        self._autonomy_prepared_exports = False
+        self._audit_heartbeat_seconds = _bounded_positive_int(
+            self.config.get("worker_audit_heartbeat_seconds"),
+            default=86400,
+            maximum=604800,
+        )
+        self._audit_states: Dict[str, tuple[str, float]] = {}
 
     def install_signal_handlers(self) -> None:
         def handle_stop(signum, frame):
@@ -138,6 +165,7 @@ class FabWorker:
             _dependency("apply_local_wave_settings")(self.config, mutate=True)
             started_at = self._now()
             self._recovery_held_connector_sources = set()
+            self._autonomy_prepared_exports = False
             self._record_audit("cycle_started", {"startedAt": started_at}, "Worker cycle started")
             stage_errors = []
             stages = (
@@ -273,6 +301,9 @@ class FabWorker:
         autonomy_config = dict(self.config)
         # The worker's approved-export stage remains the sole external executor.
         autonomy_config["fab_autonomy_execute_approved_exports"] = False
+        # Scheduled cycles retain executed and failure boundaries without
+        # storing identical skipped-step rows every five minutes.
+        autonomy_config["fab_autonomy_record_skipped_steps"] = False
         result = _dependency("LocalAutonomousService")(
             self.operations_ledger,
             autonomy_config,
@@ -294,6 +325,12 @@ class FabWorker:
             include_wave_sync=self.include_wave_sync,
             include_connector_sync=False,
         )
+        self._autonomy_prepared_exports = any(
+            action.get("id") == "prepare_export_attempts"
+            and action.get("status") == "completed"
+            for action in result.get("executedActions") or []
+            if isinstance(action, dict)
+        )
         self._record_audit(
             "autonomy_cycle",
             _compact_autonomy_cycle(result),
@@ -307,12 +344,14 @@ class FabWorker:
             self.operations_ledger,
             self.config,
         )
-        preparation = service.prepare_ready_exports(limit=25)
-        self._record_audit(
-            "export_preparation_cycle",
-            _compact_export_preparation(preparation),
-            "Operations-ledger export preparation completed",
-        )
+        if not self._autonomy_prepared_exports:
+            preparation = service.prepare_ready_exports(limit=25)
+            if preparation.get("changed"):
+                self._record_audit(
+                    "export_preparation_cycle",
+                    _compact_export_preparation(preparation),
+                    "Operations-ledger export preparation completed",
+                )
         if self.process_postings:
             result = service.process_approved_attempts(limit=20, actor="local_worker")
             self._record_audit(
@@ -415,6 +454,8 @@ class FabWorker:
             )
 
     def _record_audit(self, action: str, details: Dict[str, Any], reason: str) -> None:
+        if self._coalesce_audit(action, details):
+            return
         if self.operations_ledger:
             self.operations_ledger.record_audit_event({
                 "action": f"local_worker.{action}",
@@ -436,6 +477,32 @@ class FabWorker:
             reason,
             "system",
         )
+
+    def _coalesce_audit(self, action: str, details: Dict[str, Any]) -> bool:
+        if action not in COALESCED_WORKER_AUDITS:
+            return False
+        volatile_fields = WORKER_AUDIT_VOLATILE_FIELDS.get(action, set())
+        stable_details = {
+            key: value
+            for key, value in (details or {}).items()
+            if key not in volatile_fields
+        }
+        fingerprint = json.dumps(
+            stable_details,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        now = time.monotonic()
+        previous = self._audit_states.get(action)
+        if (
+            previous
+            and previous[0] == fingerprint
+            and now - previous[1] < self._audit_heartbeat_seconds
+        ):
+            return True
+        self._audit_states[action] = (fingerprint, now)
+        return False
 
     @staticmethod
     def _now() -> str:

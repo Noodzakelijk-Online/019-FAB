@@ -1,5 +1,16 @@
 # Codex Worklog
 
+## 2026-08-13 - Bounded recurring autonomy and canonical operator tickets
+
+- Audited the production ledger after unattended operation. The 150-document database had accumulated 250,572 audit events, 60,153 workflow steps, and 166,347 repeated `local_export_attempt.prepared` events because unchanged drafts and not-due work were repeatedly materialized.
+- Replaced the bounded list scan for existing export attempts with indexed identity lookups and route-without-export queries. Existing protected attempts are preserved without timestamp or audit churn, empty preparation batches are no-ops, and the worker no longer prepares the same exports twice in one cycle.
+- Made projection and daily Wave planning genuinely due-based: the master projection runs only when its bounded 500-row checksum changes, and a Wave daily plan runs once per local date. Routes already represented by export attempts no longer wake either the plan or the worker.
+- Changed recurring worker persistence to materialize only runnable steps during normal operation while retaining complete failure and emergency-stop boundaries. Unchanged worker stage summaries are coalesced with a daily heartbeat; state changes and failures still write immediately.
+- Canonicalized Base64URL ticket components before operator-session signature verification. Alternate final characters that decoded to identical bytes are now rejected, closing an ambiguity in the short-lived authenticated ledger handoff.
+- Two live five-minute cycles added one workflow run and one step per steady cycle, did not create or update any of the 31 export attempts, and did not repeat the master projection. A copied-production steady pass completed in 367 ms with only `rescan_intake` runnable and `externalSubmission=not_executed`.
+- Verification passed 94 focused tests, all four CI-equivalent backend shards (`814 passed`, `4 skipped`), all 182 web tests, TypeScript checking, production build budgets, dependency and peer audits, Python compilation, PowerShell parsing, and standard/maintenance Compose parsing. The Windows API, worker, and dashboard restarted from current source with empty process logs.
+- Browser acceptance rendered the live desktop dashboard without horizontal overflow or console warnings/errors. The same-origin handoff reached the populated FAB Operations ledger at `http://127.0.0.1:5001/` without a token prompt. No provider record, review decision, source file, Drive archive, or external submission was changed.
+
 ## 2026-08-09 - Authenticated operator ledger handoff
 
 - Found that every advanced ledger, evidence, work-order, report-artifact, recovery, and connector-contract link left the authenticated React dashboard and opened the token-protected Flask service directly. A non-technical operator was redirected to a token-entry page even though the launcher deliberately keeps that token in DPAPI-backed server state and out of browser code.

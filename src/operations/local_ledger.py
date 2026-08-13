@@ -817,6 +817,8 @@ class LocalOperationsLedger:
                     ON audit_events(entity_type, entity_id);
                 CREATE INDEX IF NOT EXISTS idx_local_audit_created
                     ON audit_events(created_at);
+                CREATE INDEX IF NOT EXISTS idx_local_audit_action_created
+                    ON audit_events(action, created_at DESC, id DESC);
                 """
             )
             self._ensure_column(
@@ -2184,6 +2186,30 @@ class LocalOperationsLedger:
                 (export_attempt_id,),
             ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def find_export_attempt(
+        self,
+        *,
+        routing_attempt_id: Optional[int] = None,
+        operation_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find an idempotent export attempt through its indexed identities."""
+        with self._connection() as connection:
+            if routing_attempt_id is not None:
+                row = connection.execute(
+                    "SELECT * FROM export_attempts WHERE routing_attempt_id = ? LIMIT 1",
+                    (int(routing_attempt_id),),
+                ).fetchone()
+                if row:
+                    return self._row_to_dict(row)
+            if operation_id:
+                row = connection.execute(
+                    "SELECT * FROM export_attempts WHERE operation_id = ? LIMIT 1",
+                    (str(operation_id),),
+                ).fetchone()
+                if row:
+                    return self._row_to_dict(row)
+        return None
 
     def list_export_attempts(
         self,
@@ -4988,6 +5014,38 @@ class LocalOperationsLedger:
             rows = connection.execute(query, params).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_routing_attempts_without_export(
+        self,
+        status: Optional[Any] = None,
+        limit: int = 100,
+    ) -> list:
+        limit = self._bounded_limit(limit)
+        query = """
+            SELECT routing_attempts.*
+            FROM routing_attempts
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM export_attempts
+                WHERE export_attempts.routing_attempt_id = routing_attempts.id
+            )
+        """
+        params = []
+        if status:
+            if isinstance(status, Sequence) and not isinstance(status, str):
+                statuses = [str(item) for item in status if item]
+                if statuses:
+                    placeholders = ", ".join("?" for _ in statuses)
+                    query += f" AND routing_attempts.status IN ({placeholders})"
+                    params.extend(statuses)
+            else:
+                query += " AND routing_attempts.status = ?"
+                params.append(str(status))
+        query += " ORDER BY routing_attempts.created_at DESC, routing_attempts.id DESC LIMIT ?"
+        params.append(limit)
+        with self._connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def get_reconciliation_match(self, reconciliation_match_id: int) -> Optional[Dict[str, Any]]:
         with self._connection() as connection:
             row = connection.execute(
@@ -5435,6 +5493,21 @@ class LocalOperationsLedger:
                 """,
                 (str(action), str(entity_type), str(entity_id)),
             ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def find_latest_audit_event(
+        self,
+        action: str,
+        entity_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM audit_events WHERE action = ?"
+        params = [str(action)]
+        if entity_type:
+            query += " AND entity_type = ?"
+            params.append(str(entity_type))
+        query += " ORDER BY created_at DESC, id DESC LIMIT 1"
+        with self._connection() as connection:
+            row = connection.execute(query, params).fetchone()
         return self._row_to_dict(row) if row else None
 
     def find_document_by_content_hash(

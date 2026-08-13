@@ -116,7 +116,13 @@ class TestLocalOperationsApi(unittest.TestCase):
                 "next": "//evil.example",
             })
             valid = self._operator_session_ticket(token, baseline)
-            tampered = f"{valid[:-1]}{'A' if valid[-1] != 'A' else 'B'}"
+            encoded_payload, encoded_signature = valid.split(".")
+            base64url_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            canonical_tail = base64url_alphabet.index(encoded_signature[-1])
+            equivalent_noncanonical_tail = base64url_alphabet[(canonical_tail & ~3) | 1]
+            tampered = (
+                f"{encoded_payload}.{encoded_signature[:-1]}{equivalent_noncanonical_tail}"
+            )
 
             self.assertEqual(client.get(f"/operator/session/bootstrap?ticket={expired}").status_code, 401)
             self.assertEqual(client.get(f"/operator/session/bootstrap?ticket={unsafe}").status_code, 401)
