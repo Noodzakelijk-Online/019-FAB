@@ -495,6 +495,45 @@ class TestDocumentFetchers(unittest.TestCase):
         for document in documents:
             os.remove(document["local_path"])
 
+    @patch("src.document_fetchers.drive_fetcher.build")
+    @patch("src.document_fetchers.drive_fetcher.InstalledAppFlow")
+    @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
+    @patch("src.document_fetchers.drive_fetcher.Request")
+    @patch("src.document_fetchers.drive_fetcher.os.path.exists")
+    @patch("src.document_fetchers.drive_fetcher.pickle")
+    def test_drive_fetcher_rejects_oversized_metadata_before_download(
+        self,
+        mock_pickle,
+        mock_exists,
+        mock_Request,
+        mock_MediaIoBaseDownload,
+        mock_InstalledAppFlow,
+        mock_build,
+    ):
+        mock_exists.return_value = True
+        mock_pickle.load.return_value = MagicMock()
+        service = MagicMock()
+        mock_build.return_value = service
+        service.files.return_value.list.return_value.execute.return_value = {
+            "files": [{
+                "id": "large-file",
+                "name": "large.pdf",
+                "mimeType": "application/pdf",
+                "size": "2048",
+            }],
+        }
+        fetcher = DriveFetcher({
+            **self.config,
+            "google_drive_max_file_bytes": 1024,
+        })
+
+        documents = fetcher.fetch_documents()
+
+        self.assertEqual(documents, [])
+        self.assertEqual(fetcher.last_run["skipped"], 1)
+        self.assertEqual(fetcher.last_run["oversized"], 1)
+        mock_MediaIoBaseDownload.assert_not_called()
+
     @patch("src.document_fetchers.freshdesk_fetcher.requests.get")
     def test_freshdesk_financial_profile_stops_oversized_stream(
         self,

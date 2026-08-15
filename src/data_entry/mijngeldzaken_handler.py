@@ -13,6 +13,7 @@ from src.data_entry.mijngeldzaken_surface import (
     MIJNGELDZAKEN_IMPORT_COLUMNS,
     build_mijngeldzaken_import_row,
 )
+from src.utils.csv_safety import neutralize_csv_row
 
 
 class MijngeldzakenHandler(BaseDataEntryHandler):
@@ -75,7 +76,7 @@ class MijngeldzakenHandler(BaseDataEntryHandler):
             lineterminator="\n",
         )
         writer.writeheader()
-        writer.writerow({column: row.get(column, "") for column in columns})
+        writer.writerow(neutralize_csv_row({column: row.get(column, "") for column in columns}))
         return buffer.getvalue()
 
     def _mapped_value(self, data: Dict[str, Any], source_key: Any) -> Any:

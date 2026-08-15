@@ -165,6 +165,14 @@ const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
   driveWaveWorkOrders: 12_000,
   cloudStatus: 3_000,
 };
+const CONTROL_CENTER_BATCH_PATH = "/api/control-center/resources";
+const CONTROL_CENTER_DIRECT_RESOURCES = new Set<FabResourceKey>([
+  "health",
+  "autonomy",
+  "backups",
+  "driveWaveWorkOrders",
+  "cloudStatus",
+]);
 
 const resourceCache = new Map<FabResourceKey, { value: JsonRecord; updatedAt: string }>();
 // The operator UI polls once per minute. Keep one immutable verified snapshot
@@ -271,7 +279,7 @@ export async function fabLocalRequest(
   }
 }
 
-async function settleFabReads(
+async function settleIndividualFabReads(
   entries: Array<[FabResourceKey, string]>,
 ): Promise<Array<PromiseSettledResult<JsonRecord>>> {
   const results = new Array<PromiseSettledResult<JsonRecord>>(entries.length);
@@ -293,6 +301,60 @@ async function settleFabReads(
     }
   }));
   return results;
+}
+
+function parseFabBatchResults(
+  body: JsonRecord,
+  entries: Array<[FabResourceKey, string]>,
+): Array<PromiseSettledResult<JsonRecord>> | null {
+  if (Number(body.version) !== 1) return null;
+  const resources = asRecord(body.resources);
+  if (!resources) return null;
+  const results: Array<PromiseSettledResult<JsonRecord>> = [];
+  for (const [resource] of entries) {
+    const envelope = asRecord(resources[resource]);
+    if (!envelope || typeof envelope.ok !== "boolean") return null;
+    if (envelope.ok) {
+      const value = asRecord(envelope.value);
+      if (!value) return null;
+      results.push({ status: "fulfilled", value });
+    } else {
+      results.push({
+        status: "rejected",
+        reason: new Error(stringValue(envelope.error) || "FAB resource could not be read"),
+      });
+    }
+  }
+  return results;
+}
+
+async function settleFabReads(
+  entries: Array<[FabResourceKey, string]>,
+): Promise<Array<PromiseSettledResult<JsonRecord>>> {
+  const directEntries = entries.filter(([resource]) => CONTROL_CENTER_DIRECT_RESOURCES.has(resource));
+  const batchEntries = entries.filter(([resource]) => !CONTROL_CENTER_DIRECT_RESOURCES.has(resource));
+  const [batchOutcome, directResults] = await Promise.all([
+    fabLocalRequest(CONTROL_CENTER_BATCH_PATH, {}, { timeoutMs: 12_000 }).then(
+      (value): PromiseSettledResult<JsonRecord> => ({ status: "fulfilled", value }),
+      (reason): PromiseSettledResult<JsonRecord> => ({ status: "rejected", reason }),
+    ),
+    settleIndividualFabReads(directEntries),
+  ]);
+
+  let batchResults = batchOutcome.status === "fulfilled"
+    ? parseFabBatchResults(batchOutcome.value, batchEntries)
+    : null;
+  if (!batchResults) {
+    batchResults = await settleIndividualFabReads(batchEntries);
+  }
+
+  const byResource = new Map<FabResourceKey, PromiseSettledResult<JsonRecord>>();
+  directEntries.forEach(([resource], index) => byResource.set(resource, directResults[index]));
+  batchEntries.forEach(([resource], index) => byResource.set(resource, batchResults[index]));
+  return entries.map(([resource]) => byResource.get(resource) ?? {
+    status: "rejected",
+    reason: new Error("FAB resource result is missing"),
+  });
 }
 
 export async function getFabControlCenter(): Promise<FabControlCenter> {

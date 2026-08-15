@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dateutil.tz import gettz
 
 from src.operations.local_ledger import LocalOperationsLedger
+from src.utils.csv_safety import neutralize_csv_row
 
 
 REPORT_VERSION = "fab-local-financial-report-v1"
@@ -167,7 +168,7 @@ class LocalFinancialReportingService:
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
-        writer.writerows(report.get("rows") or [])
+        writer.writerows(neutralize_csv_row(row) for row in (report.get("rows") or []))
         return {
             "success": True,
             "status": "prepared",

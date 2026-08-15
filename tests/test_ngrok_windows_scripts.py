@@ -15,6 +15,11 @@ class TestNgrokWindowsScripts(unittest.TestCase):
         self.assertIn('"--name", "fab-managed"', script)
         self.assertIn("/api/live", script)
         self.assertIn("/api/hai/manifest", script)
+        self.assertIn("get_or_create_runtime_secret('operator_api_token')", script)
+        self.assertIn("get_or_create_runtime_secret('hai_api_token')", script)
+        self.assertIn('$haiHeaders = @{ Authorization = "Bearer $haiApiToken" }', script)
+        self.assertIn('$publicUrl/api/health', script)
+        self.assertIn('HAI credential escaped its route scope', script)
         self.assertIn("authRequired", script)
         self.assertIn("maintenanceMode", script)
         self.assertIn("Test-CleanHttpsOrigin -Uri $publicUri", script)
@@ -62,6 +67,9 @@ class TestNgrokWindowsScripts(unittest.TestCase):
         self.assertIn("localLive.maintenanceMode", managed)
         self.assertIn("disabled during maintenance", verification)
         self.assertIn("localLive.maintenanceMode", verification)
+        self.assertIn("get_or_create_runtime_secret('operator_api_token')", verification)
+        self.assertIn("get_or_create_runtime_secret('hai_api_token')", verification)
+        self.assertIn('Authorization = "Bearer $haiApiToken"', verification)
 
 
 if __name__ == "__main__":

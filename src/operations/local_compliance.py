@@ -176,7 +176,7 @@ class LocalComplianceService:
             "externalFiling": "not_executed",
         }
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self, *, metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         assessments = self.ledger.list_compliance_assessments(limit=1)
         latest = assessments[0] if assessments else None
         open_findings = self.ledger.list_compliance_findings(
@@ -184,13 +184,14 @@ class LocalComplianceService:
             status=OPEN_FINDING_STATUSES,
             limit=500,
         ) if latest else []
+        metrics = metrics if metrics is not None else self.ledger.dashboard_metrics()
         return {
             "latestAssessment": latest,
-            "assessmentCount": self.ledger.dashboard_metrics().get("compliance_assessments", 0),
+            "assessmentCount": metrics.get("compliance_assessments", 0),
             "openFindings": len(open_findings),
             "blockingFindings": sum(1 for finding in open_findings if finding.get("severity") == "high"),
             "attentionFindings": sum(1 for finding in open_findings if finding.get("severity") in {"medium", "low"}),
-            "retentionRecords": self.ledger.dashboard_metrics().get("retention_records", 0),
+            "retentionRecords": metrics.get("retention_records", 0),
             "statutoryStatus": "provisional",
             "filingStatus": "not_filed",
             "externalFiling": "not_executed",

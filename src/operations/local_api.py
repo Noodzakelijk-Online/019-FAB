@@ -46,7 +46,7 @@ from src.operations.local_bookkeeping_records import (
 from src.operations.local_close_readiness import LocalCloseReadinessService
 from src.operations.local_close_pack import LocalClosePackService
 from src.operations.local_cloud_access import LocalCloudAccessService
-from src.operations.local_categories import fab_category_options
+from src.operations.local_categories import fab_category_intents, fab_category_options
 from src.operations.local_category_suggestions import suggest_category_intent
 from src.operations.local_compliance import LocalComplianceService, OPEN_FINDING_STATUSES
 from src.operations.local_connector_intake import LocalConnectorIntakeService
@@ -118,6 +118,51 @@ REVIEW_RESOLUTION_STATUSES = {"approved", "rejected", "resolved", "ignored"}
 RECONCILIATION_RESOLUTION_STATUSES = {"approved", "reconciled", "rejected", "resolved", "ignored", "needs_review"}
 RULE_RESOLUTION_STATUSES = VENDOR_CATEGORY_RULE_STATUSES - {"learned"}
 API_REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,64}$")
+HAI_ROUTE_RULES = (
+    ("GET", re.compile(r"^/api/hai/(?:manifest|status)$")),
+    ("POST", re.compile(r"^/api/hai/commands/(?:plan|execute)$")),
+    ("GET", re.compile(r"^/api/backups$")),
+    ("POST", re.compile(r"^/api/connectors/google-drive/relay$")),
+    ("GET", re.compile(r"^/api/drive-wave/work-orders$")),
+    ("POST", re.compile(r"^/api/drive-wave/documents/[1-9][0-9]*/attachment-readback$")),
+    ("GET", re.compile(r"^/api/wave/receipt-executor/status$")),
+    ("POST", re.compile(r"^/api/wave/receipt-executor/(?:session|claim|release)$")),
+)
+CONTROL_CENTER_BATCH_PATHS = {
+    "reviewQueue": "/api/review?status=open&limit=25&offset=0&view=summary&includeCategoryOptions=false",
+    "exceptions": "/api/exceptions?limit=25&includeEntities=true",
+    "closeReadiness": "/api/close-readiness",
+    "driveWaveStatus": "/api/drive-wave/status",
+    "reportRuns": "/api/report-runs?limit=5",
+    "compliance": "/api/compliance/assessments?limit=5",
+    "recovery": "/api/workflows/recovery?limit=10",
+    "liveness": "/api/live",
+    "waveSetup": "/api/wave/setup",
+    "workflows": "/api/workflows?limit=10",
+    "masterLedger": "/api/master-ledger?limit=250&summaryOnly=true",
+    "metrics": "/api/dashboard",
+    "notifications": "/api/notifications?limit=10",
+    "settings": "/api/settings",
+    "bankTransactions": "/api/bank-transactions?limit=250",
+    "reconciliation": "/api/reconciliation?limit=10",
+    "activity": "/api/audit?limit=12",
+    "sources": "/api/sources?limit=50",
+    "waveReceiptExecutor": "/api/wave/receipt-executor/status",
+    "sourceReadiness": "/api/sources/readiness",
+    "driveAuthorization": "/api/connectors/google-drive/authorization",
+    "haiStatus": "/api/hai/status",
+    "haiManifest": "/api/hai/manifest",
+    "gmailAuthorization": "/api/connectors/gmail/authorization",
+}
+
+
+def _hai_request_allowed(method: str, path: str) -> bool:
+    normalized_method = str(method or "").upper()
+    normalized_path = str(path or "")
+    return any(
+        normalized_method == allowed_method and pattern.fullmatch(normalized_path)
+        for allowed_method, pattern in HAI_ROUTE_RULES
+    )
 OPERATOR_SESSION_AUDIENCE = "fab-local-operator-session"
 OPERATOR_SESSION_MAX_TTL_SECONDS = 60
 OPERATOR_SESSION_MAX_TICKET_LENGTH = 8_192
@@ -3946,6 +3991,16 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         or config.get("operations_api_token")
         or ""
     )
+    hai_token = str(
+        config.get("fab_hai_api_token")
+        or config.get("operations_hai_api_token")
+        or config.get("hai_api_token")
+        or ""
+    )
+    if hai_token and not token:
+        raise ValueError("A dedicated HAI token requires an operator API token.")
+    if hai_token and hmac.compare_digest(hai_token, token):
+        raise ValueError("The HAI token must be different from the operator API token.")
     configured_base_url = str(
         config.get("fab_local_api_base_url")
         or config.get("operations_api_base_url")
@@ -4082,17 +4137,25 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         if request.endpoint in {"login", "operator_session_bootstrap"}:
             return None
         supplied_authorization = request.headers.get("Authorization", "")
-        bearer_authenticated = hmac.compare_digest(
+        operator_authenticated = hmac.compare_digest(
             supplied_authorization,
             f"Bearer {token}",
         )
-        if not bearer_authenticated:
-            if session.get("fab_local_api_authenticated"):
+        if operator_authenticated or session.get("fab_local_api_authenticated"):
+            g.fab_api_principal = "operator"
+            return None
+        hai_authenticated = bool(hai_token) and hmac.compare_digest(
+            supplied_authorization,
+            f"Bearer {hai_token}",
+        )
+        if hai_authenticated:
+            g.fab_api_principal = "hai"
+            if _hai_request_allowed(request.method, request.path):
                 return None
-            if not request.path.startswith("/api/"):
-                return redirect(url_for("login"))
-            return jsonify({"error": "Unauthorized"}), 401
-        return None
+            return jsonify({"error": "HAI credential is not permitted for this route"}), 403
+        if not request.path.startswith("/api/"):
+            return redirect(url_for("login"))
+        return jsonify({"error": "Unauthorized"}), 401
 
     @app.before_request
     def validate_json_mutation_body():
@@ -5559,18 +5622,20 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         include_wave_plan = _bool_value(request.args.get("includeWavePlan"), default=True)
         include_wave_sync = _bool_value(request.args.get("includeWaveSync"), default=True)
         include_connector_sync = _bool_value(request.args.get("includeConnectorSync"), default=True)
-        return jsonify(_autonomy_service(
-            ledger,
-            config,
-            readiness_service,
-            intake_paths,
-            intake_extensions,
-        ).plan(
-            limit=limit,
-            include_wave_plan=include_wave_plan,
-            include_wave_sync=include_wave_sync,
-            include_connector_sync=include_connector_sync,
-        ))
+        with ledger.read_snapshot():
+            plan = _autonomy_service(
+                ledger,
+                config,
+                readiness_service,
+                intake_paths,
+                intake_extensions,
+            ).plan(
+                limit=limit,
+                include_wave_plan=include_wave_plan,
+                include_wave_sync=include_wave_sync,
+                include_connector_sync=include_connector_sync,
+            )
+        return jsonify(plan)
 
     @app.post("/api/autonomy/run")
     def run_autonomy():
@@ -7996,6 +8061,158 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
     def audit_events():
         return jsonify({"auditEvents": ledger.list_audit_events(limit=_limit_arg())})
 
+    @app.get("/api/control-center/resources")
+    def control_center_resources_api():
+        resources: Dict[str, Dict[str, Any]] = {}
+        with ledger.read_snapshot():
+            shared_resource_names = {
+                "metrics",
+                "masterLedger",
+                "exceptions",
+                "closeReadiness",
+            }
+            try:
+                shared_metrics = ledger.dashboard_metrics()
+                shared_master_ledger = LocalMasterLedgerService(ledger, config).project(limit=250)
+                shared_health = LocalOperationsHealth(ledger, config).summarize(
+                    metrics=shared_metrics,
+                    master_ledger=shared_master_ledger,
+                )
+                shared_exceptions = LocalExceptionQueueService(ledger, config).list_exceptions(
+                    limit=25,
+                    include_entities=True,
+                    health=shared_health,
+                    master_ledger=shared_master_ledger,
+                )
+                shared_close_readiness = LocalCloseReadinessService(ledger, config).assess(
+                    metrics=shared_metrics,
+                    health=shared_health,
+                    master_ledger=shared_master_ledger,
+                )
+                compact_master_ledger = dict(shared_master_ledger)
+                master_rows = list(compact_master_ledger.pop("rows", []) or [])
+                compact_master_ledger["dataThroughDate"] = max(
+                    (
+                        str(row.get("recordDate"))
+                        for row in master_rows
+                        if row.get("recordDate")
+                    ),
+                    default=None,
+                )
+                compact_master_ledger["rowsOmitted"] = len(master_rows)
+                shared_values = {
+                    "metrics": shared_metrics,
+                    "masterLedger": compact_master_ledger,
+                    "exceptions": shared_exceptions,
+                    "closeReadiness": shared_close_readiness,
+                }
+                for resource_name, value in shared_values.items():
+                    resources[resource_name] = {"ok": True, "value": value}
+            except Exception as exc:
+                app.logger.warning(
+                    "Shared control-center projection failed (%s)",
+                    type(exc).__name__,
+                )
+                for resource_name in shared_resource_names:
+                    resources[resource_name] = {
+                        "ok": False,
+                        "error": "FAB resource could not be read",
+                    }
+            try:
+                resources["compliance"] = {
+                    "ok": True,
+                    "value": {
+                        "summary": LocalComplianceService(ledger, config).summary(
+                            metrics=shared_metrics,
+                        ),
+                        "assessments": ledger.list_compliance_assessments(limit=5),
+                        "statutoryStatus": "provisional",
+                        "filingStatus": "not_filed",
+                        "externalFiling": "not_executed",
+                    },
+                }
+            except Exception as exc:
+                app.logger.warning(
+                    "Shared compliance control-center projection failed (%s)",
+                    type(exc).__name__,
+                )
+            try:
+                shared_category_intents = fab_category_intents(
+                    ledger,
+                    config,
+                    target_system="waveapps_business",
+                )
+                shared_wave_setup = LocalWaveSetupService(config).status(
+                    ledger,
+                    "waveapps_business",
+                    category_intents=shared_category_intents,
+                )
+                shared_receipt_executor = LocalWaveReceiptExecutorService(
+                    ledger,
+                    config,
+                ).status()
+                shared_drive_wave_status = DriveWaveDeliveryService(
+                    ledger,
+                    config,
+                ).status(
+                    wave_setup=shared_wave_setup,
+                    receipt_executor=shared_receipt_executor,
+                )
+                resources.update({
+                    "waveSetup": {"ok": True, "value": shared_wave_setup},
+                    "waveReceiptExecutor": {
+                        "ok": True,
+                        "value": shared_receipt_executor,
+                    },
+                    "driveWaveStatus": {
+                        "ok": True,
+                        "value": shared_drive_wave_status,
+                    },
+                })
+            except Exception as exc:
+                app.logger.warning(
+                    "Shared Wave control-center projection failed (%s)",
+                    type(exc).__name__,
+                )
+            for resource_name, resource_path in CONTROL_CENTER_BATCH_PATHS.items():
+                if resource_name in resources:
+                    continue
+                try:
+                    resources[resource_name] = {
+                        "ok": True,
+                        "value": _read_internal_json_resource(
+                            app,
+                            resource_path,
+                            forbidden_endpoint="control_center_resources_api",
+                        ),
+                    }
+                except Exception as exc:
+                    app.logger.warning(
+                        "Control-center resource %s failed (%s)",
+                        resource_name,
+                        type(exc).__name__,
+                    )
+                    resources[resource_name] = {
+                        "ok": False,
+                        "error": "FAB resource could not be read",
+                    }
+            review_envelope = resources.get("reviewQueue") or {}
+            review_value = review_envelope.get("value")
+            if review_envelope.get("ok") is True and isinstance(review_value, dict):
+                wave_setup_value = (resources.get("waveSetup") or {}).get("value") or {}
+                category_options = [
+                    str(intent.get("category"))
+                    for intent in wave_setup_value.get("categoryIntents") or []
+                    if isinstance(intent, dict) and intent.get("category")
+                ]
+                if not category_options:
+                    category_options = _review_category_options(ledger, config)
+                review_value["categoryOptions"] = category_options
+        return jsonify({
+            "version": 1,
+            "resources": resources,
+        })
+
     def _limit_arg() -> int:
         return _bounded_positive_int(
             request.args.get("limit"),
@@ -8004,6 +8221,26 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         )
 
     return app
+
+
+def _read_internal_json_resource(
+    app: Flask,
+    path: str,
+    *,
+    forbidden_endpoint: str,
+) -> Dict[str, Any]:
+    with app.test_request_context(path, method="GET"):
+        adapter = app.url_map.bind_to_environ(request.environ)
+        endpoint, values = adapter.match(method="GET")
+        if endpoint == forbidden_endpoint:
+            raise RuntimeError("Recursive control-center resource")
+        response = app.make_response(app.view_functions[endpoint](**values))
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError("Control-center resource returned an error")
+        payload = response.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise RuntimeError("Control-center resource returned invalid JSON")
+        return payload
 
 
 def _format_money(value: Any) -> str:

@@ -23,7 +23,11 @@ WAVE_SETTING_FIELDS = {
     "category_account_ids",
 }
 LOCAL_WAVE_MANAGED_FIELDS_KEY = "_fab_local_wave_secret_fields"
-SUPPORTED_RUNTIME_SECRETS = {"web_jwt_secret"}
+SUPPORTED_RUNTIME_SECRETS = {
+    "web_jwt_secret",
+    "operator_api_token",
+    "hai_api_token",
+}
 
 
 class LocalSecretStoreError(RuntimeError):

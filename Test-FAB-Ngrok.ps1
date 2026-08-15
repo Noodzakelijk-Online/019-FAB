@@ -51,11 +51,19 @@ if ($Url) {
     $Url = $requestedUrl.GetLeftPart([System.UriPartial]::Authority)
 }
 
-$apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
+$apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); print(LocalSecretStore(c).get_or_create_runtime_secret('operator_api_token'))"
 if ($LASTEXITCODE -ne 0 -or ([string]$apiToken).Length -lt 32) {
-    throw "Configure a strong FAB API token before using ngrok."
+    throw "FAB could not load its encrypted operator API credential."
 }
 $apiToken = [string]$apiToken
+$haiApiToken = & $venvPython -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); print(LocalSecretStore(c).get_or_create_runtime_secret('hai_api_token'))"
+if ($LASTEXITCODE -ne 0 -or ([string]$haiApiToken).Length -lt 32) {
+    throw "FAB could not load its encrypted HAI API credential."
+}
+$haiApiToken = [string]$haiApiToken
+if ([System.StringComparer]::Ordinal.Equals($apiToken, $haiApiToken)) {
+    throw "FAB operator and HAI credentials must be different."
+}
 $localLive = Invoke-RestMethod -Uri "$apiBaseUrl/api/live" -Headers @{ Authorization = "Bearer $apiToken" } -TimeoutSec 5
 if ([string]$localLive.service -ne "fab-ledger-api" -or [bool]$localLive.maintenanceMode) {
     throw "FAB cloud verification requires the standard local runtime."
@@ -198,13 +206,28 @@ try {
         -TimeoutSec 20
     $manifest = Invoke-RestMethod `
         -Uri "$($tunnel.public_url)/api/hai/manifest" `
-        -Headers @{ Authorization = "Bearer $apiToken" } `
+        -Headers @{ Authorization = "Bearer $haiApiToken" } `
         -TimeoutSec 20
+    $haiOperatorStatus = 0
+    try {
+        Invoke-WebRequest `
+            -Uri "$($tunnel.public_url)/api/health" `
+            -Headers @{ Authorization = "Bearer $haiApiToken" } `
+            -UseBasicParsing `
+            -TimeoutSec 20 | Out-Null
+        $haiOperatorStatus = 200
+    }
+    catch {
+        if ($_.Exception.Response) {
+            $haiOperatorStatus = [int]$_.Exception.Response.StatusCode
+        }
+    }
     if (
         $unauthorizedStatus -ne 401 -or
         [string]$authorized.status -ne "ok" -or
         -not [bool]$authorized.authRequired -or
-        [string]$manifest.version -ne "fab-hai-connector-v1"
+        [string]$manifest.version -ne "fab-hai-connector-v1" -or
+        $haiOperatorStatus -ne 403
     ) {
         throw "FAB ngrok authentication did not fail closed."
     }
@@ -217,6 +240,7 @@ try {
 }
 finally {
     $apiToken = ""
+    $haiApiToken = ""
     if ($process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue

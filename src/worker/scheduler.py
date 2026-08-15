@@ -24,6 +24,10 @@ _DEPENDENCY_PATHS = {
         "src.operations.local_exports",
         "LocalExportAttemptService",
     ),
+    "LocalFolderIntake": (
+        "src.operations.local_intake",
+        "LocalFolderIntake",
+    ),
     "LocalNotificationService": (
         "src.operations.local_notifications",
         "LocalNotificationService",
@@ -304,27 +308,54 @@ class FabWorker:
         # Scheduled cycles retain executed and failure boundaries without
         # storing identical skipped-step rows every five minutes.
         autonomy_config["fab_autonomy_record_skipped_steps"] = False
-        result = _dependency("LocalAutonomousService")(
+        intake_paths = _list_config(
+            self.config,
+            "fab_local_intake_paths",
+            "operations_local_intake_paths",
+            "local_intake_paths",
+        )
+        intake_extensions = _list_config(
+            self.config,
+            "fab_local_intake_extensions",
+            "operations_local_intake_extensions",
+            "local_intake_extensions",
+        )
+        service = _dependency("LocalAutonomousService")(
             self.operations_ledger,
             autonomy_config,
-            intake_paths=_list_config(
-                self.config,
-                "fab_local_intake_paths",
-                "operations_local_intake_paths",
-                "local_intake_paths",
-            ),
-            intake_extensions=_list_config(
-                self.config,
-                "fab_local_intake_extensions",
-                "operations_local_intake_extensions",
-                "local_intake_extensions",
-            ),
-        ).run_cycle(
+            intake_paths=intake_paths,
+            intake_extensions=intake_extensions,
+        )
+        plan = service.plan(
             limit=25,
             include_wave_plan=self.include_wave_plan,
             include_wave_sync=self.include_wave_sync,
             include_connector_sync=False,
         )
+        plan_is_valid = isinstance(plan, dict)
+        runnable_action_ids = set(plan.get("runnableActionIds") or []) if plan_is_valid else set()
+        proven_idle = plan_is_valid and not runnable_action_ids
+        if plan_is_valid and runnable_action_ids == {"rescan_intake"}:
+            proven_idle = not _dependency("LocalFolderIntake")(
+                self.operations_ledger,
+                allowed_extensions=intake_extensions,
+            ).has_pending_changes(intake_paths)
+        if proven_idle:
+            result = {
+                "success": True,
+                "status": "idle",
+                "externalSubmission": "not_executed",
+                "plan": plan,
+                "executedActions": [],
+                "skippedActions": plan.get("actions") or [],
+            }
+        else:
+            result = service.run_cycle(
+                limit=25,
+                include_wave_plan=self.include_wave_plan,
+                include_wave_sync=self.include_wave_sync,
+                include_connector_sync=False,
+            )
         self._autonomy_prepared_exports = any(
             action.get("id") == "prepare_export_attempts"
             and action.get("status") == "completed"

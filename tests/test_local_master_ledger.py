@@ -1,3 +1,5 @@
+import csv
+import io
 import os
 import tempfile
 import unittest
@@ -13,6 +15,33 @@ from src.operations.local_routing import LocalRoutingService
 
 
 class TestLocalMasterLedgerService(unittest.TestCase):
+    def test_csv_neutralizes_formula_text_without_changing_ledger_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            ledger.upsert_bookkeeping_record({
+                "sourceType": "document",
+                "status": "validated",
+                "targetSystem": "waveapps_business",
+                "vendorName": "=HYPERLINK(\"https://invalid.example\")",
+                "description": "\tcommand",
+                "category": "@SUM(A1:A2)",
+                "recordDate": "2026-08-15",
+                "amount": 12.5,
+            })
+            service = LocalMasterLedgerService(ledger)
+
+            projection = service.project()
+            artifact = service.csv_artifact()
+            row = next(csv.DictReader(io.StringIO(artifact["content"])))
+
+            self.assertEqual(
+                projection["rows"][0]["vendorName"],
+                "=HYPERLINK(\"https://invalid.example\")",
+            )
+            self.assertEqual(row["vendorName"], "'=HYPERLINK(\"https://invalid.example\")")
+            self.assertEqual(row["description"], "'\tcommand")
+            self.assertEqual(row["category"], "'@SUM(A1:A2)")
+
     def _register_mijngeldzaken_document(self, ledger):
         return ledger.register_document({
             "source": "scanner",

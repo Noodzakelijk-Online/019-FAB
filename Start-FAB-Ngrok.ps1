@@ -71,10 +71,13 @@ function Test-CleanHttpsOrigin {
 }
 
 function Get-HttpStatusCode {
-    param([Parameter(Mandatory = $true)][string]$RequestUrl)
+    param(
+        [Parameter(Mandatory = $true)][string]$RequestUrl,
+        [hashtable]$RequestHeaders = @{}
+    )
 
     try {
-        Invoke-WebRequest -Uri $RequestUrl -UseBasicParsing -TimeoutSec 15 | Out-Null
+        Invoke-WebRequest -Uri $RequestUrl -Headers $RequestHeaders -UseBasicParsing -TimeoutSec 15 | Out-Null
         return 200
     }
     catch {
@@ -150,12 +153,21 @@ if ($Url) {
     $Url = $requestedUrl.GetLeftPart([System.UriPartial]::Authority)
 }
 
-$apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
+$apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); print(LocalSecretStore(c).get_or_create_runtime_secret('operator_api_token'))"
 if ($LASTEXITCODE -ne 0 -or ([string]$apiToken).Length -lt 32) {
-    throw "Configure a strong FAB API token before using ngrok."
+    throw "FAB could not load its encrypted operator API credential."
 }
 $apiToken = [string]$apiToken
+$haiApiToken = & $venvPython -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); print(LocalSecretStore(c).get_or_create_runtime_secret('hai_api_token'))"
+if ($LASTEXITCODE -ne 0 -or ([string]$haiApiToken).Length -lt 32) {
+    throw "FAB could not load its encrypted HAI API credential."
+}
+$haiApiToken = [string]$haiApiToken
+if ([System.StringComparer]::Ordinal.Equals($apiToken, $haiApiToken)) {
+    throw "FAB operator and HAI credentials must be different."
+}
 $headers = @{ Authorization = "Bearer $apiToken" }
+$haiHeaders = @{ Authorization = "Bearer $haiApiToken" }
 $expectedInstanceId = Get-FabInstanceId -Path $root
 $localLive = Invoke-RestMethod -Uri "$apiBaseUrl/api/live" -Headers $headers -TimeoutSec 5
 if (
@@ -175,6 +187,7 @@ if (Test-Path -LiteralPath $cloudRuntimePath) {
             Write-Host "Endpoint: $($cloudStatus.publicUrl)"
             Write-Host "HAI manifest: $($cloudStatus.haiManifestUrl)"
             $apiToken = ""
+            $haiApiToken = ""
             return
         }
     }
@@ -301,9 +314,12 @@ try {
     ) {
         throw "The remote endpoint did not return this authenticated FAB instance."
     }
-    $manifest = Invoke-RestMethod -Uri "$publicUrl/api/hai/manifest" -Headers $headers -TimeoutSec 20
+    $manifest = Invoke-RestMethod -Uri "$publicUrl/api/hai/manifest" -Headers $haiHeaders -TimeoutSec 20
     if ([string]$manifest.version -ne "fab-hai-connector-v1") {
         throw "The remote FAB HAI manifest could not be verified."
+    }
+    if ((Get-HttpStatusCode -RequestUrl "$publicUrl/api/health" -RequestHeaders $haiHeaders) -ne 403) {
+        throw "HAI credential escaped its route scope."
     }
 
     $now = (Get-Date).ToUniversalTime().ToString("o")
@@ -336,6 +352,7 @@ try {
 }
 finally {
     $apiToken = ""
+    $haiApiToken = ""
     if (-not $started) {
         if ($process -and -not $process.HasExited) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue

@@ -13,6 +13,7 @@ from src.data_entry.waveapps_surface import (
     plan_wave_action,
     resolve_wave_action_for_document,
 )
+from src.utils.csv_safety import neutralize_csv_row
 from src.data_entry.waveapps_transaction import (
     MONEY_TRANSACTION_CREATE_MUTATION,
     WAVE_GRAPHQL_URL,
@@ -112,7 +113,13 @@ class WaveappsPersonalHandler(BaseDataEntryHandler):
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             suffix = self.handicap_tag if data.get("category") == "Handicaps" else ""
-            writer.writerow(build_wave_expense_import_row(data, self._map_category_to_waveapps(data["category"]), suffix))
+            writer.writerow(neutralize_csv_row(
+                build_wave_expense_import_row(
+                    data,
+                    self._map_category_to_waveapps(data["category"]),
+                    suffix,
+                )
+            ))
         return csv_path
 
     def enter_data(self, categorized_data: Dict[str, Any]) -> Dict[str, Any]:

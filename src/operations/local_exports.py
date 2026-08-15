@@ -15,6 +15,7 @@ from src.data_entry.waveapps_api_executor import WaveappsApiExecutor
 from src.data_entry.waveapps_autonomous_operator import WaveappsAutonomousOperator
 from src.operations.local_bookkeeping_records import LocalBookkeepingRecordService
 from src.operations.local_ledger import LocalOperationsLedger
+from src.utils.csv_safety import neutralize_csv_row
 from src.operations.local_routing import PREPARED_ROUTING_STATUSES
 
 
@@ -1516,7 +1517,7 @@ def _csv_artifact_content(draft: Dict[str, Any]) -> str:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=[str(column) for column in columns], extrasaction="ignore", lineterminator="\n")
     writer.writeheader()
-    writer.writerow({str(key): value for key, value in row.items()})
+    writer.writerow(neutralize_csv_row({str(key): value for key, value in row.items()}))
     return buffer.getvalue()
 
 

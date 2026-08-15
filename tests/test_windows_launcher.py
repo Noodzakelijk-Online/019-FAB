@@ -10,6 +10,12 @@ class TestWindowsLauncher(unittest.TestCase):
         script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")
 
         self.assertIn("get_or_create_runtime_secret('web_jwt_secret')", script)
+        self.assertIn("get_or_create_runtime_secret('operator_api_token')", script)
+        self.assertIn("get_or_create_runtime_secret('hai_api_token')", script)
+        self.assertIn("$env:FAB_LOCAL_API_TOKEN = $apiToken", script)
+        self.assertIn("$env:FAB_HAI_API_TOKEN = $haiApiToken", script)
+        self.assertIn("$previousHaiApiToken = $env:FAB_HAI_API_TOKEN", script)
+        self.assertIn("Remove-Item Env:FAB_HAI_API_TOKEN", script)
         self.assertIn("$env:JWT_SECRET = $webJwtSecret", script)
         self.assertIn("$previousJwtSecret = $env:JWT_SECRET", script)
         self.assertIn("Remove-Item Env:JWT_SECRET", script)
@@ -61,6 +67,17 @@ class TestWindowsLauncher(unittest.TestCase):
         self.assertIn("%*", start_cmd)
         self.assertIn("-Maintenance", maintenance_cmd)
         self.assertIn("%*", maintenance_cmd)
+
+    def test_launcher_rejects_wildcard_port_collisions_and_cleans_failed_starts(self):
+        script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("GetActiveTcpListeners", script)
+        self.assertIn("ExclusiveAddressUse = $true", script)
+        self.assertIn("function Stop-FabSpawnedProcessTree", script)
+        self.assertIn("$apiStartedThisRun", script)
+        self.assertIn("$workerStartedThisRun", script)
+        self.assertIn("$webStartedThisRun", script)
+        self.assertIn("Stop-FabSpawnedProcessTree -ProcessId $webPid", script)
 
 
 if __name__ == "__main__":

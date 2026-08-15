@@ -37,6 +37,8 @@ class LocalWaveSetupService:
         self,
         ledger: LocalOperationsLedger,
         target_system: str = "waveapps_business",
+        *,
+        category_intents: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         effective = apply_local_wave_settings(self.config)
         target = resolve_wave_target_config(effective, target_system)
@@ -67,10 +69,14 @@ class LocalWaveSetupService:
         }
         mapped_expense_count = len(mapped_expense_ids & available_expense_ids)
         available_expense_count = len(available_expense_ids)
-        category_intents = fab_category_intents(
-            ledger,
-            effective,
-            target_system=target_system,
+        category_intents = (
+            fab_category_intents(
+                ledger,
+                effective,
+                target_system=target_system,
+            )
+            if category_intents is None
+            else [dict(intent) for intent in category_intents]
         )
         configured_category_accounts = {
             str(row.get("category") or ""): str(row.get("accountId") or "")

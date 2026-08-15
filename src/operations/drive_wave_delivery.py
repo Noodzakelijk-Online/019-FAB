@@ -61,7 +61,12 @@ class DriveWaveDeliveryService:
         self.config = config or {}
         self.drive_archiver = drive_archiver
 
-    def status(self) -> Dict[str, Any]:
+    def status(
+        self,
+        *,
+        wave_setup: Optional[Dict[str, Any]] = None,
+        receipt_executor: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         source_folder_id = self._source_folder_id()
         archive_folder_id = self._archive_folder_id()
         business_id = self._business_id()
@@ -81,19 +86,21 @@ class DriveWaveDeliveryService:
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
         folders_distinct = bool(source_folder_id) and bool(archive_folder_id) and source_folder_id != archive_folder_id
         archive_configured = enabled and folders_distinct and bool(business_id)
-        wave_setup = LocalWaveSetupService(self.config).status(
-            self.ledger,
-            "waveapps_business",
-        )
+        if wave_setup is None:
+            wave_setup = LocalWaveSetupService(self.config).status(
+                self.ledger,
+                "waveapps_business",
+            )
         wave_activation = (
             wave_setup.get("activation")
             if isinstance(wave_setup.get("activation"), dict)
             else {}
         )
-        receipt_executor = LocalWaveReceiptExecutorService(
-            self.ledger,
-            self.config,
-        ).status()
+        if receipt_executor is None:
+            receipt_executor = LocalWaveReceiptExecutorService(
+                self.ledger,
+                self.config,
+            ).status()
         if not archive_configured:
             status = "needs_configuration"
         elif not token_present or reauthorization_required:

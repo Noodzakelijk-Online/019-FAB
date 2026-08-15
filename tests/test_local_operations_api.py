@@ -22,12 +22,116 @@ from src.operations.local_bookkeeping_records import LocalBookkeepingRecordServi
 from src.operations.local_exports import EXPORT_APPROVAL_PHRASE, EXPORT_REJECTION_PHRASE, EXPORT_RESULT_CONFIRMATION_PHRASE
 from src.operations.local_gmail_auth import LocalGmailAuthorizationCoordinator
 from src.operations.local_google_drive_auth import LocalGoogleDriveAuthorizationCoordinator
+from src.operations.local_health import LocalOperationsHealth
 from src.operations.local_ledger import LocalOperationsLedger
+from src.operations.local_master_ledger import LocalMasterLedgerService
+from src.operations.local_wave_setup import LocalWaveSetupService
 from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_limiter
 from src.utils.runtime_identity import local_instance_id
 
 
 class TestLocalOperationsApi(unittest.TestCase):
+    def test_control_center_batch_reads_fixed_resources_in_one_snapshot(self):
+        expected_resources = {
+            "reviewQueue",
+            "exceptions",
+            "closeReadiness",
+            "driveWaveStatus",
+            "reportRuns",
+            "compliance",
+            "recovery",
+            "liveness",
+            "waveSetup",
+            "workflows",
+            "masterLedger",
+            "metrics",
+            "notifications",
+            "settings",
+            "bankTransactions",
+            "reconciliation",
+            "activity",
+            "sources",
+            "waveReceiptExecutor",
+            "sourceReadiness",
+            "driveAuthorization",
+            "haiStatus",
+            "haiManifest",
+            "gmailAuthorization",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+            original_connect = LocalOperationsLedger._connect
+            original_project = LocalMasterLedgerService.project
+            original_health = LocalOperationsHealth.summarize
+            connection_count = 0
+            projection_count = 0
+            health_count = 0
+            wave_setup_count = 0
+            metrics_count = 0
+
+            def counted_connect(ledger):
+                nonlocal connection_count
+                connection_count += 1
+                return original_connect(ledger)
+
+            def counted_project(service, *args, **kwargs):
+                nonlocal projection_count
+                projection_count += 1
+                return original_project(service, *args, **kwargs)
+
+            def counted_health(service, *args, **kwargs):
+                nonlocal health_count
+                health_count += 1
+                return original_health(service, *args, **kwargs)
+
+            original_wave_setup = LocalWaveSetupService.status
+
+            def counted_wave_setup(service, *args, **kwargs):
+                nonlocal wave_setup_count
+                wave_setup_count += 1
+                return original_wave_setup(service, *args, **kwargs)
+
+            original_metrics = LocalOperationsLedger.dashboard_metrics
+
+            def counted_metrics(ledger):
+                nonlocal metrics_count
+                metrics_count += 1
+                return original_metrics(ledger)
+
+            with patch.object(LocalOperationsLedger, "_connect", counted_connect), patch.object(
+                LocalMasterLedgerService,
+                "project",
+                counted_project,
+            ), patch.object(LocalOperationsHealth, "summarize", counted_health), patch.object(
+                LocalWaveSetupService,
+                "status",
+                counted_wave_setup,
+            ), patch.object(LocalOperationsLedger, "dashboard_metrics", counted_metrics):
+                response = client.get("/api/control-center/resources")
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual(set(payload["resources"]), expected_resources)
+            self.assertTrue(all(
+                envelope["ok"] and isinstance(envelope["value"], dict)
+                for envelope in payload["resources"].values()
+            ))
+            self.assertLessEqual(connection_count, 1)
+            self.assertLessEqual(projection_count, 1)
+            self.assertLessEqual(health_count, 1)
+            self.assertLessEqual(wave_setup_count, 1)
+            self.assertLessEqual(metrics_count, 1)
+            review_categories = payload["resources"]["reviewQueue"]["value"]["categoryOptions"]
+            wave_categories = [
+                item["category"]
+                for item in payload["resources"]["waveSetup"]["value"]["categoryIntents"]
+            ]
+            self.assertEqual(review_categories, wave_categories)
+
     @staticmethod
     def _operator_session_ticket(token, payload):
         encoded_payload = base64.urlsafe_b64encode(

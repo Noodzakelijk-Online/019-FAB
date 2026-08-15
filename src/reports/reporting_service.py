@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, List
 
 from src.storage.database import Database
+from src.utils.csv_safety import neutralize_csv_row
 
 
 class ReportingService:
@@ -70,7 +71,7 @@ class ReportingService:
             if rows:
                 writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
                 writer.writeheader()
-                writer.writerows(rows)
+                writer.writerows(neutralize_csv_row(row) for row in rows)
             else:
                 handle.write("")
         return {"status": "success", "path": output_path, "row_count": len(rows)}

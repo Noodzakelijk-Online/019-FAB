@@ -86,6 +86,23 @@ class TestLocalSecretStore(unittest.TestCase):
             first,
         )
 
+    def test_operator_and_hai_credentials_are_distinct_encrypted_runtime_secrets(self):
+        store = LocalSecretStore(self.config)
+
+        operator_token = store.get_or_create_runtime_secret("operator_api_token")
+        hai_token = store.get_or_create_runtime_secret("hai_api_token")
+        loaded = LocalSecretStore(self.config).load()["runtime"]
+        with open(self.config["fab_local_secret_store_path"], "rb") as handle:
+            encrypted_bytes = handle.read()
+
+        self.assertGreaterEqual(len(operator_token), 32)
+        self.assertGreaterEqual(len(hai_token), 32)
+        self.assertNotEqual(operator_token, hai_token)
+        self.assertEqual(loaded["operator_api_token"], operator_token)
+        self.assertEqual(loaded["hai_api_token"], hai_token)
+        self.assertNotIn(operator_token.encode("ascii"), encrypted_bytes)
+        self.assertNotIn(hai_token.encode("ascii"), encrypted_bytes)
+
     def test_runtime_signing_secret_rejects_unknown_names(self):
         with self.assertRaisesRegex(ValueError, "Unsupported FAB runtime secret"):
             LocalSecretStore(self.config).get_or_create_runtime_secret("unknown")

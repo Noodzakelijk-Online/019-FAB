@@ -16,6 +16,29 @@ from src.utils.rate_limiter import RateLimiter, reset_all_limiters, set_rate_lim
 
 
 class TestLocalAutonomousService(unittest.TestCase):
+    def test_autonomy_plan_uses_one_consistent_ledger_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+            original_connect = LocalOperationsLedger._connect
+            connection_count = 0
+
+            def counted_connect(ledger):
+                nonlocal connection_count
+                connection_count += 1
+                return original_connect(ledger)
+
+            with patch.object(LocalOperationsLedger, "_connect", counted_connect):
+                response = client.get(
+                    "/api/autonomy/plan?includeWavePlan=false"
+                    "&includeWaveSync=false&includeConnectorSync=false"
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertLessEqual(connection_count, 1)
+
     def test_operator_emergency_stop_blocks_cycles_until_confirmed_resume(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger_path = os.path.join(temp_dir, "fab.sqlite3")

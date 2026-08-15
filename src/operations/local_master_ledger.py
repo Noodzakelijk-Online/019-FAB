@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from src.operations.local_exports import master_ledger_freshness
 from src.operations.local_ledger import LocalOperationsLedger
+from src.utils.csv_safety import neutralize_csv_row
 
 
 MASTER_LEDGER_PROJECTION_VERSION = "fab-master-ledger-v1"
@@ -89,7 +90,7 @@ class LocalMasterLedgerService:
         writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         for row in projection["rows"]:
-            writer.writerow({column: row.get(column) for column in columns})
+            writer.writerow(neutralize_csv_row({column: row.get(column) for column in columns}))
         return {
             "success": True,
             "status": "prepared",

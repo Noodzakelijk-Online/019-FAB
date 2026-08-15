@@ -845,6 +845,42 @@ describe("FAB local API gateway", () => {
     expect(maximumActiveRequests).toBeLessThanOrEqual(8);
   });
 
+  it("batches ordinary control-center resources into one snapshot read", async () => {
+    const batchedResources = [
+      "reviewQueue", "exceptions", "closeReadiness", "driveWaveStatus",
+      "reportRuns", "compliance", "recovery", "liveness", "waveSetup",
+      "workflows", "masterLedger", "metrics", "notifications", "settings",
+      "bankTransactions", "reconciliation", "activity", "sources",
+      "waveReceiptExecutor", "sourceReadiness", "driveAuthorization",
+      "haiStatus", "haiManifest", "gmailAuthorization",
+    ];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      const body = path === "/api/control-center/resources"
+        ? {
+            version: 1,
+            resources: Object.fromEntries(batchedResources.map((resource) => [
+              resource,
+              { ok: true, value: { status: "ok" } },
+            ])),
+          }
+        : { status: "ok" };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getFabControlCenter();
+    const requestedPaths = fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname);
+
+    expect(result.connection.connected).toBe(true);
+    expect(requestedPaths).toContain("/api/control-center/resources");
+    expect(requestedPaths).not.toContain("/api/dashboard");
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
   it("coalesces duplicate snapshots and invalidates them after a mutation", async () => {
     const fetchMock = vi.fn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 2));

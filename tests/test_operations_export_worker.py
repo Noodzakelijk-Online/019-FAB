@@ -62,6 +62,38 @@ class TestOperationsExportWorker(unittest.TestCase):
         )
         return document_id, prepared["exportAttemptId"]
 
+    def test_repeated_scheduled_empty_folder_cycles_reduce_workflow_growth_by_95_percent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            config = {
+                **self._config(temp_dir),
+                "fab_local_intake_paths": intake_dir,
+                "worker_include_wave_plan": False,
+                "worker_include_wave_sync": False,
+                "worker_audit_heartbeat_seconds": 86400,
+            }
+            worker = FabWorker(config)
+            ledger = worker.operations_ledger
+
+            for _ in range(20):
+                worker._run_local_autonomy()
+
+            workflow_runs = ledger.list_workflow_runs(limit=100)
+            audit_events = ledger.list_audit_events(limit=500)
+            inner_events = [
+                event for event in audit_events
+                if str(event.get("action") or "").startswith("local_autonomy.")
+            ]
+            worker_events = [
+                event for event in audit_events
+                if event.get("action") == "local_worker.autonomy_cycle"
+            ]
+
+            self.assertLessEqual(len(workflow_runs), 1)
+            self.assertLessEqual(len(inner_events), 3)
+            self.assertLessEqual(len(worker_events), 2)
+
     def test_worker_uses_operations_ledger_and_does_not_open_legacy_database(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
@@ -154,7 +186,7 @@ class TestOperationsExportWorker(unittest.TestCase):
 
             export_type.return_value.prepare_ready_exports.assert_called_once_with(limit=25)
 
-    def test_worker_uses_sparse_step_evidence_for_recurring_idle_cycles(self):
+    def test_worker_coalesces_proven_idle_cycles_without_workflow_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = self._config(temp_dir)
             config.update({
@@ -167,13 +199,19 @@ class TestOperationsExportWorker(unittest.TestCase):
             worker._run_local_autonomy()
 
             ledger = LocalOperationsLedger(config["fab_local_ledger_path"])
-            workflow = ledger.list_workflow_runs(
+            workflows = ledger.list_workflow_runs(
                 trigger_source="local_autonomous_cycle",
                 limit=1,
-            )[0]
+            )
+            audit_events = ledger.list_audit_events(limit=20)
+
+            self.assertEqual(workflows, [])
             self.assertEqual(
-                ledger.list_workflow_steps(workflow_run_id=workflow["id"], limit=100),
-                [],
+                len([
+                    event for event in audit_events
+                    if event.get("action") == "local_worker.autonomy_cycle"
+                ]),
+                1,
             )
 
     def test_worker_coalesces_unchanged_cycle_audits_but_records_state_changes(self):

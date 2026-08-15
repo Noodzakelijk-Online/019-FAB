@@ -131,6 +131,47 @@ class LocalFolderIntake:
         })
         return summary
 
+    def has_pending_changes(self, folders: Sequence[str]) -> bool:
+        """Return true when a scheduled rescan would change durable state."""
+        roots = [_normalize_path(folder) for folder in folders if str(folder or "").strip()]
+        source_accounts = {
+            str(account.get("source_identifier") or account.get("sourceIdentifier") or ""): account
+            for account in self.ledger.list_source_accounts(
+                source_type=self.source,
+                limit=max(100, len(roots) * 2),
+            )
+        }
+        for root in roots:
+            account = source_accounts.get(root)
+            if not os.path.isdir(root):
+                if not account or str(account.get("status") or "").lower() != "missing":
+                    return True
+                continue
+            if not account or str(account.get("status") or "").lower() != "ready":
+                return True
+            for path in self._iter_document_paths(root):
+                try:
+                    stat = os.stat(path)
+                    modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+                    source_id = source_document_id({
+                        "local_path": path,
+                        "original_filename": os.path.basename(path),
+                        "mime_type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                        "modified_time": modified_at,
+                        "size": stat.st_size,
+                    })
+                    existing = self.ledger.get_document_by_source(self.source, source_id)
+                    if not existing:
+                        return True
+                    existing_hash = _document_content_hash(existing)
+                    if not existing_hash:
+                        return True
+                    if existing_hash != _sha256_file(path):
+                        return True
+                except OSError:
+                    return True
+        return False
+
     def _iter_document_paths(self, root: str):
         for current_root, dir_names, file_names in os.walk(root, followlinks=False):
             dir_names[:] = [

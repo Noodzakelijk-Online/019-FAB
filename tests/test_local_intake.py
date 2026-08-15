@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -109,6 +110,34 @@ class TestLocalFolderIntake(unittest.TestCase):
             self.assertEqual(documents[0]["duplicate_fingerprint"], "semantic-fingerprint")
             self.assertEqual(documents[0]["content_sha256"], documents[1]["content_sha256"])
             self.assertEqual(documents[1]["duplicate_of_document_id"], documents[0]["id"])
+
+    def test_pending_change_check_fails_closed_without_content_hash_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            intake_dir = os.path.join(temp_dir, "sort-out")
+            os.makedirs(intake_dir)
+            source_path = os.path.join(intake_dir, "receipt.pdf")
+            with open(source_path, "wb") as handle:
+                handle.write(b"receipt evidence")
+
+            intake = LocalFolderIntake(ledger)
+            intake.rescan([intake_dir])
+            document = ledger.list_documents(limit=1)[0]
+            connection = sqlite3.connect(ledger.path)
+            try:
+                connection.execute(
+                    """
+                    UPDATE bookkeeping_documents
+                    SET content_sha256 = NULL, storage_path = ?, metadata_json = '{}'
+                    WHERE id = ?
+                    """,
+                    (os.path.join(temp_dir, "missing-evidence.pdf"), document["id"]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertTrue(intake.has_pending_changes([intake_dir]))
 
 
 if __name__ == "__main__":

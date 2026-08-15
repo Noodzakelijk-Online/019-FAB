@@ -9,6 +9,43 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalHaiConnector(unittest.TestCase):
+    def test_hai_token_is_scoped_to_declared_connector_routes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+                "fab_local_api_token": "operator-token-for-tests",
+                "fab_hai_api_token": "hai-token-for-tests",
+                "fab_hai_connector_enabled": True,
+                "fab_hai_allowed_commands": "refresh_notifications",
+            })
+            client = app.test_client()
+            hai_headers = {"Authorization": "Bearer hai-token-for-tests"}
+            operator_headers = {"Authorization": "Bearer operator-token-for-tests"}
+
+            manifest = client.get("/api/hai/manifest", headers=hai_headers)
+            plan = client.post(
+                "/api/hai/commands/plan",
+                headers=hai_headers,
+                json={"commandId": "refresh_notifications", "payload": {}},
+            )
+            forbidden_read = client.get("/api/health", headers=hai_headers)
+            forbidden_mutation = client.post(
+                "/api/autonomy/emergency-stop",
+                headers=hai_headers,
+                json={"reason": "must not be reachable through the HAI token"},
+            )
+            operator_read = client.get("/api/health", headers=operator_headers)
+
+            self.assertEqual(manifest.status_code, 200)
+            self.assertEqual(plan.status_code, 200)
+            self.assertEqual(forbidden_read.status_code, 403)
+            self.assertEqual(forbidden_mutation.status_code, 403)
+            self.assertEqual(
+                forbidden_read.get_json()["error"],
+                "HAI credential is not permitted for this route",
+            )
+            self.assertEqual(operator_read.status_code, 200)
+
     def test_manifest_is_discoverable_but_execution_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

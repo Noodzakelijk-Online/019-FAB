@@ -80,9 +80,23 @@ class DriveFetcher(BaseFetcher):
         os.makedirs(attachments_dir, exist_ok=True)
         max_pages = _bounded_int(self.config.get("google_drive_max_pages"), 50, 1, 500)
         max_files = _bounded_int(self.config.get("google_drive_max_files"), 5000, 1, 50000)
+        max_file_bytes = _bounded_int(
+            self.config.get("google_drive_max_file_bytes"),
+            25 * 1024 * 1024,
+            1024,
+            1024 * 1024 * 1024,
+        )
+        max_run_bytes = _bounded_int(
+            self.config.get("google_drive_max_run_bytes"),
+            250 * 1024 * 1024,
+            max_file_bytes,
+            100 * 1024 * 1024 * 1024,
+        )
 
         documents = []
         skipped = 0
+        oversized = 0
+        downloaded_bytes = 0
         pages = 0
         try:
             page_token = None
@@ -112,6 +126,17 @@ class DriveFetcher(BaseFetcher):
                 if mime_type == "application/vnd.google-apps.folder":
                     skipped += 1
                     continue
+                declared_size = _optional_nonnegative_int(item.get("size"))
+                if (
+                    declared_size is not None
+                    and (
+                        declared_size > max_file_bytes
+                        or downloaded_bytes + declared_size > max_run_bytes
+                    )
+                ):
+                    skipped += 1
+                    oversized += 1
+                    continue
 
                 if mime_type.startswith("application/vnd.google-apps."):
                     exportable = {
@@ -133,13 +158,24 @@ class DriveFetcher(BaseFetcher):
                 else:
                     request = self.service.files().get_media(fileId=file_id)
                     download_mime_type = mime_type
-                fh = io.BytesIO()
+                remaining_run_bytes = max_run_bytes - downloaded_bytes
+                if remaining_run_bytes <= 0:
+                    skipped += 1
+                    oversized += 1
+                    continue
+                fh = _BoundedBytesIO(min(max_file_bytes, remaining_run_bytes))
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
-                while done is False:
-                    status, done = downloader.next_chunk()
+                try:
+                    while done is False:
+                        status, done = downloader.next_chunk()
+                except _DownloadLimitExceeded:
+                    skipped += 1
+                    oversized += 1
+                    continue
 
                 file_content = fh.getvalue()
+                downloaded_bytes += len(file_content)
                 local_path = self._store_content(
                     attachments_dir,
                     file_name,
@@ -167,8 +203,20 @@ class DriveFetcher(BaseFetcher):
                     }
                 )
             self._finish_run(len(documents), skipped=skipped, pages=pages)
+            self.last_run.update({
+                "oversized": oversized,
+                "downloadedBytes": downloaded_bytes,
+                "maxFileBytes": max_file_bytes,
+                "maxRunBytes": max_run_bytes,
+            })
         except Exception as error:
             self._fail_run(error, fetched=len(documents), skipped=skipped, pages=pages)
+            self.last_run.update({
+                "oversized": oversized,
+                "downloadedBytes": downloaded_bytes,
+                "maxFileBytes": max_file_bytes,
+                "maxRunBytes": max_run_bytes,
+            })
         return documents
 
 
@@ -178,5 +226,29 @@ def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def _optional_nonnegative_int(value: Any):
+    if value in (None, ""):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+class _DownloadLimitExceeded(RuntimeError):
+    pass
+
+
+class _BoundedBytesIO(io.BytesIO):
+    def __init__(self, limit: int):
+        super().__init__()
+        self.limit = int(limit)
+
+    def write(self, data):
+        if self.tell() + len(data) > self.limit:
+            raise _DownloadLimitExceeded("Google Drive file exceeded its download byte limit")
+        return super().write(data)
 
 
