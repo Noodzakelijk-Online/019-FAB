@@ -21,6 +21,7 @@ from src.utils.tesseract_runtime import (
     resolve_tesseract_command,
 )
 from src.utils.runtime_identity import local_instance_id
+from src.security.google_oauth_store import GoogleOAuthTokenStore
 
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -363,11 +364,11 @@ class LocalReadinessService:
         )
         return [
             _credential_file("gmail_credentials", "Gmail OAuth credentials", self.config, "gmail_credentials_file", "gmail.credentials_file", "gmail_credentials_path", required=gmail_required),
-            _credential_file("gmail_token", "Gmail OAuth token", self.config, "gmail_token_file", "gmail.token_file", "gmail_token_path", required=gmail_required),
+            _google_oauth_token_file("gmail_token", "Gmail OAuth token", self.config, "gmail_token_file", "gmail.token_file", "gmail_token_path", required=gmail_required),
             _credential_file("drive_credentials", "Google Drive OAuth credentials", self.config, "google_drive_credentials_file", "google_drive.credentials_file", "drive.credentials_file", "drive_credentials_path", required=drive_required),
-            _credential_file("drive_token", "Google Drive OAuth token", self.config, "google_drive_token_file", "google_drive.token_file", "drive.token_file", "drive_token_path", required=drive_required),
+            _google_oauth_token_file("drive_token", "Google Drive OAuth token", self.config, "google_drive_token_file", "google_drive.token_file", "drive.token_file", "drive_token_path", required=drive_required),
             _credential_file("photos_credentials", "Google Photos OAuth credentials", self.config, "google_photos_credentials_file", "google_photos.credentials_file", "photos.credentials_file", "photos_credentials_path", required=photos_required),
-            _credential_file("photos_token", "Google Photos Picker OAuth token", self.config, "google_photos_picker_token_file", "google_photos.picker_token_file", "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path", required=photos_required),
+            _google_oauth_token_file("photos_token", "Google Photos Picker OAuth token", self.config, "google_photos_picker_token_file", "google_photos.picker_token_file", "google_photos_token_file", "google_photos.token_file", "photos.token_file", "photos_token_path", required=photos_required),
             _credential_file("vision_credentials", "Google Vision credentials", self.config, "google_vision_credentials_file", "google_vision.credentials_file", required=vision_required),
             _credential_value("freshdesk_api_key", "Freshdesk API key", self.config, "freshdesk_api_key", "freshdesk.api_key"),
             _credential_value("freshdesk_domain", "Freshdesk domain", self.config, "freshdesk_domain", "freshdesk.domain", secret=False),
@@ -728,6 +729,47 @@ def _credential_file(
     }
 
 
+def _google_oauth_token_file(
+    identifier: str,
+    label: str,
+    config: Dict[str, Any],
+    *keys: str,
+    required: bool = False,
+) -> Dict[str, Any]:
+    value = _config_value(config, *keys)
+    configured = value not in (None, "")
+    if not configured:
+        return {
+            "id": identifier,
+            "label": label,
+            "kind": "file",
+            "configured": False,
+            "exists": False,
+            "partial": False,
+            "required": required,
+            "path": "",
+            "secret": True,
+            "legacyTokenPresent": False,
+            "reauthorizationRequired": False,
+            "reauthorizationReason": None,
+        }
+    status = GoogleOAuthTokenStore(value, []).status()
+    return {
+        "id": identifier,
+        "label": label,
+        "kind": "file",
+        "configured": True,
+        "exists": status["tokenPresent"],
+        "partial": not status["tokenPresent"],
+        "required": required,
+        "path": status["tokenPath"],
+        "secret": True,
+        "legacyTokenPresent": status["legacyTokenPresent"],
+        "reauthorizationRequired": status["reauthorizationRequired"],
+        "reauthorizationReason": status["reauthorizationReason"],
+    }
+
+
 def _credential_value(identifier: str, label: str, config: Dict[str, Any], *keys: str, secret: bool = True) -> Dict[str, Any]:
     configured = _has_value(config, *keys)
     return {
@@ -787,9 +829,7 @@ def _gmail_source(
         item.lower()
         for item in _list_config(config, "gmail_trusted_senders")
     ]
-    reauthorization_required = bool(
-        token.get("path") and os.path.isfile(f"{token['path']}.reauthorize")
-    )
+    reauthorization_required = bool(token.get("reauthorizationRequired"))
     source["scannerMode"] = scanner_mode
     source["trustedSenders"] = trusted_senders
     source["query"] = str(
@@ -803,7 +843,11 @@ def _gmail_source(
     elif reauthorization_required:
         source["ready"] = False
         source["status"] = "needs_auth"
-        source["details"] = "OAuth client changed; complete fresh Gmail consent before unattended intake."
+        source["details"] = (
+            "Legacy pickle tokens are never loaded; complete fresh Gmail consent to create a safe JSON token."
+            if token.get("reauthorizationReason") == "legacy_pickle_token_unsupported"
+            else "OAuth client changed; complete fresh Gmail consent before unattended intake."
+        )
     elif source["ready"] and scanner_mode:
         source["details"] = (
             "Read-only scanner intake accepts only PDF attachments from the configured trusted sender; "
@@ -837,7 +881,7 @@ def _photos_picker_source(
         token,
     )
     source["enabled"] = True
-    if token["exists"] and not str(token.get("path") or "").lower().endswith(".json"):
+    if token.get("legacyTokenPresent") and not token["exists"]:
         source["ready"] = False
         source["status"] = "needs_attention"
         source["details"] = "Picker tokens must be JSON; unsafe pickle token files are not loaded."
@@ -873,9 +917,7 @@ def _drive_source(
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     source = _oauth_source("google_drive", "Google Drive", credentials, token)
-    reauthorization_required = bool(
-        token.get("path") and os.path.isfile(f"{token['path']}.reauthorize")
-    )
+    reauthorization_required = bool(token.get("reauthorizationRequired"))
     folder_id = str(
         _config_value(
             config,
@@ -889,7 +931,11 @@ def _drive_source(
     if reauthorization_required:
         source["ready"] = False
         source["status"] = "needs_authorization"
-        source["details"] = "OAuth client credentials changed; complete fresh Google consent before Drive sync resumes."
+        source["details"] = (
+            "Legacy pickle tokens are never loaded; complete fresh Google consent to create a safe JSON token."
+            if token.get("reauthorizationReason") == "legacy_pickle_token_unsupported"
+            else "OAuth client credentials changed; complete fresh Google consent before Drive sync resumes."
+        )
     elif source["ready"] and not folder_id:
         source["ready"] = False
         source["status"] = "needs_attention"

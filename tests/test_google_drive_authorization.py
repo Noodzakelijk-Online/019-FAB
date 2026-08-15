@@ -52,7 +52,9 @@ class TestGoogleDriveAuthorization(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["status"], "authorized")
             self.assertTrue(result["folderVerified"])
-            self.assertTrue(os.path.isfile(token_path))
+            self.assertFalse(os.path.isfile(token_path))
+            self.assertTrue(os.path.isfile(os.path.splitext(token_path)[0] + ".json"))
+            self.assertTrue(result["tokenPath"].endswith("drive.json"))
 
     def test_authorization_rejects_a_trashed_or_non_folder_source(self):
         class InvalidFolderDriveClient(FakeDriveClient):

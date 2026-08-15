@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from src.authorize_gmail import authorize_gmail
 from src.operations.local_ledger import LocalOperationsLedger
+from src.security.google_oauth_store import GoogleOAuthTokenStore
 
 
 MAX_GOOGLE_OAUTH_CREDENTIAL_BYTES = 64 * 1024
@@ -36,15 +37,17 @@ class LocalGmailAuthorizationCoordinator:
                 default="credentials/gmail_credentials.json",
             )
         )
-        self.token_path = _absolute_path(
+        self.token_store = GoogleOAuthTokenStore(
             _config_value(
                 self.config,
                 "gmail_token_file",
                 "gmail_token_path",
-                default="tokens/gmail_token.pickle",
-            )
+                default="tokens/gmail_token.json",
+            ),
+            ["https://www.googleapis.com/auth/gmail.readonly"],
         )
-        self.reauthorization_marker_path = f"{self.token_path}.reauthorize"
+        self.token_path = self.token_store.token_path
+        self.reauthorization_marker_path = self.token_store.marker_path
         self.scanner_mode = _as_bool(self.config.get("gmail_scanner_mode"))
         self.trusted_senders = _string_list(self.config.get("gmail_trusted_senders"))
         self.query = str(
@@ -67,14 +70,15 @@ class LocalGmailAuthorizationCoordinator:
             session = dict(self._session)
             running = bool(self._thread and self._thread.is_alive())
         credentials_present = os.path.isfile(self.credentials_path)
-        token_present = os.path.isfile(self.token_path)
-        reauthorization_required = os.path.isfile(self.reauthorization_marker_path)
+        token_status = self.token_store.status()
+        token_present = token_status["tokenPresent"]
+        reauthorization_required = token_status["reauthorizationRequired"]
         if running:
             state = "authorization_in_progress"
-        elif session.get("state") not in {None, "idle"}:
-            state = str(session["state"])
         elif reauthorization_required:
             state = "reauthorization_required"
+        elif session.get("state") not in {None, "idle"}:
+            state = str(session["state"])
         elif token_present:
             state = "token_present"
         elif credentials_present:
@@ -86,7 +90,10 @@ class LocalGmailAuthorizationCoordinator:
             "status": state,
             "credentialsPresent": credentials_present,
             "tokenPresent": token_present,
+            "tokenPath": self.token_path,
+            "legacyTokenPresent": token_status["legacyTokenPresent"],
             "reauthorizationRequired": reauthorization_required,
+            "reauthorizationReason": token_status["reauthorizationReason"],
             "authorizationInProgress": running,
             "canInstallCredentials": not running,
             "canStartAuthorization": credentials_present and policy_ready and not running,
@@ -127,13 +134,17 @@ class LocalGmailAuthorizationCoordinator:
                     "Gmail credentials already exist. Confirm replacement explicitly to rotate them."
                 )
             _atomic_private_write(self.credentials_path, content)
-            reauthorization_required = os.path.isfile(self.token_path)
+            token_status = self.token_store.status()
+            reauthorization_required = bool(
+                token_status["tokenPresent"] or token_status["legacyTokenPresent"]
+            )
             if reauthorization_required:
                 _atomic_private_write(
                     self.reauthorization_marker_path,
                     json.dumps({
                         "requiredAt": _now(),
                         "credentialSha256": hashlib.sha256(content).hexdigest(),
+                        "reason": "oauth_client_credentials_changed",
                     }).encode("utf-8"),
                 )
             self._session = {
@@ -227,9 +238,9 @@ class LocalGmailAuthorizationCoordinator:
         settings = dict(self.config)
         settings["gmail_credentials_file"] = self.credentials_path
         settings["gmail_token_file"] = self.token_path
-        settings["gmail_force_reauthorization"] = os.path.isfile(
-            self.reauthorization_marker_path
-        )
+        settings["gmail_force_reauthorization"] = self.token_store.status()[
+            "reauthorizationRequired"
+        ]
         try:
             result = self.authorize(settings)
         except Exception as exc:
@@ -243,8 +254,8 @@ class LocalGmailAuthorizationCoordinator:
         error = None if success else _safe_message(result.get("error"))
         email_address = str(result.get("emailAddress") or "") or None
         finished_at = _now()
-        if success and os.path.isfile(self.reauthorization_marker_path):
-            os.unlink(self.reauthorization_marker_path)
+        if success:
+            self.token_store.clear_reauthorization()
         with self._lock:
             self._session = {
                 "state": state,
@@ -262,7 +273,7 @@ class LocalGmailAuthorizationCoordinator:
                 "actor": actor,
                 "status": state,
                 "mailboxVerified": bool(result.get("mailboxVerified")),
-                "tokenPresent": os.path.isfile(self.token_path),
+                "tokenPresent": self.token_store.status()["tokenPresent"],
                 "scannerMode": self.scanner_mode,
                 "error": error,
                 "externalSubmission": "user_owned_oauth_consent",

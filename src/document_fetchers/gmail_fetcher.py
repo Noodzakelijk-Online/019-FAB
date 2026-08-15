@@ -15,13 +15,16 @@ import base64
 from email.utils import parseaddr
 import re
 from typing import List, Dict, Any
-import pickle
 
 from src.document_fetchers.base import BaseFetcher
 from src.document_fetchers.profiles import (
     CUSTOM_SCANNER_PROFILE_ID,
     HP_EPRINT_PROFILE_ID,
     HP_EPRINT_SENDER,
+)
+from src.security.google_oauth_store import (
+    GoogleOAuthTokenStore,
+    LegacyGoogleOAuthTokenError,
 )
 
 
@@ -44,13 +47,23 @@ class GmailFetcher(BaseFetcher):
         if build is None or InstalledAppFlow is None or Request is None:
             raise ImportError("Google API dependencies are required for Gmail fetching.")
 
-        token_path = self.config.get("gmail_token_file") or self.config.get('gmail_token_path', 'token.pickle')
+        configured_token_path = self.config.get("gmail_token_file") or self.config.get(
+            "gmail_token_path", "tokens/gmail_token.json"
+        )
         credentials_path = self.config.get("gmail_credentials_file") or self.config.get('gmail_credentials_path', 'credentials.json')
+        token_store = GoogleOAuthTokenStore(
+            configured_token_path,
+            self.SCOPES,
+            credentials_type=Credentials,
+        )
 
         force_reauthorization = _as_bool(self.config.get("gmail_force_reauthorization"))
-        if os.path.exists(token_path) and not force_reauthorization:
-            with open(token_path, 'rb') as token:
-                self.creds = pickle.load(token)
+        load_error = None
+        if not force_reauthorization:
+            try:
+                self.creds = token_store.load()
+            except (FileNotFoundError, LegacyGoogleOAuthTokenError, ValueError) as exc:
+                load_error = exc
 
         scopes_valid = bool(self.creds) and (
             not hasattr(self.creds, "has_scopes") or self.creds.has_scopes(self.SCOPES)
@@ -60,15 +73,15 @@ class GmailFetcher(BaseFetcher):
                 self.creds.refresh(Request())
             else:
                 if not self._interactive_auth_enabled("gmail"):
+                    if isinstance(load_error, LegacyGoogleOAuthTokenError):
+                        raise load_error
                     raise RuntimeError(
                         "Gmail OAuth requires a valid token; interactive authorization is disabled for autonomous runs."
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(
                     credentials_path, self.SCOPES)
                 self.creds = flow.run_local_server(port=0)
-            os.makedirs(os.path.dirname(os.path.abspath(token_path)), exist_ok=True)
-            with open(token_path, 'wb') as token:
-                pickle.dump(self.creds, token)
+            token_store.save(self.creds)
 
         self.service = build('gmail', 'v1', credentials=self.creds)
 

@@ -126,10 +126,10 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.gmail_fetcher.Request")
     @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
-    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    @patch("src.document_fetchers.gmail_fetcher.GoogleOAuthTokenStore")
     def test_gmail_fetcher(self, mock_pickle, mock_exists, mock_Request, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         
         mock_service = MagicMock()
         mock_build.return_value = mock_service
@@ -161,7 +161,7 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.gmail_fetcher.Request")
     @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
-    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    @patch("src.document_fetchers.gmail_fetcher.GoogleOAuthTokenStore")
     def test_gmail_fetcher_follows_next_page_token(
         self,
         mock_pickle,
@@ -171,7 +171,7 @@ class TestDocumentFetchers(unittest.TestCase):
         mock_build,
     ):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         service = MagicMock()
         mock_build.return_value = service
         service.users.return_value.messages.return_value.list.return_value.execute.side_effect = [
@@ -200,7 +200,7 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.gmail_fetcher.Request")
     @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
-    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    @patch("src.document_fetchers.gmail_fetcher.GoogleOAuthTokenStore")
     def test_gmail_scanner_profile_rejects_untrusted_and_invalid_pdf_attachments(
         self,
         mock_pickle,
@@ -210,7 +210,7 @@ class TestDocumentFetchers(unittest.TestCase):
         mock_build,
     ):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         service = MagicMock()
         mock_build.return_value = service
         service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
@@ -254,7 +254,7 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.gmail_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.gmail_fetcher.Request")
     @patch("src.document_fetchers.gmail_fetcher.os.path.exists")
-    @patch("src.document_fetchers.gmail_fetcher.pickle")
+    @patch("src.document_fetchers.gmail_fetcher.GoogleOAuthTokenStore")
     def test_gmail_fetcher_marks_capped_history_partial_and_uses_incremental_checkpoint(
         self,
         mock_pickle,
@@ -264,7 +264,7 @@ class TestDocumentFetchers(unittest.TestCase):
         mock_build,
     ):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         service = MagicMock()
         mock_build.return_value = service
         service.users.return_value.messages.return_value.list.return_value.execute.return_value = {
@@ -298,10 +298,10 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
     @patch("src.document_fetchers.drive_fetcher.Request")
     @patch("src.document_fetchers.drive_fetcher.os.path.exists")
-    @patch("src.document_fetchers.drive_fetcher.pickle")
+    @patch("src.document_fetchers.drive_fetcher.GoogleOAuthTokenStore")
     def test_drive_fetcher(self, mock_pickle, mock_exists, mock_Request, mock_MediaIoBaseDownload, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
 
         mock_service = MagicMock()
         mock_build.return_value = mock_service
@@ -329,7 +329,7 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
     @patch("src.document_fetchers.drive_fetcher.Request")
     @patch("src.document_fetchers.drive_fetcher.os.path.exists")
-    @patch("src.document_fetchers.drive_fetcher.pickle")
+    @patch("src.document_fetchers.drive_fetcher.GoogleOAuthTokenStore")
     def test_drive_fetcher_follows_next_page_token(
         self,
         mock_pickle,
@@ -340,7 +340,7 @@ class TestDocumentFetchers(unittest.TestCase):
         mock_build,
     ):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         service = MagicMock()
         mock_build.return_value = service
         service.files.return_value.list.return_value.execute.side_effect = [
@@ -500,7 +500,7 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.drive_fetcher.MediaIoBaseDownload")
     @patch("src.document_fetchers.drive_fetcher.Request")
     @patch("src.document_fetchers.drive_fetcher.os.path.exists")
-    @patch("src.document_fetchers.drive_fetcher.pickle")
+    @patch("src.document_fetchers.drive_fetcher.GoogleOAuthTokenStore")
     def test_drive_fetcher_rejects_oversized_metadata_before_download(
         self,
         mock_pickle,
@@ -511,7 +511,7 @@ class TestDocumentFetchers(unittest.TestCase):
         mock_build,
     ):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         service = MagicMock()
         mock_build.return_value = service
         service.files.return_value.list.return_value.execute.return_value = {
@@ -623,11 +623,11 @@ class TestDocumentFetchers(unittest.TestCase):
     @patch("src.document_fetchers.photos_fetcher.InstalledAppFlow")
     @patch("src.document_fetchers.photos_fetcher.Request")
     @patch("src.document_fetchers.photos_fetcher.os.path.exists")
-    @patch("src.document_fetchers.photos_fetcher.pickle")
+    @patch("src.document_fetchers.photos_fetcher.GoogleOAuthTokenStore")
     @patch("src.document_fetchers.photos_fetcher.requests.get")
     def test_photos_fetcher(self, mock_requests_get, mock_pickle, mock_exists, mock_Request, mock_InstalledAppFlow, mock_build):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         
         mock_service = MagicMock()
         mock_build.return_value = mock_service

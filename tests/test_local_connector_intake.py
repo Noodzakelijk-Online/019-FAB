@@ -29,7 +29,7 @@ class _Fetcher:
 class TestLocalConnectorIntake(unittest.TestCase):
     def _service(self, temp_dir, documents, error=None):
         credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-        token_path = os.path.join(temp_dir, "gmail-token.pickle")
+        token_path = os.path.join(temp_dir, "gmail-token.json")
         for path in (credentials_path, token_path):
             with open(path, "wb") as handle:
                 handle.write(b"configured")
@@ -322,7 +322,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_configured_connector_stays_disabled_without_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            token_path = os.path.join(temp_dir, "gmail-token.json")
             for path in (credentials_path, token_path):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -348,7 +348,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_gmail_scanner_plan_exposes_strict_profile_and_reauthorization_gate(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            token_path = os.path.join(temp_dir, "gmail-token.json")
             for path in (credentials_path, token_path):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -435,7 +435,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_gmail_scanner_plan_requires_a_trusted_sender_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            token_path = os.path.join(temp_dir, "gmail-token.json")
             for path in (credentials_path, token_path):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -462,7 +462,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_gmail_advances_incremental_checkpoint_only_after_success(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-            token_path = os.path.join(temp_dir, "gmail-token.pickle")
+            token_path = os.path.join(temp_dir, "gmail-token.json")
             for path in (credentials_path, token_path):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -512,7 +512,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_drive_requires_an_approved_folder_scope(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "drive-credentials.json")
-            token_path = os.path.join(temp_dir, "drive-token.pickle")
+            token_path = os.path.join(temp_dir, "drive-token.json")
             for path in (credentials_path, token_path):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -536,7 +536,7 @@ class TestLocalConnectorIntake(unittest.TestCase):
     def test_drive_sync_stays_blocked_while_rotated_credentials_need_fresh_consent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "drive-credentials.json")
-            token_path = os.path.join(temp_dir, "drive-token.pickle")
+            token_path = os.path.join(temp_dir, "drive-token.json")
             for path in (credentials_path, token_path, f"{token_path}.reauthorize"):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")

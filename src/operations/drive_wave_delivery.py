@@ -16,6 +16,7 @@ from src.operations.local_wave_receipt_executor import (
     wave_business_uuid,
 )
 from src.operations.local_wave_setup import LocalWaveSetupService
+from src.security.google_oauth_store import GoogleOAuthTokenStore
 
 if TYPE_CHECKING:
     from src.document_fetchers.drive_archiver import DriveArchiveClient
@@ -71,18 +72,17 @@ class DriveWaveDeliveryService:
         archive_folder_id = self._archive_folder_id()
         business_id = self._business_id()
         enabled = self._archive_enabled()
-        token_path = str(
+        configured_token_path = str(
             _first(self.config, "google_drive_token_file", "drive_token_path")
-            or "tokens/drive_token.pickle"
+            or "tokens/drive_token.json"
         )
         credentials_path = str(
             _first(self.config, "google_drive_credentials_file", "drive_credentials_path")
             or "credentials/drive_credentials.json"
         )
-        token_present = os.path.isfile(os.path.abspath(os.path.expanduser(token_path)))
-        reauthorization_required = os.path.isfile(
-            f"{os.path.abspath(os.path.expanduser(token_path))}.reauthorize"
-        )
+        token_status = GoogleOAuthTokenStore(configured_token_path, []).status()
+        token_present = token_status["tokenPresent"]
+        reauthorization_required = token_status["reauthorizationRequired"]
         credentials_present = os.path.isfile(os.path.abspath(os.path.expanduser(credentials_path)))
         folders_distinct = bool(source_folder_id) and bool(archive_folder_id) and source_folder_id != archive_folder_id
         archive_configured = enabled and folders_distinct and bool(business_id)
@@ -130,7 +130,10 @@ class DriveWaveDeliveryService:
             "waveReceiptExecutorLastSeenAt": receipt_executor.get("lastSeenAt"),
             "waveReceiptExecutorMissingCapabilities": receipt_executor.get("missingCapabilities") or [],
             "driveTokenPresent": token_present,
+            "driveTokenPath": token_status["tokenPath"],
+            "driveLegacyTokenPresent": token_status["legacyTokenPresent"],
             "driveReauthorizationRequired": reauthorization_required,
+            "driveReauthorizationReason": token_status["reauthorizationReason"],
             "driveCredentialsPresent": credentials_present,
             "relayIntakeReady": bool(source_folder_id),
             "relayIntakePath": "/api/connectors/google-drive/relay",
@@ -1346,13 +1349,13 @@ class DriveWaveDeliveryService:
         return str(_first(self.config, "waveapps_business_id", "wave_business_id") or "").strip()
 
     def _drive_reauthorization_required(self) -> bool:
-        token_path = str(
+        configured_token_path = str(
             _first(self.config, "google_drive_token_file", "drive_token_path")
-            or "tokens/drive_token.pickle"
+            or "tokens/drive_token.json"
         )
-        return os.path.isfile(
-            f"{os.path.abspath(os.path.expanduser(token_path))}.reauthorize"
-        )
+        return GoogleOAuthTokenStore(configured_token_path, []).status()[
+            "reauthorizationRequired"
+        ]
 
     def _evidence_max_age_seconds(self) -> int:
         value = _first(

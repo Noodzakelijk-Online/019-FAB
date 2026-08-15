@@ -98,7 +98,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
             "google_drive_archive_verified_files": True,
             "google_drive_folder_id": SOURCE_FOLDER,
             "google_drive_wave_archive_folder_id": ARCHIVE_FOLDER,
-            "google_drive_token_file": os.path.join(self.temp_dir.name, "drive-token-default.pickle"),
+            "google_drive_token_file": os.path.join(self.temp_dir.name, "drive-token-default.json"),
             "waveapps_business_id": BUSINESS_ID,
             "wave_receipt_executor_state_file": os.path.join(
                 self.temp_dir.name,
@@ -244,7 +244,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         return document_id, source_path, source_bytes, source_hash, config
 
     def test_drive_credential_rotation_blocks_archive_until_fresh_consent(self):
-        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        token_path = os.path.join(self.temp_dir.name, "drive-token.json")
         for path in (token_path, f"{token_path}.reauthorize"):
             with open(path, "wb") as handle:
                 handle.write(b"configured")
@@ -260,7 +260,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertIn("drive_reauthorization_required", plan["reasons"])
 
     def test_delivery_status_requires_complete_wave_setup(self):
-        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        token_path = os.path.join(self.temp_dir.name, "drive-token.json")
         with open(token_path, "wb") as handle:
             handle.write(b"configured")
         status = DriveWaveDeliveryService(
@@ -277,7 +277,7 @@ class TestDriveWaveDeliveryService(unittest.TestCase):
         self.assertIn("Wave access token", status["waveSetupNextAction"])
 
     def test_delivery_status_is_ready_after_live_wave_mapping_validation(self):
-        token_path = os.path.join(self.temp_dir.name, "drive-token.pickle")
+        token_path = os.path.join(self.temp_dir.name, "drive-token.json")
         with open(token_path, "wb") as handle:
             handle.write(b"configured")
         self.ledger.record_wave_operation_snapshot({

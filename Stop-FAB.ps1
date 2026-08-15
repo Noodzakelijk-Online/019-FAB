@@ -383,12 +383,14 @@ if (Test-Path -LiteralPath $runtimePath) {
     }
 }
 
-$apiToken = ""
+$apiToken = [string]$env:FAB_LOCAL_API_TOKEN
 try {
-    if (-not (Test-Path -LiteralPath $venvPython)) {
-        throw "FAB's isolated Python runtime is missing."
+    if ($apiToken.Length -lt 32) {
+        if (-not (Test-Path -LiteralPath $venvPython)) {
+            throw "FAB's isolated Python runtime is missing."
+        }
+        $apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; from src.security.local_secret_store import LocalSecretStore; c=ConfigLoader('config/config.ini').get_all_config(); p=LocalSecretStore(c).load(); print(str((p.get('runtime') or {}).get('operator_api_token') or ''))"
     }
-    $apiToken = & $venvPython -c "from src.config_loader import ConfigLoader; c=ConfigLoader('config/config.ini').get_all_config(); print(str(c.get('fab_local_api_token') or c.get('fab_operations_api_token') or c.get('operations_api_token') or ''))"
 }
 catch {
     Write-Warning "FAB could not read its API token while recovering runtime ownership."

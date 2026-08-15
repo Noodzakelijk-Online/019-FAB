@@ -3,8 +3,12 @@ from __future__ import annotations
 import hashlib
 import io
 import os
-import pickle
 from typing import Any, Dict, Optional
+
+from src.security.google_oauth_store import (
+    GoogleOAuthTokenStore,
+    LegacyGoogleOAuthTokenError,
+)
 
 try:
     from google.auth.transport.requests import Request
@@ -106,10 +110,10 @@ class DriveArchiveClient:
     def _authenticate(self) -> Any:
         if build is None or Request is None or InstalledAppFlow is None:
             raise RuntimeError("Google Drive API dependencies are required for verified archiving.")
-        token_path = str(
+        configured_token_path = str(
             self.config.get("google_drive_token_file")
             or self.config.get("drive_token_path")
-            or "tokens/drive_token.pickle"
+            or "tokens/drive_token.json"
         )
         credentials_path = str(
             self.config.get("google_drive_credentials_file")
@@ -117,30 +121,41 @@ class DriveArchiveClient:
             or "credentials/drive_credentials.json"
         )
         credentials = None
+        credentials_changed = False
+        token_store = GoogleOAuthTokenStore(
+            configured_token_path,
+            self.SCOPES,
+        )
         force_reauthorization = _as_bool(
             self.config.get("google_drive_force_reauthorization"),
             False,
         )
-        if os.path.exists(token_path) and not force_reauthorization:
-            with open(token_path, "rb") as handle:
-                credentials = pickle.load(handle)
+        load_error = None
+        if not force_reauthorization:
+            try:
+                credentials = token_store.load()
+            except (FileNotFoundError, LegacyGoogleOAuthTokenError, ValueError) as exc:
+                load_error = exc
 
         scopes_valid = bool(credentials) and (
             not hasattr(credentials, "has_scopes") or credentials.has_scopes(self.SCOPES)
         )
         if credentials and credentials.expired and credentials.refresh_token and scopes_valid:
             credentials.refresh(Request())
+            credentials_changed = True
         if not credentials or not credentials.valid or not scopes_valid:
             if not _as_bool(self.config.get("google_drive_interactive_auth"), False):
+                if isinstance(load_error, LegacyGoogleOAuthTokenError):
+                    raise load_error
                 raise RuntimeError(
                     "Google Drive archiving needs a valid full-Drive OAuth token; "
                     "run supervised authorization with google_drive.interactive_auth enabled."
                 )
             flow = InstalledAppFlow.from_client_secrets_file(credentials_path, self.SCOPES)
             credentials = flow.run_local_server(port=0)
-            os.makedirs(os.path.dirname(os.path.abspath(token_path)), exist_ok=True)
-            with open(token_path, "wb") as handle:
-                pickle.dump(credentials, handle)
+            credentials_changed = True
+        if credentials_changed:
+            token_store.save(credentials)
         return build("drive", "v3", credentials=credentials)
 
 

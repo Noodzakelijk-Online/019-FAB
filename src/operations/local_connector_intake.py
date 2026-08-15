@@ -19,6 +19,7 @@ from src.operations.local_bookkeeping_records import LocalBookkeepingRecordServi
 from src.operations.local_intake import LocalFolderIntake
 from src.operations.local_ledger import LocalOperationsLedger
 from src.operations.local_targets import resolve_document_target_system
+from src.security.google_oauth_store import GoogleOAuthTokenStore
 
 
 CONNECTOR_SOURCES = ("gmail", "google_drive", "freshdesk", "google_photos")
@@ -610,23 +611,12 @@ class LocalConnectorIntakeService:
             "gmail": ("gmail_token_file", "gmail_token_path"),
             "google_drive": ("google_drive_token_file", "drive_token_path"),
         }.get(source, ())
-        token_path = _config_path(self.config, *token_keys)
-        if not token_path:
+        configured_path = _configured_path_value(self.config, *token_keys)
+        if not configured_path:
             return
-        marker_path = f"{token_path}.reauthorize"
-        os.makedirs(os.path.dirname(marker_path) or ".", exist_ok=True)
-        temporary_path = f"{marker_path}.{uuid4().hex}.tmp"
-        try:
-            with open(temporary_path, "x", encoding="utf-8") as handle:
-                handle.write(f"requiredAt={_now()}\nreason=oauth_token_revoked_or_expired\n")
-            try:
-                os.chmod(temporary_path, 0o600)
-            except OSError:
-                pass
-            os.replace(temporary_path, marker_path)
-        finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
+        GoogleOAuthTokenStore(configured_path, []).mark_reauthorization(
+            "oauth_token_revoked_or_expired"
+        )
 
     def _source_plan(self, source: str) -> Dict[str, Any]:
         configured = self._configured(source)
@@ -769,7 +759,10 @@ class LocalConnectorIntakeService:
     def _configured(self, source: str) -> bool:
         if source == "gmail":
             return _existing_config_path(self.config, "gmail_credentials_file", "gmail_credentials_path") and _existing_config_path(
-                self.config, "gmail_token_file", "gmail_token_path"
+                self.config,
+                "gmail_token_file",
+                "gmail_token_path",
+                google_oauth_token=True,
             )
         if source == "google_drive":
             return _existing_config_path(
@@ -780,6 +773,7 @@ class LocalConnectorIntakeService:
                 self.config,
                 "google_drive_token_file",
                 "drive_token_path",
+                google_oauth_token=True,
             ) and bool(
                 str(
                     self.config.get("google_drive_folder_id")
@@ -812,8 +806,11 @@ class LocalConnectorIntakeService:
             "gmail": ("gmail_token_file", "gmail_token_path"),
             "google_drive": ("google_drive_token_file", "drive_token_path"),
         }.get(source, ())
-        token_path = _config_path(self.config, *token_keys)
-        return bool(token_path and os.path.isfile(f"{token_path}.reauthorize"))
+        configured_path = _configured_path_value(self.config, *token_keys)
+        return bool(
+            configured_path
+            and GoogleOAuthTokenStore(configured_path, []).status()["reauthorizationRequired"]
+        )
 
     def _gmail_scanner_profile(self) -> Dict[str, Any]:
         trusted_senders = _list_config_value(self.config.get("gmail_trusted_senders"))
@@ -1056,16 +1053,29 @@ def _positive_float_config(
     return parsed if parsed > 0 else default
 
 
-def _existing_config_path(config: Dict[str, Any], *keys: str) -> bool:
-    return bool(_config_path(config, *keys))
+def _existing_config_path(
+    config: Dict[str, Any],
+    *keys: str,
+    google_oauth_token: bool = False,
+) -> bool:
+    configured = _configured_path_value(config, *keys)
+    if not configured:
+        return False
+    if google_oauth_token:
+        return GoogleOAuthTokenStore(configured, []).status()["tokenPresent"]
+    return os.path.isfile(configured)
 
 
 def _config_path(config: Dict[str, Any], *keys: str) -> Optional[str]:
+    path = _configured_path_value(config, *keys)
+    return path if path and os.path.isfile(path) else None
+
+
+def _configured_path_value(config: Dict[str, Any], *keys: str) -> Optional[str]:
     for key in keys:
         value = config.get(key)
         if str(value or "").strip():
-            path = os.path.abspath(os.path.expanduser(os.path.expandvars(str(value))))
-            return path if os.path.isfile(path) else None
+            return os.path.abspath(os.path.expanduser(os.path.expandvars(str(value))))
     return None
 
 

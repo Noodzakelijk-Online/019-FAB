@@ -179,6 +179,33 @@ class TestLocalGoogleDriveAuthorizationCoordinator(unittest.TestCase):
             self.assertFalse(coordinator.status()["reauthorizationRequired"])
             self.assertEqual(coordinator.status()["status"], "authorized")
 
+    def test_legacy_pickle_is_preserved_and_reported_as_reauthorization_required(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_path = os.path.join(temp_dir, "tokens", "drive.pickle")
+            os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+            with open(legacy_path, "wb") as handle:
+                handle.write(b"legacy-token-evidence")
+            coordinator = LocalGoogleDriveAuthorizationCoordinator(
+                LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3")),
+                {
+                    "google_drive_credentials_file": os.path.join(temp_dir, "drive.json"),
+                    "google_drive_token_file": legacy_path,
+                    "google_drive_folder_id": "approved-source-folder",
+                },
+            )
+
+            status = coordinator.status()
+
+            self.assertEqual(status["status"], "reauthorization_required")
+            self.assertFalse(status["tokenPresent"])
+            self.assertTrue(status["legacyTokenPresent"])
+            self.assertEqual(
+                status["reauthorizationReason"],
+                "legacy_pickle_token_unsupported",
+            )
+            self.assertTrue(status["tokenPath"].endswith("drive.json"))
+            self.assertTrue(os.path.isfile(legacy_path))
+
 
 if __name__ == "__main__":
     unittest.main()

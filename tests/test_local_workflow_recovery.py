@@ -27,7 +27,7 @@ class _Fetcher:
 class TestLocalWorkflowRecovery(unittest.TestCase):
     def _connector_config(self, temp_dir):
         credentials_path = os.path.join(temp_dir, "gmail-credentials.json")
-        token_path = os.path.join(temp_dir, "gmail-token.pickle")
+        token_path = os.path.join(temp_dir, "gmail-token.json")
         for path in (credentials_path, token_path):
             with open(path, "wb") as handle:
                 handle.write(b"configured")

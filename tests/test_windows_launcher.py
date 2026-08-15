@@ -39,6 +39,14 @@ class TestWindowsLauncher(unittest.TestCase):
 
         self.assertIn('dist/fab-standalone.js', script)
 
+    def test_stop_launcher_uses_the_encrypted_operator_token_for_api_ownership(self):
+        script = (ROOT / "Stop-FAB.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("from src.security.local_secret_store import LocalSecretStore", script)
+        self.assertIn("LocalSecretStore(c).load()", script)
+        self.assertIn("operator_api_token", script)
+        self.assertNotIn("c.get('fab_local_api_token')", script)
+
     def test_launcher_reconciles_only_its_checksum_bound_virtual_environment(self):
         script = (ROOT / "Start-FAB.ps1").read_text(encoding="utf-8")
 

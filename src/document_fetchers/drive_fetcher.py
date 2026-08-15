@@ -15,9 +15,12 @@ except ImportError:
 import os
 import io
 from typing import List, Dict, Any
-import pickle
 
 from src.document_fetchers.base import BaseFetcher
+from src.security.google_oauth_store import (
+    GoogleOAuthTokenStore,
+    LegacyGoogleOAuthTokenError,
+)
 
 class DriveFetcher(BaseFetcher):
     """Fetches documents from Google Drive based on specified folder ID."""
@@ -38,18 +41,29 @@ class DriveFetcher(BaseFetcher):
         if build is None or InstalledAppFlow is None or Request is None or MediaIoBaseDownload is None:
             raise ImportError("Google API dependencies are required for Drive fetching.")
 
-        token_path = self.config.get("google_drive_token_file") or self.config.get("drive_token_path", "token_drive.pickle")
+        configured_token_path = self.config.get("google_drive_token_file") or self.config.get(
+            "drive_token_path", "tokens/drive_token.json"
+        )
         credentials_path = self.config.get("google_drive_credentials_file") or self.config.get("drive_credentials_path", "credentials_drive.json")
+        token_store = GoogleOAuthTokenStore(
+            configured_token_path,
+            self.SCOPES,
+            credentials_type=Credentials,
+        )
 
-        if os.path.exists(token_path):
-            with open(token_path, "rb") as token:
-                self.creds = pickle.load(token)
+        load_error = None
+        try:
+            self.creds = token_store.load()
+        except (FileNotFoundError, LegacyGoogleOAuthTokenError, ValueError) as exc:
+            load_error = exc
 
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(Request())
             else:
                 if not self._interactive_auth_enabled("google_drive"):
+                    if isinstance(load_error, LegacyGoogleOAuthTokenError):
+                        raise load_error
                     raise RuntimeError(
                         "Google Drive OAuth requires a valid token; interactive authorization is disabled for autonomous runs."
                     )
@@ -57,8 +71,7 @@ class DriveFetcher(BaseFetcher):
                     credentials_path, self.SCOPES
                 )
                 self.creds = flow.run_local_server(port=0)
-            with open(token_path, "wb") as token:
-                pickle.dump(self.creds, token)
+            token_store.save(self.creds)
 
         self.service = build("drive", "v3", credentials=self.creds)
 

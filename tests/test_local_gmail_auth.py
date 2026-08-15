@@ -126,6 +126,30 @@ class TestLocalGmailAuthorizationCoordinator(unittest.TestCase):
             self.assertEqual(observed_force, [True])
             self.assertFalse(coordinator.status()["reauthorizationRequired"])
 
+    def test_legacy_pickle_is_preserved_and_reported_as_reauthorization_required(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._config(temp_dir)
+            legacy_path = config["gmail_token_file"]
+            os.makedirs(os.path.dirname(legacy_path), exist_ok=True)
+            with open(legacy_path, "wb") as handle:
+                handle.write(b"legacy-token-evidence")
+            coordinator = LocalGmailAuthorizationCoordinator(
+                LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3")),
+                config,
+            )
+
+            status = coordinator.status()
+
+            self.assertEqual(status["status"], "reauthorization_required")
+            self.assertFalse(status["tokenPresent"])
+            self.assertTrue(status["legacyTokenPresent"])
+            self.assertEqual(
+                status["reauthorizationReason"],
+                "legacy_pickle_token_unsupported",
+            )
+            self.assertTrue(status["tokenPath"].endswith("gmail.json"))
+            self.assertTrue(os.path.isfile(legacy_path))
+
 
 if __name__ == "__main__":
     unittest.main()

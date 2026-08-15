@@ -86,7 +86,7 @@ class TestLocalReadinessService(unittest.TestCase):
             intake_dir = os.path.join(temp_dir, "sort-out")
             os.makedirs(intake_dir)
             gmail_credentials = os.path.join(temp_dir, "gmail_credentials.json")
-            gmail_token = os.path.join(temp_dir, "gmail_token.pickle")
+            gmail_token = os.path.join(temp_dir, "gmail_token.json")
             for path in (gmail_credentials, gmail_token):
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write("{}")
@@ -167,7 +167,7 @@ class TestLocalReadinessService(unittest.TestCase):
     def test_drive_readiness_blocks_sync_during_oauth_client_rotation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             credentials_path = os.path.join(temp_dir, "drive.json")
-            token_path = os.path.join(temp_dir, "drive.pickle")
+            token_path = os.path.join(temp_dir, "drive.json")
             for path in (credentials_path, token_path, f"{token_path}.reauthorize"):
                 with open(path, "wb") as handle:
                     handle.write(b"configured")
@@ -182,6 +182,31 @@ class TestLocalReadinessService(unittest.TestCase):
             self.assertFalse(drive["ready"])
             self.assertEqual(drive["status"], "needs_authorization")
             self.assertIn("fresh Google consent", drive["details"])
+
+    def test_readiness_rejects_legacy_pickle_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            credentials_path = os.path.join(temp_dir, "drive-credentials.json")
+            legacy_path = os.path.join(temp_dir, "drive-token.pickle")
+            for path in (credentials_path, legacy_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"configured")
+
+            summary = LocalReadinessService({
+                "google_drive_enabled": True,
+                "google_drive_credentials_file": credentials_path,
+                "google_drive_token_file": legacy_path,
+                "google_drive_folder_id": "approved-source-folder",
+            }).summarize()
+            drive = next(item for item in summary["sources"] if item["id"] == "google_drive")
+            token = next(item for item in summary["credentials"] if item["id"] == "drive_token")
+
+            self.assertFalse(drive["ready"])
+            self.assertEqual(drive["status"], "needs_authorization")
+            self.assertIn("never loaded", drive["details"])
+            self.assertFalse(token["exists"])
+            self.assertTrue(token["legacyTokenPresent"])
+            self.assertTrue(token["path"].endswith("drive-token.json"))
+            self.assertTrue(os.path.isfile(legacy_path))
 
     def test_base_url_overrides_displayed_local_access_without_exposing_token(self):
         summary = LocalReadinessService(

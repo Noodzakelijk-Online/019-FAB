@@ -5,6 +5,7 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from src.config_loader import ConfigLoader
+from src.security.google_oauth_store import normalize_google_token_path
 
 
 def authorize_gmail(
@@ -22,10 +23,10 @@ def authorize_gmail(
         or settings.get("gmail_credentials_path")
         or "credentials/gmail_credentials.json"
     )
-    token_path = _absolute_config_path(
+    token_path = normalize_google_token_path(
         settings.get("gmail_token_file")
         or settings.get("gmail_token_path")
-        or "tokens/gmail_token.pickle"
+        or "tokens/gmail_token.json"
     )
 
     if not os.path.isfile(credentials_path):

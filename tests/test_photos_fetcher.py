@@ -28,10 +28,10 @@ class TestPhotosFetcher(unittest.TestCase):
     @patch("src.document_fetchers.photos_fetcher.build")
     @patch("src.document_fetchers.photos_fetcher.Request")
     @patch("src.document_fetchers.photos_fetcher.os.path.exists")
-    @patch("src.document_fetchers.photos_fetcher.pickle")
+    @patch("src.document_fetchers.photos_fetcher.GoogleOAuthTokenStore")
     def test_fetch_documents(self, mock_pickle, mock_exists, mock_Request, mock_build, mock_InstalledAppFlow):
         mock_exists.return_value = True
-        mock_pickle.load.return_value = MagicMock()
+        mock_pickle.return_value.load.return_value = MagicMock()
         
         # Mock the Google Photos API service
         mock_service = MagicMock()

@@ -5,6 +5,7 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from src.config_loader import ConfigLoader
+from src.security.google_oauth_store import normalize_google_token_path
 
 
 def authorize_google_drive(
@@ -20,10 +21,10 @@ def authorize_google_drive(
         or settings.get("drive_credentials_path")
         or "credentials/drive_credentials.json"
     )
-    token_path = _absolute_config_path(
+    token_path = normalize_google_token_path(
         settings.get("google_drive_token_file")
         or settings.get("drive_token_path")
-        or "tokens/drive_token.pickle"
+        or "tokens/drive_token.json"
     )
     folder_id = str(
         settings.get("google_drive_folder_id")

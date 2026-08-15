@@ -12,10 +12,13 @@ except ImportError:
     HttpError = Exception
 import os
 from typing import List, Dict, Any
-import pickle
 import requests
 
 from src.document_fetchers.base import BaseFetcher
+from src.security.google_oauth_store import (
+    GoogleOAuthTokenStore,
+    LegacyGoogleOAuthTokenError,
+)
 
 class PhotosFetcher(BaseFetcher):
     """Fetches documents (images) from Google Photos."""
@@ -39,18 +42,29 @@ class PhotosFetcher(BaseFetcher):
         if build is None or InstalledAppFlow is None or Request is None:
             raise ImportError("Google API dependencies are required for Photos fetching.")
 
-        token_path = self.config.get("google_photos_token_file") or self.config.get("photos_token_path", "token_photos.pickle")
+        configured_token_path = self.config.get("google_photos_token_file") or self.config.get(
+            "photos_token_path", "tokens/photos_token.json"
+        )
         credentials_path = self.config.get("google_photos_credentials_file") or self.config.get("photos_credentials_path", "credentials_photos.json")
+        token_store = GoogleOAuthTokenStore(
+            configured_token_path,
+            self.SCOPES,
+            credentials_type=Credentials,
+        )
 
-        if os.path.exists(token_path):
-            with open(token_path, "rb") as token:
-                self.creds = pickle.load(token)
+        load_error = None
+        try:
+            self.creds = token_store.load()
+        except (FileNotFoundError, LegacyGoogleOAuthTokenError, ValueError) as exc:
+            load_error = exc
 
         if not self.creds or not self.creds.valid:
             if self.creds and self.creds.expired and self.creds.refresh_token:
                 self.creds.refresh(Request())
             else:
                 if not self._interactive_auth_enabled("google_photos"):
+                    if isinstance(load_error, LegacyGoogleOAuthTokenError):
+                        raise load_error
                     raise RuntimeError(
                         "Google Photos OAuth requires a valid token; interactive authorization is disabled for autonomous runs."
                     )
@@ -58,8 +72,7 @@ class PhotosFetcher(BaseFetcher):
                     credentials_path, self.SCOPES
                 )
                 self.creds = flow.run_local_server(port=0)
-            with open(token_path, "wb") as token:
-                pickle.dump(self.creds, token)
+            token_store.save(self.creds)
 
         self.service = build("photoslibrary", "v1", credentials=self.creds, static_discovery=False)
 
