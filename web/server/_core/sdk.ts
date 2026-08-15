@@ -6,6 +6,7 @@ import type { Request } from "express";
 import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
 import * as db from "../db";
+import { createLogger } from "../lib/logger";
 import { ENV } from "./env";
 import type {
   ExchangeTokenRequest,
@@ -17,6 +18,7 @@ import type {
 // Utility function
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
+const log = createLogger("Auth");
 
 export type SessionPayload = {
   openId: string;
@@ -30,7 +32,7 @@ const GET_USER_INFO_WITH_JWT_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserI
 
 class OAuthService {
   constructor(private client: ReturnType<typeof axios.create>) {
-    if (ENV.oAuthServerUrl) console.log("[OAuth] Initialized with configured server.");
+    if (ENV.oAuthServerUrl) log.info("OAuth client initialized with configured server");
   }
 
   private requireConfiguredServer(): void {
@@ -219,7 +221,7 @@ class SDKServer {
         !isNonEmptyString(appId) ||
         !isNonEmptyString(name)
       ) {
-        console.warn("[Auth] Session payload missing required fields");
+        log.warn("Session payload missing required fields");
         return null;
       }
 
@@ -229,7 +231,11 @@ class SDKServer {
         name,
       };
     } catch (error) {
-      console.warn("[Auth] Session verification failed", String(error));
+      log.warn(
+        "Session verification failed",
+        {},
+        error instanceof Error ? error : new Error(String(error)),
+      );
       return null;
     }
   }
@@ -285,7 +291,11 @@ class SDKServer {
         });
         user = await db.getUserByOpenId(userInfo.openId);
       } catch (error) {
-        console.error("[Auth] Failed to sync user from OAuth:", error);
+        log.error(
+          "Failed to sync user from OAuth",
+          {},
+          error instanceof Error ? error : new Error(String(error)),
+        );
         throw ForbiddenError("Failed to sync user info");
       }
     }

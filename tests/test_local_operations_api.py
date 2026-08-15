@@ -33,10 +33,13 @@ from src.utils.runtime_identity import local_instance_id
 class TestLocalOperationsApi(unittest.TestCase):
     def test_control_center_batch_reads_fixed_resources_in_one_snapshot(self):
         expected_resources = {
+            "autonomy",
             "reviewQueue",
             "exceptions",
+            "health",
             "closeReadiness",
             "driveWaveStatus",
+            "driveWaveWorkOrders",
             "reportRuns",
             "compliance",
             "recovery",
@@ -4338,6 +4341,29 @@ class TestLocalOperationsApi(unittest.TestCase):
             self.assertEqual(dashboard.headers["Cache-Control"], "no-store, max-age=0")
             self.assertEqual(dashboard.headers["X-Frame-Options"], "DENY")
             self.assertIn("frame-ancestors 'none'", dashboard.headers["Content-Security-Policy"])
+
+    def test_api_error_envelopes_redact_provider_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = create_app({
+                "fab_local_ledger_path": os.path.join(temp_dir, "fab.sqlite3"),
+            })
+            client = app.test_client()
+            provider_error = RuntimeError(
+                "Wave failed at https://operator:url-secret@example.test/graphql?access_token=query-secret "
+                "Authorization: Bearer bearer-secret Cookie: session=cookie-secret"
+            )
+
+            with patch(
+                "src.operations.local_api.LocalBackupService.create_backup",
+                side_effect=provider_error,
+            ):
+                response = client.post("/api/backups", json={})
+
+            serialized = json.dumps(response.get_json())
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("[REDACTED]", serialized)
+            for secret in ("url-secret", "query-secret", "bearer-secret", "cookie-secret"):
+                self.assertNotIn(secret, serialized)
 
     def test_loopback_mode_without_token_still_rejects_cross_origin_mutations(self):
         with tempfile.TemporaryDirectory() as temp_dir:

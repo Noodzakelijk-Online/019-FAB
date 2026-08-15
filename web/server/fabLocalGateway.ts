@@ -1,4 +1,5 @@
 import { ENV } from "./_core/env";
+import { sanitizeExternalMessage } from "./lib/errorSanitizer";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -167,10 +168,7 @@ const READ_TIMEOUT_MS: Partial<Record<FabResourceKey, number>> = {
 };
 const CONTROL_CENTER_BATCH_PATH = "/api/control-center/resources";
 const CONTROL_CENTER_DIRECT_RESOURCES = new Set<FabResourceKey>([
-  "health",
-  "autonomy",
   "backups",
-  "driveWaveWorkOrders",
   "cloudStatus",
 ]);
 
@@ -262,7 +260,9 @@ export async function fabLocalRequest(
     const response = await fetch(target, { ...init, headers, signal: controller.signal });
     const body = await response.json().catch(() => ({})) as JsonRecord;
     if (!response.ok) {
-      throw new Error(stringValue(body.error) || `FAB local API returned ${response.status}`);
+      throw new Error(sanitizeExternalMessage(
+        stringValue(body.error) || `FAB local API returned ${response.status}`,
+      ));
     }
     const method = String(init.method || "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD") {
@@ -422,7 +422,11 @@ async function buildFabControlCenter(): Promise<FabControlCenter> {
       resourceStates[resource] = { state: "live", checkedAt, updatedAt: checkedAt, error: null };
       return;
     }
-    const error = result.reason instanceof Error ? result.reason.message : "Request failed";
+    const error = sanitizeExternalMessage(
+      result.reason instanceof Error ? result.reason.message : result.reason,
+      500,
+      "Request failed",
+    );
     const cached = resourceCache.get(resource);
     if (cached) {
       resources[resource] = cached.value;

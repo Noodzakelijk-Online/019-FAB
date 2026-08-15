@@ -73,6 +73,28 @@ describe("FAB local API gateway", () => {
     expect(JSON.stringify(result)).not.toContain("private-token");
   });
 
+  it("redacts secrets from local API error responses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: "Wave rejected access_token=response-secret Authorization: Bearer bearer-secret " + "x".repeat(1_000),
+    }), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    })));
+
+    await expect(fabLocalRequest("/api/test", {}, {
+      baseUrl: "http://127.0.0.1:5001",
+      token: "request-secret",
+    })).rejects.toSatisfy((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain("[REDACTED]");
+      expect(message.length).toBeLessThanOrEqual(500);
+      expect(message).not.toContain("response-secret");
+      expect(message).not.toContain("bearer-secret");
+      expect(message).not.toContain("request-secret");
+      return true;
+    });
+  });
+
   it("loads a bounded review page and projects only dashboard fields", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -847,8 +869,8 @@ describe("FAB local API gateway", () => {
 
   it("batches ordinary control-center resources into one snapshot read", async () => {
     const batchedResources = [
-      "reviewQueue", "exceptions", "closeReadiness", "driveWaveStatus",
-      "reportRuns", "compliance", "recovery", "liveness", "waveSetup",
+      "autonomy", "reviewQueue", "exceptions", "closeReadiness", "driveWaveStatus", "driveWaveWorkOrders",
+      "health", "reportRuns", "compliance", "recovery", "liveness", "waveSetup",
       "workflows", "masterLedger", "metrics", "notifications", "settings",
       "bankTransactions", "reconciliation", "activity", "sources",
       "waveReceiptExecutor", "sourceReadiness", "driveAuthorization",
@@ -878,7 +900,10 @@ describe("FAB local API gateway", () => {
     expect(result.connection.connected).toBe(true);
     expect(requestedPaths).toContain("/api/control-center/resources");
     expect(requestedPaths).not.toContain("/api/dashboard");
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(requestedPaths).not.toContain("/api/health");
+    expect(requestedPaths).not.toContain("/api/autonomy/plan");
+    expect(requestedPaths).not.toContain("/api/drive-wave/work-orders");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("coalesces duplicate snapshots and invalidates them after a mutation", async () => {

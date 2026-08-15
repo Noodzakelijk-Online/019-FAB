@@ -11,6 +11,74 @@ from src.operations.local_ledger import LocalOperationsLedger
 
 
 class TestLocalOperationsLedger(unittest.TestCase):
+    def test_persisted_diagnostics_redact_embedded_credentials(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))
+            message = (
+                "POST https://operator:url-secret@example.test/callback?access_token=query-secret "
+                "Authorization: Bearer bearer-secret Cookie: session=cookie-secret "
+                'provider={"client_secret":"json-secret"}'
+            )
+
+            workflow_id = ledger.create_workflow_run({
+                "status": "failed",
+                "triggerSource": "test",
+                "errorMessage": message,
+            })
+            step_id = ledger.create_workflow_step({
+                "workflowRunId": workflow_id,
+                "stepKey": "provider_call",
+                "status": "failed",
+                "errorMessage": message,
+            })
+            event_id = ledger.record_audit_event({
+                "action": "provider.failed",
+                "entityType": "test",
+                "details": {
+                    "message": message,
+                    "authorization": "Bearer object-secret",
+                    "nested": {"refreshToken": "nested-secret"},
+                },
+            })
+            snapshot_id = ledger.record_wave_operation_snapshot({
+                "workflowId": "workflow-redaction",
+                "operationId": "operation-redaction",
+                "surface": "transactions",
+                "actionId": "transaction_create",
+                "safety": "safe_draft",
+                "status": "failed",
+                "payload": {"accessToken": "payload-secret", "memo": message},
+                "plan": {"clientSecret": "plan-secret"},
+            })
+            sync_run_id = ledger.create_wave_sync_run({
+                "targetSystem": "waveapps_business",
+                "status": "failed",
+                "errorMessage": message,
+            })
+
+            persisted = json.dumps({
+                "workflow": ledger.get_workflow_run(workflow_id),
+                "step": ledger.get_workflow_step(step_id),
+                "event": next(item for item in ledger.list_audit_events(limit=20) if item["id"] == event_id),
+                "snapshot": ledger.get_wave_operation_snapshot("operation-redaction"),
+                "snapshotId": snapshot_id,
+                "syncRun": ledger.get_wave_sync_run(sync_run_id),
+            })
+
+            self.assertIn("[REDACTED]", persisted)
+            for secret in (
+                "url-secret",
+                "query-secret",
+                "bearer-secret",
+                "cookie-secret",
+                "json-secret",
+                "object-secret",
+                "nested-secret",
+                "payload-secret",
+                "plan-secret",
+            ):
+                self.assertNotIn(secret, persisted)
+
     def test_read_snapshot_reuses_one_query_only_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             ledger = LocalOperationsLedger(os.path.join(temp_dir, "fab.sqlite3"))

@@ -1404,7 +1404,7 @@ class LocalOperationsLedger:
             "documents_imported": self._int(payload.get("documentsImported"), 0),
             "documents_processed": self._int(payload.get("documentsProcessed"), 0),
             "documents_needing_review": self._int(payload.get("documentsNeedingReview"), 0),
-            "error_message": payload.get("errorMessage"),
+            "error_message": self._redact_error_message(payload.get("errorMessage")),
             "metadata_json": self._json(self._redact_sensitive(metadata)),
             "started_at": self._date_text(payload.get("startedAt")) or now,
             "finished_at": self._date_text(payload.get("finishedAt")),
@@ -1419,7 +1419,7 @@ class LocalOperationsLedger:
             "documents_imported": payload.get("documentsImported"),
             "documents_processed": payload.get("documentsProcessed"),
             "documents_needing_review": payload.get("documentsNeedingReview"),
-            "error_message": payload.get("errorMessage"),
+            "error_message": self._redact_error_message(payload.get("errorMessage")),
             "metadata_json": (
                 self._json(self._redact_sensitive(payload.get("metadata")))
                 if "metadata" in payload
@@ -1517,7 +1517,7 @@ class LocalOperationsLedger:
             "duration_ms": self._nonnegative_optional_int(
                 self._payload_value(payload, "durationMs", "duration_ms")
             ),
-            "error_message": str(error_message)[:2000] if error_message else None,
+            "error_message": self._redact_error_message(error_message),
             "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
             "created_at": now,
             "updated_at": now,
@@ -1538,7 +1538,7 @@ class LocalOperationsLedger:
             "duration_ms": self._nonnegative_optional_int(
                 self._payload_value(payload, "durationMs", "duration_ms")
             ),
-            "error_message": str(error_message)[:2000] if error_message else None,
+            "error_message": self._redact_error_message(error_message),
             "metadata_json": (
                 self._json(self._redact_sensitive(payload.get("metadata")))
                 if "metadata" in payload
@@ -2873,14 +2873,14 @@ class LocalOperationsLedger:
             "safety": safety,
             "status": status,
             "plan_status": plan_status,
-            "plan_json": self._json(plan),
-            "capability_plan_json": self._json(capability_plan),
+            "plan_json": self._json(self._redact_sensitive(plan)),
+            "capability_plan_json": self._json(self._redact_sensitive(capability_plan)),
             "requires_confirmation": self._bool_int(requires_confirmation) if requires_confirmation is not None else None,
             "requires_credentials": self._bool_int(requires_credentials) if requires_credentials is not None else None,
             "required_fields_json": self._json(required_fields),
             "missing_fields_json": self._json(missing_fields),
             "external_submission": external_submission,
-            "payload_json": self._json(operation_payload),
+            "payload_json": self._json(self._redact_sensitive(operation_payload)),
             "metadata_json": self._json(self._redact_sensitive(metadata)),
             "created_at": now,
             "updated_at": now,
@@ -3123,7 +3123,9 @@ class LocalOperationsLedger:
                 "page_size": self._int(payload.get("pageSize") or payload.get("page_size"), 50),
                 "pages_fetched": self._int(payload.get("pagesFetched") or payload.get("pages_fetched"), 0),
                 "entities_seen": self._int(payload.get("entitiesSeen") or payload.get("entities_seen"), 0),
-                "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                "error_message": self._redact_error_message(
+                    payload.get("errorMessage") or payload.get("error_message")
+                ),
                 "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))),
                 "started_at": self._date_text(payload.get("startedAt") or payload.get("started_at")) or now,
                 "finished_at": self._date_text(payload.get("finishedAt") or payload.get("finished_at")),
@@ -3142,7 +3144,9 @@ class LocalOperationsLedger:
                 "status": payload.get("status"),
                 "pages_fetched": self._optional_int(pages_fetched),
                 "entities_seen": self._optional_int(entities_seen),
-                "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                "error_message": self._redact_error_message(
+                    payload.get("errorMessage") or payload.get("error_message")
+                ),
                 "metadata_json": self._json(self._redact_sensitive(payload.get("metadata"))) if "metadata" in payload else None,
                 "finished_at": self._date_text(payload.get("finishedAt") or payload.get("finished_at")),
                 "updated_at": self._now(),
@@ -3390,7 +3394,9 @@ class LocalOperationsLedger:
                     "row_count": self._int(self._first_present(payload.get("rowCount"), payload.get("row_count")), 0),
                     "blocker_count": self._int(self._first_present(payload.get("blockerCount"), payload.get("blocker_count")), 0),
                     "external_submission": "not_executed",
-                    "error_message": payload.get("errorMessage") or payload.get("error_message"),
+                    "error_message": self._redact_error_message(
+                        payload.get("errorMessage") or payload.get("error_message")
+                    ),
                     "metadata_json": self._json(metadata),
                     "updated_at": now,
                 },
@@ -6374,7 +6380,20 @@ class LocalOperationsLedger:
 
     @classmethod
     def _redact_sensitive(cls, value: Any) -> Any:
-        secret_markers = ("token", "password", "secret", "credential", "authorization", "api_key", "apikey")
+        secret_markers = (
+            "token",
+            "password",
+            "passwd",
+            "secret",
+            "credential",
+            "authorization",
+            "api_key",
+            "apikey",
+            "cookie",
+            "database_url",
+            "connection_string",
+            "dsn",
+        )
         if isinstance(value, dict):
             result = {}
             for key, item in value.items():
@@ -6386,9 +6405,21 @@ class LocalOperationsLedger:
             return result
         if isinstance(value, list):
             return [cls._redact_sensitive(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._redact_sensitive(item) for item in value]
         if isinstance(value, str):
             value = re.sub(
-                r"(?i)((?:access[_-]?token|refresh[_-]?token|token|password|secret|(?:x[_-]?)?api[_-]?key)\s*[:=]\s*)[^&,;\s]+",
+                r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@",
+                r"\1[REDACTED]@",
+                value,
+            )
+            value = re.sub(
+                r'''(?i)(["'](?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|api[_-]?key|apikey|secret|password|passwd|token|database[_-]?url|connection[_-]?string|dsn)["']\s*:\s*)(?:"[^"]*"|'[^']*'|[^,}\s]+)''',
+                r'\1"[REDACTED]"',
+                value,
+            )
+            value = re.sub(
+                r"(?i)((?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|token|password|passwd|secret|(?:x[_-]?)?api[_-]?key|database[_-]?url|connection[_-]?string|dsn)\s*[:=]\s*)[^&,;\s]+",
                 r"\1[REDACTED]",
                 value,
             )
@@ -6397,7 +6428,18 @@ class LocalOperationsLedger:
                 r"\1[REDACTED]",
                 value,
             )
+            value = re.sub(
+                r"(?i)((?:set-cookie|cookie)\s*:\s*)[^\r\n,]+",
+                r"\1[REDACTED]",
+                value,
+            )
         return value
+
+    @classmethod
+    def _redact_error_message(cls, value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        return str(cls._redact_sensitive(str(value)))[:2000]
 
     @staticmethod
     def _float(value: Any) -> Optional[float]:

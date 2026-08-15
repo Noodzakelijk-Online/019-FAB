@@ -12,6 +12,7 @@ import { registerFabSourcePreviewRoutes } from "./fabSourcePreview";
 import { ENV } from "./_core/env";
 import { createFabSecurityMiddleware } from "./_core/security";
 import { serveStatic } from "./_core/static";
+import { sanitizeExternalMessage } from "./lib/errorSanitizer";
 import { relaxedLimiter } from "./lib/rateLimiter";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -68,7 +69,7 @@ export async function startFabStandaloneServer() {
 
 if (process.env.NODE_ENV !== "test") {
   startFabStandaloneServer().catch((error) => {
-    console.error(error instanceof Error ? error.message : "FAB dashboard startup failed");
+    console.error(sanitizeExternalMessage(error, 500, "FAB dashboard startup failed"));
     process.exit(1);
   });
 }

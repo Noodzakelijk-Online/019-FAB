@@ -7,6 +7,7 @@
  * See API examples below the type definitions for usage patterns.
  */
 
+import { sanitizeExternalMessage } from "../lib/errorSanitizer";
 import { ENV } from "./env";
 
 // ============================================================================
@@ -81,9 +82,9 @@ export async function makeRequest<T = unknown>(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(
-      `Google Maps API request failed (${response.status} ${response.statusText}): ${errorText}`
-    );
+    throw new Error(sanitizeExternalMessage(
+      `Google Maps API request failed (${response.status} ${response.statusText}): ${errorText}`,
+    ));
   }
 
   return (await response.json()) as T;

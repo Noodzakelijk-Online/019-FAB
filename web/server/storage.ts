@@ -2,6 +2,7 @@
 // Uses the Biz-provided storage proxy (Authorization: Bearer <token>)
 
 import { ENV } from './_core/env';
+import { sanitizeExternalMessage } from "./lib/errorSanitizer";
 
 type StorageConfig = { baseUrl: string; apiKey: string };
 
@@ -84,9 +85,9 @@ export async function storagePut(
 
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
-    throw new Error(
-      `Storage upload failed (${response.status} ${response.statusText}): ${message}`
-    );
+    throw new Error(sanitizeExternalMessage(
+      `Storage upload failed (${response.status} ${response.statusText}): ${message}`,
+    ));
   }
   const url = (await response.json()).url;
   return { key, url };

@@ -4,6 +4,8 @@
  * and human-readable format in development.
  */
 
+import { sanitizeDiagnosticValue, sanitizeExternalError, sanitizeExternalMessage } from "./errorSanitizer";
+
 type LogLevel = "debug" | "info" | "warn" | "error";
 
 interface LogEntry {
@@ -54,18 +56,20 @@ function createEntry(
 ): LogEntry {
   const entry: LogEntry = {
     level,
-    message,
+    message: sanitizeExternalMessage(message, 500, "Log event"),
     timestamp: new Date().toISOString(),
   };
 
-  if (context) entry.context = context;
-  if (data) entry.data = data;
+  if (context) entry.context = sanitizeExternalMessage(context, 120, "App");
+  if (data) {
+    const sanitizedData = sanitizeDiagnosticValue(data);
+    if (sanitizedData && typeof sanitizedData === "object" && !Array.isArray(sanitizedData)) {
+      entry.data = sanitizedData as Record<string, unknown>;
+    }
+  }
   if (error) {
-    entry.error = {
-      message: error.message,
-      stack: error.stack,
-      code: (error as any).code,
-    };
+    const sanitizedError = sanitizeExternalError(error, { includeStack: !isProduction });
+    entry.error = sanitizedError;
   }
 
   return entry;

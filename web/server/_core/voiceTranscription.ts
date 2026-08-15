@@ -26,6 +26,7 @@
  * ```
  */
 import { ENV } from "./env";
+import { sanitizeExternalMessage } from "../lib/errorSanitizer";
 
 export type TranscribeOptions = {
   audioUrl: string; // URL to the audio file (e.g., S3 URL)
@@ -119,7 +120,7 @@ export async function transcribeAudio(
       return {
         error: "Failed to fetch audio file",
         code: "SERVICE_ERROR",
-        details: error instanceof Error ? error.message : "Unknown error"
+        details: sanitizeExternalMessage(error, 500, "Unknown error")
       };
     }
 
@@ -166,7 +167,9 @@ export async function transcribeAudio(
       return {
         error: "Transcription service request failed",
         code: "TRANSCRIPTION_FAILED",
-        details: `${response.status} ${response.statusText}${errorText ? `: ${errorText}` : ""}`
+        details: sanitizeExternalMessage(
+          `${response.status} ${response.statusText}${errorText ? `: ${errorText}` : ""}`,
+        )
       };
     }
 
@@ -189,7 +192,7 @@ export async function transcribeAudio(
     return {
       error: "Voice transcription failed",
       code: "SERVICE_ERROR",
-      details: error instanceof Error ? error.message : "An unexpected error occurred"
+      details: sanitizeExternalMessage(error, 500, "An unexpected error occurred")
     };
   }
 }

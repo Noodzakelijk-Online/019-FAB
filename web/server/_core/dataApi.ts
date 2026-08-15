@@ -4,6 +4,7 @@
  *     query: { gl: "US", hl: "en", q: "manus" },
  *   })
  */
+import { sanitizeExternalMessage } from "../lib/errorSanitizer";
 import { ENV } from "./env";
 
 export type DataApiCallOptions = {
@@ -47,9 +48,9 @@ export async function callDataApi(
 
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
-    throw new Error(
-      `Data API request failed (${response.status} ${response.statusText})${detail ? `: ${detail}` : ""}`
-    );
+    throw new Error(sanitizeExternalMessage(
+      `Data API request failed (${response.status} ${response.statusText})${detail ? `: ${detail}` : ""}`,
+    ));
   }
 
   const payload = await response.json().catch(() => ({}));

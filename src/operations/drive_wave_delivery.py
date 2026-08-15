@@ -185,12 +185,14 @@ class DriveWaveDeliveryService:
         *,
         compact: bool = False,
         item_limit: Optional[int] = None,
+        connector_status: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with self.ledger.read_snapshot():
             return self._list_work_orders(
                 limit,
                 compact=compact,
                 item_limit=item_limit,
+                connector_status=connector_status,
             )
 
     def _list_work_orders(
@@ -199,6 +201,7 @@ class DriveWaveDeliveryService:
         *,
         compact: bool,
         item_limit: Optional[int],
+        connector_status: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
         documents = self._candidate_documents(limit)
         contexts = self._delivery_contexts(documents)
@@ -221,7 +224,7 @@ class DriveWaveDeliveryService:
             "readyToArchive": _count_stage(work_orders, "ready_to_archive"),
             "completed": _count_stage(work_orders, "completed"),
         }
-        connector_status = self.status()
+        connector_status = connector_status or self.status()
         result = {
             "status": connector_status["status"],
             "receiptExecutor": {

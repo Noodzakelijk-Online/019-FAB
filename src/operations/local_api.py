@@ -129,10 +129,13 @@ HAI_ROUTE_RULES = (
     ("POST", re.compile(r"^/api/wave/receipt-executor/(?:session|claim|release)$")),
 )
 CONTROL_CENTER_BATCH_PATHS = {
+    "autonomy": "/api/autonomy/plan?limit=25",
     "reviewQueue": "/api/review?status=open&limit=25&offset=0&view=summary&includeCategoryOptions=false",
     "exceptions": "/api/exceptions?limit=25&includeEntities=true",
+    "health": "/api/health",
     "closeReadiness": "/api/close-readiness",
     "driveWaveStatus": "/api/drive-wave/status",
+    "driveWaveWorkOrders": "/api/drive-wave/work-orders?limit=200&itemsLimit=25&view=summary",
     "reportRuns": "/api/report-runs?limit=5",
     "compliance": "/api/compliance/assessments?limit=5",
     "recovery": "/api/workflows/recovery?limit=10",
@@ -4291,6 +4294,11 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         if request.path.startswith("/api/") and response.status_code >= 400 and response.is_json:
             payload = response.get_json(silent=True)
             if isinstance(payload, dict):
+                payload = LocalOperationsLedger._redact_sensitive(payload)
+                for diagnostic_key in ("error", "message"):
+                    diagnostic_value = payload.get(diagnostic_key)
+                    if isinstance(diagnostic_value, str):
+                        payload[diagnostic_key] = diagnostic_value[:2000]
                 error_value = payload.get("error")
                 message_value = payload.get("message")
                 if not isinstance(message_value, str) or not message_value.strip():
@@ -8066,10 +8074,13 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
         resources: Dict[str, Dict[str, Any]] = {}
         with ledger.read_snapshot():
             shared_resource_names = {
+                "autonomy",
                 "metrics",
                 "masterLedger",
                 "exceptions",
+                "health",
                 "closeReadiness",
+                "driveWaveWorkOrders",
             }
             try:
                 shared_metrics = ledger.dashboard_metrics()
@@ -8104,10 +8115,44 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                     "metrics": shared_metrics,
                     "masterLedger": compact_master_ledger,
                     "exceptions": shared_exceptions,
+                    "health": shared_health,
                     "closeReadiness": shared_close_readiness,
                 }
                 for resource_name, value in shared_values.items():
                     resources[resource_name] = {"ok": True, "value": value}
+                try:
+                    shared_readiness = readiness_service.summarize()
+                    resources["sourceReadiness"] = {
+                        "ok": True,
+                        "value": shared_readiness,
+                    }
+                    resources["autonomy"] = {
+                        "ok": True,
+                        "value": _autonomy_service(
+                            ledger,
+                            config,
+                            readiness_service,
+                            intake_paths,
+                            intake_extensions,
+                        ).plan(
+                            limit=25,
+                            readiness_summary=shared_readiness,
+                            health_summary=shared_health,
+                            exceptions_summary=shared_exceptions,
+                            close_readiness_summary=shared_close_readiness,
+                            metrics_summary=shared_metrics,
+                            master_ledger_summary=shared_master_ledger,
+                        ),
+                    }
+                except Exception as exc:
+                    app.logger.warning(
+                        "Shared autonomy control-center projection failed (%s)",
+                        type(exc).__name__,
+                    )
+                    resources["autonomy"] = {
+                        "ok": False,
+                        "error": "FAB resource could not be read",
+                    }
             except Exception as exc:
                 app.logger.warning(
                     "Shared control-center projection failed (%s)",
@@ -8169,6 +8214,25 @@ def create_app(config: Optional[Dict[str, Any]] = None) -> Flask:
                         "value": shared_drive_wave_status,
                     },
                 })
+                try:
+                    resources["driveWaveWorkOrders"] = {
+                        "ok": True,
+                        "value": DriveWaveDeliveryService(ledger, config).list_work_orders(
+                            limit=200,
+                            compact=True,
+                            item_limit=25,
+                            connector_status=shared_drive_wave_status,
+                        ),
+                    }
+                except Exception as exc:
+                    app.logger.warning(
+                        "Shared delivery control-center projection failed (%s)",
+                        type(exc).__name__,
+                    )
+                    resources["driveWaveWorkOrders"] = {
+                        "ok": False,
+                        "error": "FAB resource could not be read",
+                    }
             except Exception as exc:
                 app.logger.warning(
                     "Shared Wave control-center projection failed (%s)",
