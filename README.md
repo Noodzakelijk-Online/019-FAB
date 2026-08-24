@@ -1,353 +1,629 @@
-# Automated Bookkeeping Solution
+# FAB - Financial Automation Bookkeeper
 
-## Overview
-This project aims to develop a fully automated system to fetch financial documents from various sources, extract relevant data, categorize them based on predefined rules, and enter the data into mijngeldzaken.nl and Waveapps accounts.
+FAB is a local-first bookkeeping automation system for collecting financial
+documents, extracting bookkeeping facts, routing them through review and
+approval, preparing downstream accounting actions, reconciling evidence, and
+keeping an auditable local ledger.
 
-The governed cutover from repository 025's Apps Script is documented in [docs/scanner_mailbox_migration.md](docs/scanner_mailbox_migration.md).
+The intended operating model is:
 
-## Features
-- **Document Fetching**: Runs paginated, durable Gmail, Google Drive, and Freshdesk intake into the local source/document ledger, with duplicate and provider-revision evidence. Gmail can run as a strict scanner mailbox: exact trusted sender, PDF filename/MIME/signature validation, immutable local evidence, and no deletion or mutation of the source email. Freshdesk can run the consolidated repository-025 financial-ticket profile: keyword-scoped read-only ticket intake, non-posting description evidence, streamed and signature-verified PDF attachments, and no ticket closing or redundant Drive copy. Google Photos uses user-owned Picker sessions whose selected receipt images enter the same durable ledger and review gates.
-- **Advanced Document Processing**: Utilizes OCR (Tesseract, Google Cloud Vision), including Dutch OCR, handwritten recognition, template matching, and line item extraction.
-- **Intelligent Categorization**: Employs rule-based, machine learning, and hybrid categorization approaches.
-- **Governed Downstream Delivery**: Prepares approval-gated Wave operations and checksum-bound MijnGeldzaken artifacts. Receipt attachment work remains supervised until exact Wave readback succeeds.
-- **Review-Based Learning**: Approved corrections can create explainable exact-vendor rules. FAB does not fabricate training text or promise unsupervised accuracy gains.
-- **Validation**: Validates extracted data against predefined rules and patterns.
-- **Error Handling & Recovery**: Records stage failures, governed retries, exceptions, and authenticated review decisions in the operations ledger.
-- **Workflow Evidence**: Persists ordered autonomous actions and connector-source steps with attempts, timestamps, duration, result metadata, failures, and aborted downstream work.
-- **Governed Workflow Recovery**: Plans and executes linked attempt-2+ retries for failed read-only connector sources or the exact failed low-risk autonomous step, without replaying approved exports or other external actions. The worker applies bounded exponential backoff, stops at a configurable retry depth, and safely finalizes abandoned runs only after their runtime lease has expired.
-- **Performance Optimization**: Uses bounded worker batches, lazy OCR/ML imports, SQLite WAL/indexes, compact cached projections, compressed responses, and enforced web build budgets.
-- **Security**: Manages credentials securely using encryption.
-- **Compliance**: Checks documents against regulatory compliance rules.
-- **Browser Upload**: The authenticated operator dashboard accepts bounded receipt uploads from supported desktop or mobile browsers into the same local evidence ledger.
-- **Automated Reconciliation**: Reconciles processed transactions with banking data.
-- **Historical Import**: Routes authenticated document uploads, connector intake, and bank statements through the same identity, duplicate, review, and ledger contracts.
-- **Budget Management**: Helps in tracking and managing budgets.
-- **Bank Statement Import**: Imports and reconciles supported statement data locally. Direct PSD2 bank feeds are not implemented.
-- **Financial Analysis**: Generates financial reports and insights.
-- **Backup & Restore**: Manages backup and restoration of application data.
-
-## Selected Project Structure
-```
-019-FAB/
-├── config/
-│   └── config_template.ini
-├── docs/
-│   ├── additional_improvements_requirements.md
-│   ├── deployment_guide.md
-│   ├── dependencies.md
-│   ├── gap_analysis.md
-│   ├── module_interfaces.md
-│   ├── requirements_analysis.md
-│   ├── security_approach.md
-│   ├── technical_reference.md
-│   └── user_guide.md
-├── src/
-│   ├── __init__.py
-│   ├── banking/
-│   │   └── banking_api.py
-│   ├── backup/
-│   │   └── backup_manager.py
-│   ├── budget/
-│   │   └── budget_manager.py
-│   ├── categorizers/
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── fallback_categorizer.py
-│   │   ├── hybrid_categorizer.py
-│   │   ├── ml_categorizer.py
-│   │   └── rule_based_categorizer.py
-│   ├── compliance/
-│   │   └── regulatory_compliance.py
-│   ├── config_loader.py
-│   ├── data_entry/
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── mijngeldzaken_handler.py
-│   │   ├── waveapps_business_handler.py
-│   │   └── waveapps_personal_handler.py
-│   ├── document_fetchers/
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── drive_fetcher.py
-│   │   ├── freshdesk_fetcher.py
-│   │   ├── gmail_fetcher.py
-│   │   └── photos_fetcher.py
-│   ├── document_processors/
-│   │   ├── __init__.py
-│   │   ├── base.py
-│   │   ├── bilingual_processor.py
-│   │   ├── dutch_ocr_processor.py
-│   │   ├── enhanced_processor.py
-│   │   ├── handwritten_recognition_processor.py
-│   │   ├── line_item_extractor.py
-│   │   ├── processor_factory.py
-│   │   ├── processor_pipeline.py
-│   │   ├── template_matching_processor.py
-│   │   ├── tesseract_processor.py
-│   │   └── vision_processor.py
-│   ├── financial_analysis/
-│   │   └── financial_analyzer.py
-│   ├── integration.py
-│   ├── learning/
-│   │   ├── __init__.py
-│   │   └── correction_learning.py
-│   ├── main.py
-│   ├── reconciliation/
-│   │   └── automated_reconciliation.py
-│   ├── security/
-│   │   ├── __init__.py
-│   │   └── security_manager.py
-│   ├── validation/
-│   │   ├── receipt_validator.py
-│   │   └── validation_manager.py
-│   └── workflow/
-│       ├── __init__.py
-│       ├── autonomous_playbook.py
-│       ├── logger.py
-│       ├── safety_engine.py
-│       └── state_machine.py
-├── tests/
-│   └── test_*.py (backend regression and safety suite)
-├── Dockerfile
-├── package.py
-└── requirements.txt
+```text
+End user / operator <-> FAB <-> supervised or API-backed bookkeeping providers
 ```
 
-## Setup and Installation
+FAB is built to become the primary source of truth for the operator's financial
+document workflow. It does not treat external systems as a place to blindly push
+data. Every meaningful action is tracked locally first, and high-risk provider
+changes remain gated by capability checks, explicit approval, idempotency,
+readback evidence, and recoverable audit trails.
+
+## Current Status
+
+The repository contains a working local application, not only a prototype:
+
+- Python 3.13 bookkeeping engine, local operations API, recurring worker, OCR
+  pipeline, connector intake, SQLite operations ledger, backup and recovery
+  services.
+- React/Node operator dashboard for health, activation, intake, review,
+  automation, reconciliation, reporting, recovery, exports, Wave setup, Google
+  setup, and HAI control.
+- Windows 11 launcher scripts, Docker Compose runtime, managed ngrok helpers,
+  packaging, GitHub Actions CI, and broad Python/web regression tests.
+- Guarded HAI connector surfaces for bounded control and status, without
+  granting HAI authority to approve exports, clear emergency stops, restore
+  backups, change permissions, or submit downstream bookkeeping changes.
+
+Important live-provider limits are intentional and must not be hidden:
+
+- Google Gmail and Drive require owner OAuth consent before FAB can read real
+  mailbox/folder sources.
+- Wave requires a valid user-owned Wave token, business ID, verified account
+  mappings, and in some cases a supervised receipt executor because Wave's
+  public API does not cover every receipt attachment/readback action FAB needs.
+- MijnGeldzaken is handled as supervised export artifacts. FAB does not store
+  DigiD credentials and does not claim direct MijnGeldzaken account mutation.
+- Direct PSD2 bank feeds, SVB submissions, tax filings, and legal/accountant
+  sign-off are not implemented. Bank statement import and provisional VAT
+  evidence are local bookkeeping aids, not official filings.
+- Google Drive source archival is disabled until FAB verifies the exact
+  downstream Wave record and the actual stored attachment through binary
+  readback. A matching record or visible icon is not enough.
+
+See [docs/GOAL_COMPLETION_MATRIX.md](docs/GOAL_COMPLETION_MATRIX.md) for the
+full implemented/partial/blocked matrix.
+
+## Who This Is For
+
+For non-technical operators, FAB is the control room for a bookkeeping process:
+
+- Put receipts, invoices, scans, bank statements, and supporting files into the
+  configured sources.
+- Let FAB collect, OCR, classify, validate, group, deduplicate, and prepare the
+  bookkeeping work.
+- Review only the exceptions, uncertain fields, duplicate candidates, and
+  high-risk provider actions.
+- Approve or reject drafts with visible evidence.
+- Keep source files, local records, external operations, Wave readback evidence,
+  reports, and recovery packages traceable.
+
+For developers, FAB is a Python + SQLite + Flask/Waitress backend, a React +
+Express/tRPC frontend, and a set of local automation services organized around
+an operations ledger. The codebase is intentionally conservative about external
+automation: local computations can run autonomously, while provider mutations
+must pass explicit safety gates.
+
+## Core Workflow
+
+FAB's protected path is:
+
+```text
+source intake
+-> immutable evidence
+-> OCR and field extraction
+-> validation
+-> categorization
+-> duplicate and document-group handling
+-> manual review where needed
+-> local bookkeeping record
+-> routing draft
+-> explicit approval
+-> supported provider execution
+-> provider readback and attachment verification
+-> reconciliation
+-> reports
+-> verified backup or export
+```
+
+The key invariants are documented in
+[docs/CRITICAL_PATH.md](docs/CRITICAL_PATH.md). In short: source bytes are
+hashed before processing, uncertain data pauses for review, duplicates cannot
+post twice, preparing an external operation is not the same as executing it,
+and archival requires proof that the external attachment and bookkeeping fields
+match the retained source evidence.
+
+## Main Capabilities
+
+### Intake and Source Evidence
+
+- Local folder intake from configured folders such as `downloads/sort-out`.
+- Authenticated browser uploads through the operator dashboard.
+- Gmail connector with an optional strict scanner-mailbox profile. This ports
+  the useful behavior from `Noodzakelijk-Online/025-Scan-to-folder-automation`
+  into FAB directly: trusted sender, PDF filename/MIME/signature validation,
+  content-addressed local evidence, provider checkpointing, and no source email
+  mutation.
+- Google Drive connector for configured folders, including source provenance,
+  duplicate/revision evidence, and optional move-only archival after Wave
+  verification.
+- Freshdesk financial-ticket intake profile for read-only ticket and PDF
+  attachment evidence. FAB never closes tickets or copies evidence to Drive as
+  a side effect.
+- Supervised Google Photos Picker intake. The worker does not scan whole Google
+  Photos libraries.
+
+### Document Understanding
+
+- Tesseract OCR with Dutch and English language support.
+- Optional Google Cloud Vision OCR provider when configured.
+- Image preprocessing through private temporary copies: grayscale, denoising,
+  deskew, and binarization.
+- PDF-to-image conversion through Poppler for OCR.
+- Dutch/English language-aware processing.
+- Financial field extraction for vendor, date, amount, VAT/BTW, currency,
+  references, line items, category evidence, and confidence/provenance.
+- Vendor templates and deterministic extraction rules.
+- Duplicate detection using content, provider identity, validated references,
+  and document grouping.
+
+### Categorization and Learning
+
+- Fixed conservative vendor taxonomy for trusted exact-vendor suggestions.
+- Rule-based, ML, fallback, and hybrid categorizer modules.
+- Review-based learning: explicit approved corrections can create explainable
+  vendor/category rules.
+- FAB does not fabricate training data and does not treat model confidence as
+  permission to bypass validation, duplicate review, external approval, or
+  archival gates.
+
+### Review, Routing, and Export Control
+
+- Review queue with source-backed correction handling.
+- Draft routing into target systems such as Wave Business, Wave Personal, or
+  MijnGeldzaken.
+- Approval-gated export attempts with operation IDs, idempotency keys, approval
+  status, execution state, redacted results, and audit history.
+- Pre-execution backups for approved batches.
+- Quota/throttle deferral instead of silent failure.
+- Supervised completion tracking for artifact-based flows.
+
+### Wave Support
+
+FAB models Wave as a downstream bookkeeping surface, with local FAB records as
+the decision source:
+
+- Store Wave business/account setup locally through encrypted settings or
+  environment variables.
+- Validate Wave identity and read account/category data.
+- Map FAB category intents to Wave chart-of-account IDs.
+- Mirror customers, products/services, and invoices read-only for routing and
+  drift detection.
+- Prepare Wave operations only when required fields and account mappings are
+  present.
+- Execute supported Wave money-transaction actions only after approval and
+  capability checks.
+- Coordinate a supervised receipt executor for attachment upload/readback when
+  the public Wave API cannot provide the required receipt workflow.
+- Require binary readback evidence before Drive archival.
+
+The Drive-to-Wave contract is documented in
+[docs/drive_wave_delivery.md](docs/drive_wave_delivery.md).
+
+### MijnGeldzaken Support
+
+FAB prepares checksum-bound CSV/JSON artifacts for supervised MijnGeldzaken
+handling. The operator completes the account-side action in a user-owned
+session and records the result back in FAB.
+
+FAB intentionally does not store MijnGeldzaken passwords, DigiD details, or
+unattended browser credentials.
+
+### Banking, Reconciliation, Reports, and Compliance
+
+- Local bank statement import for supported CSV/JSON/CAMT/MT940-like data.
+- Reconciliation between imported bank rows and bookkeeping documents.
+- Missing receipt and unmatched transaction review handling.
+- Provisional financial reports with checksum-bound JSON/CSV artifacts.
+- Scheduled local report generation.
+- Provisional Dutch VAT and seven-year source-retention evidence.
+- Notification center for health, due work, compliance findings, and Wave
+  invoice deadlines.
+
+These features support bookkeeping control and review. They do not file tax
+returns, submit to authorities, or replace professional advice.
+
+### Backup, Recovery, and Auditability
+
+- SQLite operations ledger with WAL, migrations, integrity checks, and
+  migration snapshots.
+- Source-complete recovery packages with manifest-bound SHA-256 checksums.
+- Local maintenance mode for restore operations. The worker, normal mutations,
+  ngrok, and HAI command execution are locked during maintenance.
+- Pre-restore package creation, source-byte verification, immutable source
+  recovery tree, ledger path rewriting, and rollback after failed final checks.
+- Sanitized support bundles that exclude credentials, raw documents, OCR text,
+  filenames, local paths, and amounts.
+- Audit events with sensitive fields redacted before persistence.
+
+### HAI Connector
+
+The HAI connector exposes bounded discovery, status, resources, and governed
+commands under `/api/hai/*`.
+
+HAI can help inspect status and trigger low-risk local work such as intake,
+processing, reconciliation, due reports, compliance assessment, notification
+refresh, and emergency stop. It cannot:
+
+- approve export drafts;
+- execute provider submissions by itself;
+- clear emergency stop;
+- restore backups;
+- change access controls or secrets;
+- bypass review, duplicate, attachment, or archive gates.
+
+## Architecture
+
+### Backend
+
+The backend is Python 3.13. Major areas:
+
+```text
+src/operations/          Local API, ledger, readiness, autonomy, exports,
+                         review, recovery, HAI, Wave/Drive delivery
+src/worker/              Recurring authoritative worker
+src/document_fetchers/   Gmail, Drive, Freshdesk, Photos Picker, local folder
+src/document_processors/ OCR, preprocessing, extraction, templates, line items
+src/categorizers/        Rule, ML, hybrid, fallback categorization
+src/data_entry/          Wave, MijnGeldzaken, safe posting, provider surfaces
+src/reconciliation/      Transaction/document matching
+src/backup/              Backup and restore support
+src/security/            Encryption, OAuth token storage, local secret store
+src/workflow/            State, safety, logging, autonomous playbook
+tests/                   Python regression and safety suite
+```
+
+The authoritative local API is `python -m src.operations.local_api`. It serves
+authenticated JSON endpoints under `/api/*`, uses Waitress in supported local
+runtime, and stores operational truth in `data/fab_operations.sqlite3` by
+default.
+
+The recurring worker is `python -m src.run_worker`. It runs connector intake,
+local autonomy, scheduled backups, reports, compliance checks, notifications,
+export execution gates, Drive archival checks, and recovery handling as
+isolated audited stages.
+
+### Frontend and Gateway
+
+The web app lives in `web/`:
+
+```text
+web/client/              React operator dashboard
+web/server/              Express/tRPC gateway and standalone server
+web/shared/              Shared types and provider surface definitions
+web/drizzle/             Web database schema/migrations
+web/server/lib/          Logging, loopback checks, rate limiting, sanitization
+```
+
+The browser never receives the hidden local API token. The Express gateway
+adds it server-side, calls fixed local endpoints, validates origins, applies
+timeouts and bounded projections, compresses large responses, and keeps
+operator links protected through short-lived one-time handoff tickets.
+
+The main operator page is:
+
+```text
+http://127.0.0.1:<dashboard-port>/admin/operations
+```
+
+The launcher records the actual ports in `data/fab-runtime.json` after proving
+that the API, worker, and dashboard belong to this checkout.
+
+### Storage
+
+Runtime data is intentionally local and ignored by Git:
+
+```text
+config/config.ini
+credentials/
+tokens/
+data/
+downloads/
+logs/
+output/
+web/node_modules/
+.venv/
+```
+
+Do not commit real financial files, ledgers, tokens, support bundles, or
+provider credentials.
+
+## Quick Start for Operators on Windows 11
+
+1. Install Git. Install Python 3.13 if the launcher cannot provision it through
+   the Windows Python launcher or `uv`.
+2. Clone the repository:
+
+   ```powershell
+   git clone https://github.com/Robert-Velhorst/019-FAB.git
+   cd 019-FAB
+   ```
+
+3. Start FAB:
+
+   ```powershell
+   .\Start-FAB.cmd
+   ```
+
+   The launcher creates the project-local `.venv`, installs missing Python and
+   dashboard dependencies, builds or starts the dashboard, checks Tesseract and
+   Poppler, starts the local API and worker, selects safe loopback ports, and
+   opens the dashboard.
+
+4. In the dashboard, use **Finish activation** and **Connections** to configure
+   Gmail, Google Drive, Wave, OCR, intake folders, and review settings.
+
+5. Add files through:
+
+   - the configured local intake folder;
+   - Google Drive folder sync;
+   - Gmail scanner/source sync;
+   - Freshdesk source sync;
+   - dashboard **Add receipts** upload.
+
+6. Resolve review items and only approve external drafts after checking the
+   evidence shown by FAB.
+
+To stop only this checkout's FAB services:
+
+```powershell
+.\Stop-FAB.cmd
+```
+
+For maintenance/recovery:
+
+```powershell
+.\Start-FAB-Maintenance.cmd
+```
+
+See [docs/OPERATOR_RUNBOOK.md](docs/OPERATOR_RUNBOOK.md) and
+[docs/user_guide.md](docs/user_guide.md).
+
+## Developer Setup
 
 ### Prerequisites
-- Python 3.13
-- pip (Python package installer)
-- Docker (optional, for containerized deployment)
-- Git, which is used to bind release archives to an exact committed revision
 
-### Local Installation
-1.  **Clone the repository (or extract the zip file):**
-    ```bash
-    git clone https://github.com/Robert-Velhorst/019-FAB.git
-    cd 019-FAB
-    ```
-    (If you received a release ZIP, extract it and navigate into its FAB directory.)
+- Python 3.13.
+- Node.js 22.
+- pnpm 11.20.0.
+- Tesseract OCR with `eng` and `nld` language data.
+- Poppler PDF tools for PDF OCR.
+- Docker Desktop or Docker Engine if using Compose.
 
-2.  **Create a virtual environment (recommended):**
-    ```bash
-    python3.13 -m venv .venv
-    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate`
-    ```
+### Python backend
 
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --disable-pip-version-check -r requirements.txt pytest
+python -m src.operations.local_api
+```
 
-4.  **Configure the application:**
-    Copy `config/config_template.ini` to `config/config.ini` and fill in your credentials and settings.
-    ```bash
-    cp config/config_template.ini config/config.ini
-    # Open config/config.ini and edit with your details
-    ```
-    **Security Note**: For sensitive credentials, it is highly recommended to use environment variables instead of directly editing `config.ini`. The `ConfigLoader` is designed to prioritize environment variables prefixed with `APP_` (e.g., `APP_GMAIL_CLIENT_ID` will override `gmail.client_id` in `config.ini`).
+The local API defaults to:
 
-### Docker Installation
+```text
+http://127.0.0.1:5001
+```
 
-Use `docker-compose.yml` so the API, authoritative worker, and dashboard share the same ledger and service identity. Set strong `FAB_LOCAL_API_TOKEN` and `FAB_WEB_JWT_SECRET` environment values, then run `docker compose up --build`. The Compose definition binds dashboard/API ports to loopback, separates the internal API address from browser-facing operator links, and refuses to render when either required secret is absent. See `docs/deployment_guide.md` for volumes, health checks, recovery mode, and managed-cloud requirements.
+Set a strong `operations.api_token` in `config/config.ini` or set
+`FAB_LOCAL_API_TOKEN` before exposing anything beyond loopback.
 
-## Usage
+### Web dashboard
 
-### FAB Operator Dashboard
+```powershell
+Copy-Item web\.env.example web\.env
+pnpm.cmd --dir web install --frozen-lockfile
+pnpm.cmd --dir web dev
+```
 
-The React operator dashboard is a local-first control surface backed by the
-authoritative SQLite operations ledger. It shows health, review and
-reconciliation backlogs, autonomous pipeline gates, exceptions, recovery,
-audit activity, source readiness, and close evidence. Its command drawer only
-exposes local safe-cycle actions; approvals, exports, and external submissions
-remain outside this command boundary.
+For manual development, set these in `web/.env`:
 
-On Windows, double-click `Start-FAB.cmd` for the normal local setup. It creates
-the ignored local configuration files when needed, installs missing dashboard
-and Python runtime dependencies, provisions Tesseract plus Dutch/English OCR
-data and Poppler PDF tools when `winget` is available, starts the ledger API,
-autonomous worker, and a current production build of the dashboard on loopback,
-then opens the control room. Use `.\Start-FAB.ps1 -Development` only when
-actively changing dashboard source code.
-Use `Start-FAB-Maintenance.cmd` only for local recovery. It switches the same
-checkout into a quiescent mode with no autonomous worker, locks normal API and
-HAI mutations, disables ngrok, and exposes the confirmation-gated advanced
-recovery console. Stop maintenance with `Stop-FAB.cmd`, then run
-`Start-FAB.cmd` to resume standard operation.
-Double-click `Stop-FAB.cmd` to stop only processes whose service identity and
-project root match this FAB checkout. Runtime logs are written under `logs/`.
+```text
+FAB_LOCAL_API_URL=http://127.0.0.1:5001
+FAB_LOCAL_API_PUBLIC_URL=http://127.0.0.1:5001
+FAB_LOCAL_API_TOKEN=<same long token as the Python API>
+FAB_OPERATIONS_SERVICE_TOKEN=<same long token as the Python API>
+JWT_SECRET=<long random secret>
+FAB_OPERATOR_LOCAL_MODE=true
+```
 
-The launcher verifies FAB-specific service identity instead of trusting an
-occupied port. If another application uses `3000` or `5001`, FAB selects a
-free loopback port, records the actual URLs in `data/fab-runtime.json`, and
-opens the correct dashboard. It also repairs stale PID metadata by
-rediscovering the matching API, dashboard listener and singleton worker. The
-dashboard process tree is adopted only after its runtime identity, checkout and
-local API endpoint match, so repeated starts do not create duplicate
-bookkeeping loops or move the dashboard to another port. `Stop-FAB.cmd`
-performs the same discovery when runtime metadata is stale or missing. The
-launcher records a secret-safe source fingerprint and restarts its own API,
-worker, and dashboard when code or local configuration has changed. Ledger,
-credential, token, and other runtime data are excluded from that fingerprint.
+Use `pnpm.cmd` on Windows when PowerShell cannot resolve the `pnpm` shim.
 
-Complete Gmail and Google Drive consent from **Finish activation** in the
-operator dashboard. An installed desktop OAuth client can be reused for fresh
-consent; upload another JSON only for an intentional client rotation. The
-supervised flows open Google in your default browser, store tokens only under
-`tokens/`, verify the configured mailbox or intake folder, and never print or
-store the tokens in the ledger. `Authorize-FAB-GoogleDrive.cmd` remains
-available as a command-line alternative.
+### One-shot workflow cycle
 
-Configure Wave from the **Connections** section of the operator dashboard.
-Open **Wave - Noodzakelijk Online**, store the user-owned API token and business
-ID, run the read-only business validation, then map each in-use FAB category
-intent to an expense account returned by Wave. Reviewers can classify and teach
-FAB before Wave is connected because the intent is local; posting remains
-blocked until the intent has an explicit, live-verified Wave account ID. A
-default expense account can be retained for supervised drafts, but autonomous
-posting never uses it to hide a missing mapping. FAB encrypts these local
-settings and, on Windows, protects the encryption key with DPAPI for the current
-user. The token is never returned to the browser, ledger, audit log, or API
-status response. Environment variables remain supported and take precedence
-over dashboard settings.
+Run exactly one governed local cycle:
 
-The review workspace prefills explainable category intents only for exact
-normalized matches to FAB's conservative vendor taxonomy. The suggestion is
-never applied until the source-backed decision is approved. When **Teach FAB**
-is checked, that explicit approval becomes an approved exact-vendor rule for
-future documents instead of requiring a second approval. **Reassess review
-queue** creates a ledger backup, reruns current extraction and validation
-against retained OCR once per algorithm version, preserves manual corrections
-and duplicate gates, and never reruns OCR or submits externally.
-
-For manual startup or development:
-
-1. Start the Python ledger API from the repository root:
-
-    ```powershell
-    python -m src.operations.local_api
-    ```
-
-2. Configure and start the web application:
-
-    ```powershell
-    Copy-Item web/.env.example web/.env
-    pnpm.cmd --dir web install
-    pnpm.cmd --dir web dev
-    ```
-
-3. Open `http://127.0.0.1:3000/admin/operations`. The server selects the next
-   available port when `3000` is already in use.
-
-4. Use **Add receipts** to upload one or more PDF/image/CSV files of up to 6 MB
-   each. FAB stores them in the configured local intake folder, registers them
-   in the authoritative ledger, and starts local processing. Use **Run safe
-   cycle** to collect and process anything later added to the intake folder.
-   **Detailed ledger** opens the complete local document, review,
-   reconciliation, reporting, backup, and approval interface.
-
-`Start-FAB.cmd` passes `operations.api_token` to both authenticated dashboard
-server bridges without printing it. Compose wires the same server-only trust
-boundary. For manual startup, set `FAB_LOCAL_API_TOKEN` and
-`FAB_OPERATIONS_SERVICE_TOKEN` in `web/.env` to the same long random value. The
-token is used only by the web server and is never sent to the browser. Advanced
-ledger, evidence, report-artifact, delivery, recovery, and connector-contract
-links use a 45-second one-time signed handoff, so an authenticated operator is
-not asked to paste the hidden API token. Only bounded relative FAB targets are
-accepted; the Flask session is rotated and the handoff is redacted in audit
-history. Local operator access accepts direct loopback requests in development;
-deployed environments require an authenticated administrator unless
-`FAB_OPERATOR_LOCAL_MODE=true` is explicitly set and the request remains local.
-
-The HAI connector publishes discovery at `/api/hai/manifest` and status at
-`/api/hai/status`. The default local configuration enables the bounded
-governed-command allowlist used by the dashboard. HAI cannot approve, export,
-restore, change access controls, or submit downstream bookkeeping changes.
-
-Wave receipt upload uses a separate supervised executor boundary because the
-public Wave transaction API does not provide FAB's required receipt upload and
-binary readback flow. A user-owned browser or HAI executor registers non-secret
-session metadata at `POST /api/wave/receipt-executor/session`, keeps a fresh
-heartbeat there, and claims one eligible work order at a time from
-`POST /api/wave/receipt-executor/claim`. FAB rejects passwords, tokens,
-cookies, credentials, and browser storage state. The executor must advertise
-transaction location, receipt upload/download, transaction review, and
-observed-field capabilities for the exact configured Wave business. Status is
-available at `GET /api/wave/receipt-executor/status`; leases are released at
-`POST /api/wave/receipt-executor/release` or automatically after a bound binary
-readback submission containing the executor and session IDs. Token/account
-mapping alone therefore no longer reports the source-to-Wave pipeline as ready.
-
-Source-to-Wave executor handoff is available at
-`GET /api/drive-wave/work-orders` and is advertised by the HAI manifest as the
-read-only resource `wave_attachment_work_orders`. Authenticated connectors can
-submit exact configured-folder bytes through `google_drive_binary_relay`; after
-Wave upload they must submit the attachment downloaded back from Wave through
-`wave_attachment_binary_readback`. Each work order binds one Drive file or
-trusted Gmail scanner attachment and SHA-256 to FAB's expected Wave fields,
-line items, transaction reference, server-computed attachment readback
-evidence, and source retention policy. Metadata attestation or a visible
-receipt icon cannot complete delivery or unlock archival. FAB compares the
-observed Wave values itself; executor-supplied match booleans are ignored, and
-later field changes invalidate older evidence. Gmail source messages and local
-evidence are never mutated or deleted. The dashboard exposes the same state in
-**Source to Wave delivery**.
-
-### Running the Workflow Locally
-To run exactly one governed cycle through the same authoritative ledger worker
-used by the Windows launcher and containers:
-```bash
+```powershell
 python -m src.main
 ```
 
-The command acquires this checkout's worker ownership lock and exits without
-starting a second cycle when the recurring worker is already running. Normal
-Windows operation should use `Start-FAB.cmd`; use `python -m src.run_worker`
-only when deliberately running the recurring worker outside the launcher.
+If the recurring worker already owns the runtime lease, the command exits
+without starting a duplicate cycle.
 
-### Running Tests
-To run all unit and integration tests:
-```bash
-python -m unittest discover tests
+## Configuration
+
+Start from:
+
+```powershell
+Copy-Item config\config_template.ini config\config.ini
 ```
 
-### Building Deployment Packages
-Use `package.py` from a clean committed checkout to create verified source
-archives for the supported Windows 11 or Docker Compose runtimes:
-```bash
+The template documents all major sections:
+
+- `[operations]`: local ledger, API host/port/token, HAI allowlist, intake
+  paths, backup/report directories, autonomy, worker schedule, health limits,
+  reports, notifications, VAT/retention settings.
+- `[document_processing]`: OCR method, Tesseract, Poppler, preprocessing,
+  template matching, line items, VAT extraction safety.
+- `[gmail]`: Gmail source, scanner mode, trusted senders, limits, OAuth paths.
+- `[google_drive]`: Drive intake folder, archive folder, relay size, OAuth
+  paths, archival gates.
+- `[freshdesk]`: read-only financial-ticket profile and attachment policy.
+- `[google_photos]`: supervised Picker settings.
+- `[waveapps]`, `[waveapps_business]`, `[waveapps_personal]`: Wave GraphQL URL,
+  business IDs, category mappings, account IDs, and token settings.
+- `[wave_receipt_executor]`: supervised receipt upload/readback coordination.
+- `[mijngeldzaken]`: supervised export artifact settings.
+
+Environment variables override config values. Keep credentials out of Git and
+prefer the dashboard's encrypted local setup or environment variables for
+secrets.
+
+## Testing and Verification
+
+Run the backend suite:
+
+```powershell
+python -m pytest -q -p no:cacheprovider -p no:stepwise
+```
+
+Run the web checks:
+
+```powershell
+pnpm.cmd --dir web check
+pnpm.cmd --dir web test
+pnpm.cmd --dir web build
+```
+
+Run dependency checks used by CI:
+
+```powershell
+pnpm.cmd --dir web audit --audit-level=high
+pnpm.cmd --dir web peers check
+```
+
+GitHub Actions runs:
+
+- backend on Linux;
+- backend on Windows across four shards;
+- web frozen install, high-severity audit, peer check, TypeScript check, Vitest,
+  and production build.
+
+The latest verification evidence is kept in
+[docs/FINAL_VERIFICATION_REPORT.md](docs/FINAL_VERIFICATION_REPORT.md).
+
+## Docker Compose
+
+Set required secrets and start the three-service stack:
+
+```powershell
+$env:FAB_LOCAL_API_TOKEN = "<long random token>"
+$env:FAB_WEB_JWT_SECRET = "<long random secret>"
+docker compose up --build
+```
+
+Compose runs:
+
+- `api`: Python local operations API;
+- `worker`: Python recurring worker;
+- `web`: production React/Express dashboard.
+
+The stack binds published ports to loopback by default and stores persistent
+state in Compose volumes plus the mounted local intake folder. Remote or cloud
+deployment must add TLS, an authenticated reverse proxy, managed secrets, and
+provider acceptance checks. Unauthenticated Cloud Function deployment is not
+supported for financial data.
+
+## Packaging
+
+Create clean, checksum-bound release archives from a committed checkout:
+
+```powershell
 python package.py --target windows
 python package.py --target compose
 ```
 
-Each ZIP is built only from tracked non-runtime files, contains a
-`RELEASE-MANIFEST.json` with per-file SHA-256 checksums, and has a matching
-`.zip.sha256` sidecar. Packaging refuses modified tracked files, secret paths,
-credential-like files, runtime data, tests, and CI-only files. The old
-unauthenticated Cloud Function and standalone mobile-upload packages are not
-supported.
+Packaging refuses dirty tracked files, tests, runtime data, credential-like
+paths, unsupported old entrypoints, and oversized/unsafe archive contents. Each
+ZIP includes a `RELEASE-MANIFEST.json` and a `.zip.sha256` sidecar.
 
-## Deployment
+## Local Cloud Access with ngrok
 
-Use `Start-FAB.ps1` for the supported Windows runtime or the repository's three-service Docker Compose stack for container deployment. Optional supervised Windows cloud access uses `Start-FAB-Ngrok.cmd` and `Stop-FAB-Ngrok.cmd`; it exposes only the authenticated API/HAI surface, keeps the dashboard local, and refuses to reuse or stop another project's endpoint. FAB must remain on loopback or behind private networking, TLS, an authenticated reverse proxy, and a managed secret store. Unauthenticated Cloud Function deployment is not supported for financial data. See `docs/deployment_guide.md` and `docs/local_windows_ngrok_setup.md` for the verified procedures and acceptance boundaries.
+FAB can expose only the authenticated API/HAI surface through managed ngrok.
+The operator dashboard stays local.
+
+```powershell
+.\Start-FAB-Ngrok.cmd
+```
+
+If another ngrok endpoint is already online, FAB refuses to pool, stop, or
+reuse it. Reserve a dedicated FAB endpoint and pass it explicitly:
+
+```powershell
+.\Start-FAB-Ngrok.cmd -Url https://your-reserved-endpoint.example
+```
+
+See [docs/local_windows_ngrok_setup.md](docs/local_windows_ngrok_setup.md).
+
+## Security and Privacy Model
+
+FAB processes high-risk financial evidence. Its defaults are designed to fail
+closed:
+
+- API and dashboard bind to loopback by default.
+- Non-loopback API access requires a strong bearer token.
+- The browser never receives the hidden API token.
+- Provider credentials are stored in ignored local files, encrypted local
+  settings, or environment variables.
+- Readiness, health, errors, logs, support bundles, and audit records redact
+  secrets and bound provider diagnostics.
+- Runtime leases prevent overlapping autonomous cycles and duplicate external
+  actions.
+- Export execution is separate from draft preparation and approval.
+- Emergency stop blocks new autonomous work until an operator clears it with
+  the exact confirmation flow.
+- Drive archival requires Wave transaction, field, and attachment evidence.
+- Maintenance mode disables normal mutations and HAI execution before restore.
+
+See [docs/SECURITY.md](docs/SECURITY.md) and
+[docs/security_approach.md](docs/security_approach.md).
+
+## Documentation Map
+
+- [docs/user_guide.md](docs/user_guide.md): operator guide.
+- [docs/OPERATOR_RUNBOOK.md](docs/OPERATOR_RUNBOOK.md): daily operation,
+  emergency stop, provider activation, diagnostics, recovery.
+- [docs/technical_reference.md](docs/technical_reference.md): module and data
+  flow reference.
+- [docs/API_USAGE_AUDIT.md](docs/API_USAGE_AUDIT.md): local API, web gateway,
+  provider API, and error-contract audit.
+- [docs/UI_ACTION_AUDIT.md](docs/UI_ACTION_AUDIT.md): dashboard action
+  inventory.
+- [docs/ACCEPTANCE_TESTS.md](docs/ACCEPTANCE_TESTS.md): release acceptance
+  contract.
+- [docs/GOAL_COMPLETION_MATRIX.md](docs/GOAL_COMPLETION_MATRIX.md): implemented,
+  partial, blocked, and intentionally absent capabilities.
+- [docs/FINAL_VERIFICATION_REPORT.md](docs/FINAL_VERIFICATION_REPORT.md):
+  current verification evidence and provider-live blockers.
+- [docs/scanner_mailbox_migration.md](docs/scanner_mailbox_migration.md):
+  consolidation of repository 025 scan-to-folder behavior.
+- [docs/drive_wave_delivery.md](docs/drive_wave_delivery.md): high-assurance
+  Drive/Gmail source to Wave attachment delivery.
+- [docs/local_windows_ngrok_setup.md](docs/local_windows_ngrok_setup.md):
+  Windows and managed ngrok setup.
+- [docs/deployment_guide.md](docs/deployment_guide.md): deployment and
+  operations notes.
+- [docs/TECHNICAL_AUDIT.md](docs/TECHNICAL_AUDIT.md): technical audit and debt
+  record.
+
+## Repository Hygiene
+
+Before publishing changes:
+
+```powershell
+git status --short
+git diff --check
+python -m pytest -q -p no:cacheprovider -p no:stepwise
+pnpm.cmd --dir web check
+pnpm.cmd --dir web test
+pnpm.cmd --dir web build
+```
+
+Stage only intended files. Do not use broad staging commands when runtime data
+or credentials may exist locally.
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
-1.  Fork the repository.
-2.  Create a new branch (`git checkout -b feature/your-feature-name`).
-3.  Make your changes.
-4.  Write and run tests.
-5.  Commit your changes (`git commit -m 'Add new feature'`).
-6.  Push to the branch (`git push origin feature/your-feature-name`).
-7.  Create a new Pull Request.
+1. Create a feature branch.
+2. Keep changes scoped to the affected runtime, module, or documentation area.
+3. Add or update tests for behavior changes.
+4. Preserve fail-closed provider behavior and truthful capability states.
+5. Run the verification commands above.
+6. Open a pull request with clear local, CI, browser, packaging, and provider
+   acceptance evidence where relevant.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details (if applicable).
+`web/package.json` declares the web package as MIT, but this repository does
+not currently contain a repository-level `LICENSE` file. Treat the repository
+license as unset until a top-level license file is added.
 
-## Contact
+## Support
 
-For operational support, use the sanitized support bundle from the FAB dashboard and the repository's configured support channel.
+For operational support, generate a sanitized support bundle from the FAB
+dashboard or with:
 
+```powershell
+python -m src.run_fab_doctor --support-bundle
+```
 
+Review the bundle before sharing. It is designed to exclude source documents,
+OCR text, financial identifiers, local paths, credential values, and tokens.
